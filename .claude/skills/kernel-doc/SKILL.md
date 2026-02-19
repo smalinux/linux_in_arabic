@@ -1,8 +1,7 @@
 ---
 name: kernel-doc
 description: "Translate & document a Linux kernel source file in Arabic (ELI5 style) with 7 comprehensive phases"
-user_invocable: true
-argument: "path to kernel file(s) relative to ./external/linux (e.g. drivers/clk/clk.c)"
+argument-hint: "path/to/kernel/file.c (relative to ./external/linux)"
 ---
 
 # Linux Kernel Arabic Documentation Skill
@@ -49,9 +48,9 @@ Execute ALL phases sequentially. Each phase is a major section (`## Phase N`) in
 ### Phase 1 — File Header & Context
 
 ```markdown
-# شرح ملف `[filename]`
-> **المسار**: `[full path relative to external/linux]`
-> **الـ Subsystem**: [subsystem name]
+# `[filename]`
+> **PATH**: `[full path relative to external/linux]`
+> **Subsystem**: [subsystem name]
 > **الوظيفة الأساسية**: [one-line summary in Arabic]
 ```
 
@@ -85,13 +84,7 @@ Execute ALL phases sequentially. Each phase is a major section (`## Phase N`) in
   - Its purpose in Arabic
   - Its key fields explained
   - How it connects to other structs
-- Draw **relationship diagrams** showing how structs point to each other:
-  ```
-  struct A
-    ├── .parent → struct B
-    ├── .ops → struct C (vtable)
-    └── .children → list of struct A
-  ```
+- Draw **markdown diagrams** showing how structs point to each other
 - Draw **lifecycle diagrams** showing creation → registration → usage → teardown.
 - Draw **call flow diagrams** showing how a typical operation flows through the code:
   ```

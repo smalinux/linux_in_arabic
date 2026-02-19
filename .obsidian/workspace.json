@@ -27,12 +27,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "prompt.md",
+                "file": "include/linux/clk-provider.h.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "prompt"
+              "title": "clk-provider.h"
             }
           },
           {
@@ -185,13 +185,13 @@
             "state": {
               "type": "outline",
               "state": {
-                "file": "prompt.md",
+                "file": "include/linux/clk-provider.h.md",
                 "followCursor": false,
                 "showSearch": false,
                 "searchQuery": ""
               },
               "icon": "lucide-list",
-              "title": "Outline of prompt"
+              "title": "Outline of clk-provider.h"
             }
           }
         ],
@@ -214,17 +214,20 @@
   },
   "active": "6c1f4d9daaca3232",
   "lastOpenFiles": [
+    "include/linux/clkdev.h.md",
+    "include/linux/clkdev.h.md.tmp.312149.1771479019554",
+    "drivers/clk/clkdev.c.md",
+    "drivers/clk/clkdev.c.md.tmp.312149.1771478932628",
+    "drivers/clk",
+    "drivers",
+    "prompt.md",
+    "include/linux/clk-provider.h.md",
+    "include/linux/clk-provider.h.md.tmp.308703.1771478446541",
+    "include/linux",
+    "include",
     "external/linux/Documentation/devicetree/bindings/usb/xlnx,usb2.yaml",
     "external/linux/Documentation/devicetree/bindings/usb/willsemi,wusb3801.yaml",
     "external/linux/Documentation/devicetree/bindings/usb/wch,ch334.yaml",
-    "external/linux/Documentation/devicetree/bindings/usb/vialab,vl817.yaml",
-    "external/linux/Documentation/devicetree/bindings/usb/ux500-usb.txt",
-    "external/linux/Documentation/devicetree/bindings/usb/usb4604.txt",
-    "external/linux/Documentation/devicetree/bindings/usb/usb251xb.yaml",
-    "external/linux/Documentation/devicetree/bindings/usb/usb.yaml",
-    "external/linux/Documentation/devicetree/bindings/usb/usb-xhci.yaml",
-    "external/linux/Documentation/devicetree/bindings/usb/usb-uhci.yaml",
-    "external/linux/Documentation/devicetree/bindings/usb/usb-switch.yaml",
     "external/linux/Documentation/dev-tools/kunit/kunit_suitememorydiagram.svg",
     "external/linux/Documentation/arch/x86/suspend.svg",
     "external/linux/Documentation/arch/x86/resume.svg",
@@ -236,7 +239,6 @@
     "external/linux/Documentation/RCU/Design/Memory-Ordering/TreeRCU-qs.svg",
     "external/linux/Documentation/RCU/Design/Memory-Ordering/TreeRCU-hotplug.svg",
     "resources.md",
-    "prompt.md",
     "sub/pinctrl/pin-control.rst.md",
     "sub/pinctrl/pinconf.h.md",
     "sub/pinctrl/pinctrl.h.md",
