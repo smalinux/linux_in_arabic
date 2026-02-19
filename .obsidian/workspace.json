@@ -27,12 +27,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "sub/pinctrl/pinconf.h.md",
+                "file": "prompt.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "pinconf.h"
+              "title": "prompt"
             }
           },
           {
@@ -123,7 +123,7 @@
             "state": {
               "type": "backlink",
               "state": {
-                "file": "sub/pinctrl/pinconf.h.md",
+                "file": "prompt.md",
                 "collapseAll": true,
                 "extraContext": false,
                 "sortOrder": "alphabetical",
@@ -133,7 +133,7 @@
                 "unlinkedCollapsed": true
               },
               "icon": "links-coming-in",
-              "title": "Backlinks for pinconf.h"
+              "title": "Backlinks for prompt"
             }
           },
           {
@@ -142,12 +142,12 @@
             "state": {
               "type": "outgoing-link",
               "state": {
-                "file": "sub/pinctrl/pinconf.h.md",
+                "file": "prompt.md",
                 "linksCollapsed": false,
                 "unlinkedCollapsed": true
               },
               "icon": "links-going-out",
-              "title": "Outgoing links from pinconf.h"
+              "title": "Outgoing links from prompt"
             }
           },
           {
@@ -185,13 +185,13 @@
             "state": {
               "type": "outline",
               "state": {
-                "file": "sub/pinctrl/pinconf.h.md",
+                "file": "prompt.md",
                 "followCursor": false,
                 "showSearch": false,
                 "searchQuery": ""
               },
               "icon": "lucide-list",
-              "title": "Outline of pinconf.h"
+              "title": "Outline of prompt"
             }
           }
         ],
@@ -214,6 +214,31 @@
   },
   "active": "6c1f4d9daaca3232",
   "lastOpenFiles": [
+    "external/linux/Documentation/devicetree/bindings/usb/xlnx,usb2.yaml",
+    "external/linux/Documentation/devicetree/bindings/usb/willsemi,wusb3801.yaml",
+    "external/linux/Documentation/devicetree/bindings/usb/wch,ch334.yaml",
+    "external/linux/Documentation/devicetree/bindings/usb/vialab,vl817.yaml",
+    "external/linux/Documentation/devicetree/bindings/usb/ux500-usb.txt",
+    "external/linux/Documentation/devicetree/bindings/usb/usb4604.txt",
+    "external/linux/Documentation/devicetree/bindings/usb/usb251xb.yaml",
+    "external/linux/Documentation/devicetree/bindings/usb/usb.yaml",
+    "external/linux/Documentation/devicetree/bindings/usb/usb-xhci.yaml",
+    "external/linux/Documentation/devicetree/bindings/usb/usb-uhci.yaml",
+    "external/linux/Documentation/devicetree/bindings/usb/usb-switch.yaml",
+    "external/linux/Documentation/dev-tools/kunit/kunit_suitememorydiagram.svg",
+    "external/linux/Documentation/arch/x86/suspend.svg",
+    "external/linux/Documentation/arch/x86/resume.svg",
+    "external/linux/Documentation/admin-guide/blockdev/drbd/DRBD-data-packets.svg",
+    "external/linux/Documentation/admin-guide/blockdev/drbd/DRBD-8.3-data-packets.svg",
+    "external/linux/Documentation/admin-guide/media/ipu6_isys_graph.svg",
+    "external/linux/Documentation/admin-guide/media/ipu3_rcb.svg",
+    "external/linux/Documentation/RCU/Design/Memory-Ordering/rcu_node-lock.svg",
+    "external/linux/Documentation/RCU/Design/Memory-Ordering/TreeRCU-qs.svg",
+    "external/linux/Documentation/RCU/Design/Memory-Ordering/TreeRCU-hotplug.svg",
+    "resources.md",
+    "prompt.md",
+    "sub/pinctrl/pin-control.rst.md",
+    "sub/pinctrl/pinconf.h.md",
     "sub/pinctrl/pinctrl.h.md",
     "sub/pinctrl/drivers_pinctrl_devicetree.c.md",
     "sub/pinctrl/pinmux.h.md",
@@ -224,25 +249,13 @@
     "sub/pinctrl/devinfo.h.md",
     "sub/pinctrl/machine.h.md",
     "sub/pinctrl/pinconf-generic.h.md",
-    "sub/pinctrl/pinconf.h.md",
     "sub/pinctrl/pinctrl-state.h.md",
-    "sub/pinctrl/pin-control.rst.md",
-    "prompt.md",
     "sub/pinctrl/consumer.h.md",
     "sub/pinctrl/main.md",
-    "sub/gpio",
     "README.md",
-    "sub/pinctrl",
-    "sub",
-    "resources.md",
     "TODO.md",
     "sub/clock/clk.md",
     "sub/devm/TODO.md",
-    "sub/clock/TODO.md",
-    "sub/devm",
-    "sub/assets",
-    "attachments",
-    "lwn",
-    "sub/clock"
+    "sub/clock/TODO.md"
   ]
 }

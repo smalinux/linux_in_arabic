@@ -1,0 +1,4 @@
+[submodule "external/linux"]
+	path = external/linux
+	url = https://github.com/torvalds/linux.git
+	branch = master

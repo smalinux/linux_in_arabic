@@ -2,4 +2,5 @@
 - linux commits messages
 - whole mailing lists
 - kernelnewbies
+- elinux.org
 - 
