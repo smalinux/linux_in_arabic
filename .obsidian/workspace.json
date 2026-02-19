@@ -48,9 +48,23 @@
               "icon": "lucide-file",
               "title": "prompt"
             }
+          },
+          {
+            "id": "87d8bfb909d07b5c",
+            "type": "leaf",
+            "state": {
+              "type": "markdown",
+              "state": {
+                "file": "include/linux/list.h.md",
+                "mode": "source",
+                "source": false
+              },
+              "icon": "lucide-file",
+              "title": "list.h"
+            }
           }
         ],
-        "currentTab": 1
+        "currentTab": 3
       }
     ],
     "direction": "vertical"
@@ -185,13 +199,13 @@
             "state": {
               "type": "outline",
               "state": {
-                "file": "include/linux/clk-provider.h.md",
+                "file": "include/linux/list.h.md",
                 "followCursor": false,
                 "showSearch": false,
                 "searchQuery": ""
               },
               "icon": "lucide-list",
-              "title": "Outline of clk-provider.h"
+              "title": "Outline of list.h"
             }
           }
         ],
@@ -212,8 +226,11 @@
       "bases:Create new base": false
     }
   },
-  "active": "6c1f4d9daaca3232",
+  "active": "87d8bfb909d07b5c",
   "lastOpenFiles": [
+    "include/linux/clk-provider.h.md",
+    "include/linux/list.h.md",
+    "include/linux/list.h.md.tmp.339502.1771535006432",
     "include/linux/clkdev.h.md",
     "include/linux/clkdev.h.md.tmp.312149.1771479019554",
     "drivers/clk/clkdev.c.md",
@@ -221,13 +238,11 @@
     "drivers/clk",
     "drivers",
     "prompt.md",
-    "include/linux/clk-provider.h.md",
     "include/linux/clk-provider.h.md.tmp.308703.1771478446541",
     "include/linux",
     "include",
     "external/linux/Documentation/devicetree/bindings/usb/xlnx,usb2.yaml",
     "external/linux/Documentation/devicetree/bindings/usb/willsemi,wusb3801.yaml",
-    "external/linux/Documentation/devicetree/bindings/usb/wch,ch334.yaml",
     "external/linux/Documentation/dev-tools/kunit/kunit_suitememorydiagram.svg",
     "external/linux/Documentation/arch/x86/suspend.svg",
     "external/linux/Documentation/arch/x86/resume.svg",
