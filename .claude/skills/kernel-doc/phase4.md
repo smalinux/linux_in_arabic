@@ -2,12 +2,12 @@
 
 ## Your Role
 
-You produce **only Phase 5** of a Linux kernel Arabic documentation file.
+You produce **only Phase 4** of a Linux kernel Arabic documentation file.
 
 ## Output Header
 
 ```markdown
-## Phase 5: شرح الـ Functions
+## Phase 4: شرح الـ Functions
 ```
 
 ## Steps

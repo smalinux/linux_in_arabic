@@ -80,5 +80,87 @@
       }
     },
     "expandedKeys": []
+  },
+  "drivers/tty/serial/meson_uart.c.md": {
+    "scroll": 0,
+    "cursor": {
+      "from": {
+        "line": 0,
+        "ch": 0
+      },
+      "to": {
+        "line": 0,
+        "ch": 0
+      }
+    },
+    "expandedKeys": [
+      "item-1-1",
+      "item-2-10",
+      "item-3-15",
+      "item-2-29",
+      "item-3-36",
+      "item-3-49",
+      "item-3-60",
+      "item-2-55",
+      "item-3-65",
+      "item-3-68",
+      "item-3-75",
+      "item-3-84",
+      "item-3-97",
+      "item-2-96",
+      "item-3-106",
+      "item-3-115",
+      "item-2-114",
+      "item-3-122",
+      "item-3-129",
+      "item-3-136",
+      "item-3-143",
+      "item-3-159",
+      "item-2-150",
+      "item-2-165",
+      "item-3-168"
+    ]
+  },
+  "TODO.md": {
+    "scroll": 0,
+    "cursor": {
+      "from": {
+        "line": 0,
+        "ch": 0
+      },
+      "to": {
+        "line": 0,
+        "ch": 0
+      }
+    },
+    "expandedKeys": []
+  },
+  "resources.md": {
+    "scroll": 0,
+    "cursor": {
+      "from": {
+        "line": 0,
+        "ch": 0
+      },
+      "to": {
+        "line": 0,
+        "ch": 0
+      }
+    },
+    "expandedKeys": []
+  },
+  "README.md": {
+    "scroll": 0,
+    "cursor": {
+      "from": {
+        "line": 2,
+        "ch": 2
+      },
+      "to": {
+        "line": 2,
+        "ch": 2
+      }
+    },
+    "expandedKeys": []
   }
 }
