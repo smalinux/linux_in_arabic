@@ -9,7 +9,7 @@
 
 ## Style
 
-- ELI5 — real-world analogies (factories, electricity, managers, workers).
+- ELI5 — real-world analogies.
 - Use markdown: headers, tables, code blocks (```c, ```bash), ASCII diagrams.
 - Bold key terms on first mention.
 - No artificial length limits — write as much as needed.
