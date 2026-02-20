@@ -3,7 +3,7 @@
 ## Language
 
 - **ALL prose**: Arabic — casual, ELI5, conversational.
-- **ALL technical terms**: English — struct names, function names, macros, subsystem names, kernel terms (spinlock, probe, devm, device tree).
+- **ALL technical terms**: English.
 - **Code blocks**: Original C with Arabic comments where helpful.
 - **Never** translate function/struct/macro names to Arabic.
 
@@ -14,6 +14,7 @@
 - Bold key terms on first mention.
 - No artificial length limits — write as much as needed.
 - No fluff — every sentence must add value.
+- RTL when mixing English with Arabic, for example starts the line with **الـ** to make the line RTL.
 
 ## Output Format
 

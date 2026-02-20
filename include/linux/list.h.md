@@ -2,7 +2,8 @@
 
 # `list.h`
 
-> **PATH**: `include/linux/list.h`
+
+> **PATH**: `include/linux/list.h`<br>
 > **Subsystem**: Core Kernel / Data Structures
 > **الوظيفة الأساسية**: تعريف القوائم المترابطة (Linked Lists) الدائرية المزدوجة اللي يستخدمها كل الـ kernel تقريباً لتنظيم البيانات.
 
