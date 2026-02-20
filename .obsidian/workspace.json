@@ -27,12 +27,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "include/linux/clk-provider.h.md",
+                "file": "prompt.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "clk-provider.h"
+              "title": "prompt"
             }
           },
           {
@@ -55,30 +55,16 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "prompt.md",
+                "file": "include/linux/list.h.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "prompt"
-            }
-          },
-          {
-            "id": "da809fe649268f4a",
-            "type": "leaf",
-            "state": {
-              "type": "markdown",
-              "state": {
-                "file": "include/linux/list.h.backup1.md",
-                "mode": "source",
-                "source": false
-              },
-              "icon": "lucide-file",
-              "title": "list.h.backup1"
+              "title": "list.h"
             }
           }
         ],
-        "currentTab": 4
+        "currentTab": 3
       }
     ],
     "direction": "vertical"
@@ -151,7 +137,7 @@
             "state": {
               "type": "backlink",
               "state": {
-                "file": "include/linux/list.h.backup1.md",
+                "file": "include/linux/list.h.md",
                 "collapseAll": true,
                 "extraContext": false,
                 "sortOrder": "alphabetical",
@@ -161,7 +147,7 @@
                 "unlinkedCollapsed": true
               },
               "icon": "links-coming-in",
-              "title": "Backlinks for list.h.backup1"
+              "title": "Backlinks for list.h"
             }
           },
           {
@@ -235,13 +221,14 @@
       "bases:Create new base": false
     }
   },
-  "active": "da809fe649268f4a",
+  "active": "87d8bfb909d07b5c",
   "lastOpenFiles": [
-    "include/linux/list.h.md",
-    "include/linux/list.h.md.tmp.410042.1771559991495",
+    "include/linux/clk-provider.h.md",
+    "include/linux/clk-provider.h.md.tmp.416533.1771562490382",
     "prompt.md",
     "include/linux/list.h.backup1.md",
-    "include/linux/clk-provider.h.md",
+    "include/linux/list.h.md",
+    "include/linux/list.h.md.tmp.410042.1771559991495",
     "include/linux/list.h.md.tmp.339502.1771535006432",
     "include/linux/clkdev.h.md",
     "include/linux/clkdev.h.md.tmp.312149.1771479019554",
@@ -252,7 +239,6 @@
     "include/linux/clk-provider.h.md.tmp.308703.1771478446541",
     "include/linux",
     "include",
-    "external/linux/Documentation/devicetree/bindings/usb/xlnx,usb2.yaml",
     "external/linux/Documentation/dev-tools/kunit/kunit_suitememorydiagram.svg",
     "external/linux/Documentation/arch/x86/suspend.svg",
     "external/linux/Documentation/arch/x86/resume.svg",
@@ -281,7 +267,6 @@
     "sub/pinctrl/main.md",
     "README.md",
     "TODO.md",
-    "sub/clock/clk.md",
-    "sub/devm/TODO.md"
+    "sub/clock/clk.md"
   ]
 }
