@@ -1,4 +1,4 @@
-# Phase 2 — Subsystem / Framework Overview (ELI5)
+# Phase 2 — Subsystem / Framework Overview
 
 ## Your Role
 
@@ -25,3 +25,5 @@ You produce **only Phase 2** of a Linux kernel Arabic documentation file.
 1. Explain & go deeper than **Phase 1**.
 2. Don't have be ELI5. Go deep into all important concepts behind why, the reasons.
 3. Explain all hard concepts in great details.
+4. Draw graphs to make sense how each struct fit together.
+5. Draw whenever needed.

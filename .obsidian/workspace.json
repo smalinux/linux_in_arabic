@@ -69,12 +69,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "include/linux/list.h.md",
+                "file": "include/linux/list.h.backup1.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "list.h"
+              "title": "list.h.backup1"
             }
           }
         ],
@@ -151,7 +151,7 @@
             "state": {
               "type": "backlink",
               "state": {
-                "file": "prompt.md",
+                "file": "include/linux/list.h.backup1.md",
                 "collapseAll": true,
                 "extraContext": false,
                 "sortOrder": "alphabetical",
@@ -161,7 +161,7 @@
                 "unlinkedCollapsed": true
               },
               "icon": "links-coming-in",
-              "title": "Backlinks for prompt"
+              "title": "Backlinks for list.h.backup1"
             }
           },
           {
@@ -208,18 +208,13 @@
             }
           },
           {
-            "id": "6f679fb21b7dc6c5",
+            "id": "adb77ea3ae051b91",
             "type": "leaf",
             "state": {
-              "type": "outline",
-              "state": {
-                "file": "include/linux/list.h.md",
-                "followCursor": false,
-                "showSearch": false,
-                "searchQuery": ""
-              },
-              "icon": "lucide-list",
-              "title": "Outline of list.h"
+              "type": "quiet-outline",
+              "state": {},
+              "icon": "lines-of-text",
+              "title": "Quiet Outline"
             }
           }
         ],
@@ -227,7 +222,7 @@
       }
     ],
     "direction": "horizontal",
-    "width": 300
+    "width": 500.5
   },
   "left-ribbon": {
     "hiddenItems": {
@@ -242,8 +237,10 @@
   },
   "active": "da809fe649268f4a",
   "lastOpenFiles": [
-    "prompt.md",
     "include/linux/list.h.md",
+    "include/linux/list.h.md.tmp.410042.1771559991495",
+    "prompt.md",
+    "include/linux/list.h.backup1.md",
     "include/linux/clk-provider.h.md",
     "include/linux/list.h.md.tmp.339502.1771535006432",
     "include/linux/clkdev.h.md",
@@ -256,7 +253,6 @@
     "include/linux",
     "include",
     "external/linux/Documentation/devicetree/bindings/usb/xlnx,usb2.yaml",
-    "external/linux/Documentation/devicetree/bindings/usb/willsemi,wusb3801.yaml",
     "external/linux/Documentation/dev-tools/kunit/kunit_suitememorydiagram.svg",
     "external/linux/Documentation/arch/x86/suspend.svg",
     "external/linux/Documentation/arch/x86/resume.svg",
@@ -286,7 +282,6 @@
     "README.md",
     "TODO.md",
     "sub/clock/clk.md",
-    "sub/devm/TODO.md",
-    "sub/clock/TODO.md"
+    "sub/devm/TODO.md"
   ]
 }

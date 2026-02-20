@@ -12,7 +12,7 @@ You produce **only Phase 6** of a Linux kernel Arabic documentation file.
 
 ## Steps
 
-1. Provide **5 detailed real-life scenarios** where an embedded Linux engineer interacts with this code.
+1. Provide **5 detailed real-life scenarios** where an Linux engineer interacts with this code.
 2. Each scenario must include:
    - **العنوان** — Descriptive title
    - **السياق** — Real situation (board, product, what went wrong)
@@ -26,4 +26,3 @@ You produce **only Phase 6** of a Linux kernel Arabic documentation file.
 - Use **real SoC names**: RK3562, STM32MP1, i.MX8, AM62x, Allwinner H616.
 - Use **real peripherals**: UART, SPI, I2C, USB, HDMI.
 - Use **real product contexts**: industrial gateway, Android TV box, IoT sensor, automotive ECU, custom board bring-up.
-- Each scenario must reference **specific functions or structs** from the source file.

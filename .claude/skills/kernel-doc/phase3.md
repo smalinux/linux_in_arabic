@@ -12,6 +12,7 @@ You produce **only Phase 3** of a Linux kernel Arabic documentation file.
 
 ## Steps
 
+0. Summarize **every important flags, enums, config options** in tables. write cheatsheet style.
 1. List **every important struct** in the file:
    - Purpose in Arabic
    - Key fields explained
@@ -26,5 +27,3 @@ You produce **only Phase 3** of a Linux kernel Arabic documentation file.
          → hardware register
    ```
 5. Explain **locking strategy** (which locks protect what, lock ordering).
-6. Explain **reference counting** if present.
-7. Summarize **flags, enums, config options** in tables.

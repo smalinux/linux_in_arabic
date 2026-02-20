@@ -19,5 +19,7 @@
 ## Output Format
 
 - Return **raw markdown only** — no file paths, no wrapper text.
-- Start directly with the phase header (`## Phase N: ...`).
+- Start directly+ with the phase header (`## Phase N: ...`).
+- Phase title → `##`
+- Any sub-section inside a phase → `###` or `####`
 - End cleanly — no trailing commentary.

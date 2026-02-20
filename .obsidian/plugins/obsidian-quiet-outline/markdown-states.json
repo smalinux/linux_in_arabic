@@ -1,0 +1,48 @@
+{
+  "include/linux/list.h.md": {
+    "scroll": 0,
+    "cursor": {
+      "from": {
+        "line": 1688,
+        "ch": 0
+      },
+      "to": {
+        "line": 1688,
+        "ch": 0
+      }
+    },
+    "expandedKeys": [
+      "item-1-1",
+      "item-2-28",
+      "item-2-63",
+      "item-2-65",
+      "item-2-69",
+      "item-2-103",
+      "item-3-13",
+      "item-2-8"
+    ]
+  },
+  "include/linux/list.h.backup1.md": {
+    "scroll": 966.7845052083334,
+    "cursor": {
+      "from": {
+        "line": 869,
+        "ch": 0
+      },
+      "to": {
+        "line": 869,
+        "ch": 0
+      }
+    },
+    "expandedKeys": [
+      "item-1-1",
+      "item-2-63",
+      "item-2-65",
+      "item-2-69",
+      "item-2-103",
+      "item-3-13",
+      "item-2-48",
+      "item-2-54"
+    ]
+  }
+}
