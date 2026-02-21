@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "drivers/tty/serial/meson_uart.c.md",
+                "file": "README.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "meson_uart.c"
+              "title": "README"
             }
           }
         ]
@@ -94,7 +94,7 @@
             "state": {
               "type": "backlink",
               "state": {
-                "file": "drivers/tty/serial/meson_uart.c.md",
+                "file": "README.md",
                 "collapseAll": true,
                 "extraContext": false,
                 "sortOrder": "alphabetical",
@@ -104,7 +104,7 @@
                 "unlinkedCollapsed": true
               },
               "icon": "links-coming-in",
-              "title": "Backlinks for meson_uart.c"
+              "title": "Backlinks for README"
             }
           },
           {
@@ -180,10 +180,12 @@
   },
   "active": "87d8bfb909d07b5c",
   "lastOpenFiles": [
+    "include/linux/mfd/syscon.h.md",
+    "include/linux/mfd",
+    "drivers/tty/serial/meson_uart.c.md",
     "README.md",
     "resources.md",
     "TODO.md",
-    "drivers/tty/serial/meson_uart.c.md",
     "include/linux/list.h.md",
     "drivers/tty/serial",
     "drivers/tty",
@@ -200,7 +202,6 @@
     "drivers/clk/clkdev.c.md",
     "drivers/clk/clkdev.c.md.tmp.312149.1771478932628",
     "drivers/clk",
-    "drivers",
     "external/linux/Documentation/dev-tools/kunit/kunit_suitememorydiagram.svg",
     "external/linux/Documentation/arch/x86/suspend.svg",
     "external/linux/Documentation/arch/x86/resume.svg",
@@ -224,7 +225,6 @@
     "old/pinctrl/machine.h.md",
     "old/pinctrl/pinconf-generic.h.md",
     "old/pinctrl/pinctrl-state.h.md",
-    "old/pinctrl/consumer.h.md",
-    "old/pinctrl/main.md"
+    "old/pinctrl/consumer.h.md"
   ]
 }
