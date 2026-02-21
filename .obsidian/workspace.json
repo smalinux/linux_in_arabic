@@ -178,12 +178,19 @@
       "bases:Create new base": false
     }
   },
-  "active": "87d8bfb909d07b5c",
+  "active": "adb77ea3ae051b91",
   "lastOpenFiles": [
+    "include/linux/clk.h.md",
+    "README.md",
+    "include/linux/clk-provider.h.md",
+    "include/linux/sh_clk.h.md",
+    "include/linux/of_clk.h.md",
+    "old/clock/clk.md",
+    "old/clock/TODO.md",
+    "Untitled.md",
     "include/linux/mfd/syscon.h.md",
     "include/linux/mfd",
     "drivers/tty/serial/meson_uart.c.md",
-    "README.md",
     "resources.md",
     "TODO.md",
     "include/linux/list.h.md",
@@ -191,7 +198,6 @@
     "drivers/tty",
     "include/linux/bitmap.h.md",
     "include/linux/bitmap.h.md.tmp.531031.1771607440678",
-    "include/linux/clk-provider.h.md",
     "include/linux/clk-provider.h.md.tmp.416533.1771562490382",
     "prompt.md",
     "include/linux/list.h.backup1.md",
@@ -219,12 +225,6 @@
     "old/pinctrl/pinmux.h.md",
     "old/pinctrl/pinctrl-single.c.md",
     "old/pinctrl/drivers_pinctrl_meson_pinctrl-meson.c.md",
-    "old/pinctrl/README.md",
-    "old/pinctrl/include_dt-bindings_pinctrl_omap.h.md",
-    "old/pinctrl/devinfo.h.md",
-    "old/pinctrl/machine.h.md",
-    "old/pinctrl/pinconf-generic.h.md",
-    "old/pinctrl/pinctrl-state.h.md",
-    "old/pinctrl/consumer.h.md"
+    "old/pinctrl/README.md"
   ]
 }
