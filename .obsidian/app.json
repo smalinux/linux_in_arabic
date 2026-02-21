@@ -2,5 +2,6 @@
   "alwaysUpdateLinks": true,
   "showUnsupportedFiles": false,
   "uriCallbacks": false,
-  "useMarkdownLinks": true
+  "useMarkdownLinks": true,
+  "newLinkFormat": "relative"
 }
