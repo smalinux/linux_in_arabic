@@ -13,6 +13,5 @@ $ code
 
 - [ ] [clk](clk.md) -clk framework
 - [ ] 
-- [ ] include/linux/mfd/syscon.h
 - [ ] [syscon.h](include/linux/mfd/syscon.h.md)
 - [ ] 
