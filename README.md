@@ -21,4 +21,19 @@ $ claude --dangerously-skip-permissions
 	- [ ] [clkdev.h](include/linux/clkdev.h.md) - [clkdev.c](drivers/clk/clkdev.c.md)
 - [ ] [syscon.h](include/linux/mfd/syscon.h.md)
 - [ ] [auxiliary_bus.h](include/linux/auxiliary_bus.h.md) - [auxiliary.c](drivers/base/auxiliary.c.md)
+
+
+
+# TODO
+- [ ] https://docs.kernel.org/core-api/kernel-api.html
+- [ ] Linux notifications subsystem: include/linux/notifier.h  
 - [ ] 
+
+- [ ] https://docs.kernel.org/core-api/index.html
+- [ ] https://origin.kernel.org/doc/html/latest/driver-api/driver-model/
+
+- [ ] lwn
+- [ ] linux commits messages
+- [ ] whole mailing lists
+- [ ] kernelnewbies
+- [ ] elinux.org

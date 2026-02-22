@@ -125,11 +125,11 @@
     "scroll": 0,
     "cursor": {
       "from": {
-        "line": 0,
-        "ch": 0
+        "line": 2,
+        "ch": 26
       },
       "to": {
-        "line": 0,
+        "line": 1,
         "ch": 0
       }
     },
@@ -139,8 +139,8 @@
     "scroll": 0,
     "cursor": {
       "from": {
-        "line": 0,
-        "ch": 0
+        "line": 4,
+        "ch": 12
       },
       "to": {
         "line": 0,
@@ -150,15 +150,15 @@
     "expandedKeys": []
   },
   "README.md": {
-    "scroll": 0,
+    "scroll": 17.829383886255926,
     "cursor": {
       "from": {
-        "line": 23,
-        "ch": 6
+        "line": 38,
+        "ch": 16
       },
       "to": {
-        "line": 23,
-        "ch": 6
+        "line": 38,
+        "ch": 16
       }
     },
     "expandedKeys": []
