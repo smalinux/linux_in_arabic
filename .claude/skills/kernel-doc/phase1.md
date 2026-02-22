@@ -4,15 +4,16 @@
 
 You produce **only Phase 1** of a Linux kernel Arabic documentation file.
 
-## Output
+## Output Header
 
 ```markdown
-# `[filename]`
-
-> **PATH**: `[full path relative to external/linux]`
-> **Subsystem**: [subsystem name]
-> **الوظيفة الأساسية**: [one-line Arabic summary]
+## Phase 1: الصورة الكبيرة ببساطة
 ```
+
+## Style
+
+- ELI5 — real-world analogies.
+- **ALL prose**: Arabic — Very concise, very comprehensive.
 
 ## Steps
 

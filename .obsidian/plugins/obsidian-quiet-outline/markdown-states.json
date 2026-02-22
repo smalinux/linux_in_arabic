@@ -150,18 +150,20 @@
     "expandedKeys": []
   },
   "README.md": {
-    "scroll": 17.829383886255926,
+    "scroll": 6.142857142857143,
     "cursor": {
       "from": {
-        "line": 38,
-        "ch": 16
+        "line": 29,
+        "ch": 0
       },
       "to": {
-        "line": 38,
-        "ch": 16
+        "line": 29,
+        "ch": 0
       }
     },
-    "expandedKeys": []
+    "expandedKeys": [
+      "item-2-0"
+    ]
   },
   "Untitled.md": {
     "scroll": 0,
@@ -232,5 +234,88 @@
       }
     },
     "expandedKeys": []
+  },
+  "include/linux/auxiliary_bus.h.md": {
+    "scroll": 1117.2239583333333,
+    "cursor": {
+      "from": {
+        "line": 1128,
+        "ch": 0
+      },
+      "to": {
+        "line": 1128,
+        "ch": 0
+      }
+    },
+    "expandedKeys": [
+      "item-1-1",
+      "item-3-3",
+      "item-2-13",
+      "item-3-14",
+      "item-3-19",
+      "item-3-25",
+      "item-3-30",
+      "item-2-38",
+      "item-3-39",
+      "item-3-43",
+      "item-3-51",
+      "item-3-56",
+      "item-2-60",
+      "item-3-62",
+      "item-3-67",
+      "item-3-72",
+      "item-3-75",
+      "item-3-78",
+      "item-3-82",
+      "item-3-85",
+      "item-2-84"
+    ]
+  },
+  "include/linux/platform_device.h.md": {
+    "scroll": 0,
+    "cursor": {
+      "from": {
+        "line": 0,
+        "ch": 0
+      },
+      "to": {
+        "line": 0,
+        "ch": 0
+      }
+    },
+    "expandedKeys": [
+      "item-2-0",
+      "item-3-4",
+      "item-2-15",
+      "item-3-20",
+      "item-3-26",
+      "item-3-29",
+      "item-2-38",
+      "item-3-39",
+      "item-3-45",
+      "item-3-51",
+      "item-3-55",
+      "item-3-58",
+      "item-3-63",
+      "item-3-72",
+      "item-2-71",
+      "item-3-79",
+      "item-3-98",
+      "item-3-114",
+      "item-3-130",
+      "item-2-129",
+      "item-3-139",
+      "item-3-145",
+      "item-3-149",
+      "item-2-148",
+      "item-3-163",
+      "item-3-156",
+      "item-3-177",
+      "item-2-184",
+      "item-2-200",
+      "item-3-204",
+      "item-3-170",
+      "item-3-86"
+    ]
   }
 }

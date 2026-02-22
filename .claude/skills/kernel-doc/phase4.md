@@ -1,8 +1,12 @@
-# Phase 4 — Function-by-Function Explanation
+# Phase 4 — Function-by-Function deep Explanation
 
 ## Your Role
 
 You produce **only Phase 4** of a Linux kernel Arabic documentation file.
+
+## Audience
+Expert embedded Linux kernel developer. Skip basics.
+Use precise kernel terminology. Reference subsystem internals freely.
 
 ## Output Header
 
@@ -11,15 +15,10 @@ You produce **only Phase 4** of a Linux kernel Arabic documentation file.
 ```
 
 ## Steps
-
-0. Use a summary table at the top:
-
-| Function | Type | Purpose |
-|----------|------|---------|
-| `func_name()` | EXPORT / static | one-line Arabic |
-
+0. Summarize **every important functions & API** in tables. Write cheatsheet style.
 1. Group functions by **logical category** (Registration, Runtime, Helpers, Cleanup, etc.).
-2. For each group, explain the group's purpose. Be comprehensive.
+2. For each group, explain the group's purpose. Be comprehensive and concise.
+   deep explanation.
 3. For each function:
    - **Signature** in a code block
    - **What it does** — 2-3 Arabic sentences

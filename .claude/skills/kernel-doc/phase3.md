@@ -12,7 +12,7 @@ You produce **only Phase 3** of a Linux kernel Arabic documentation file.
 
 ## Steps
 
-0. Summarize **every important flags, enums, config options** in tables. write cheatsheet style.
+0. Summarize **every important flags, enums, config options** in tables. Write cheatsheet style.
 1. List **every important struct** in the file:
    - Purpose in Arabic
    - Key fields explained
