@@ -20,4 +20,5 @@ $ claude --dangerously-skip-permissions
 	- [ ] [sh_clk.h](include/linux/sh_clk.h.md)
 	- [ ] [clkdev.h](include/linux/clkdev.h.md) - [clkdev.c](drivers/clk/clkdev.c.md)
 - [ ] [syscon.h](include/linux/mfd/syscon.h.md)
+- [ ] [auxiliary_bus.h](include/linux/auxiliary_bus.h.md) - [auxiliary.c](drivers/base/auxiliary.c.md)
 - [ ] 

@@ -180,6 +180,9 @@
   },
   "active": "adb77ea3ae051b91",
   "lastOpenFiles": [
+    "include/linux/auxiliary_bus.h.md",
+    "drivers/base/auxiliary.c.md",
+    "drivers/base",
     "include/linux/clk.h.md",
     "README.md",
     "include/linux/clk-provider.h.md",
@@ -207,7 +210,6 @@
     "include/linux/clkdev.h.md.tmp.312149.1771479019554",
     "drivers/clk/clkdev.c.md",
     "drivers/clk/clkdev.c.md.tmp.312149.1771478932628",
-    "drivers/clk",
     "external/linux/Documentation/dev-tools/kunit/kunit_suitememorydiagram.svg",
     "external/linux/Documentation/arch/x86/suspend.svg",
     "external/linux/Documentation/arch/x86/resume.svg",
@@ -223,8 +225,6 @@
     "old/pinctrl/pinctrl.h.md",
     "old/pinctrl/drivers_pinctrl_devicetree.c.md",
     "old/pinctrl/pinmux.h.md",
-    "old/pinctrl/pinctrl-single.c.md",
-    "old/pinctrl/drivers_pinctrl_meson_pinctrl-meson.c.md",
-    "old/pinctrl/README.md"
+    "old/pinctrl/pinctrl-single.c.md"
   ]
 }
