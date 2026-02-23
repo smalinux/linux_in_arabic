@@ -222,6 +222,7 @@
   },
   "active": "87d8bfb909d07b5c",
   "lastOpenFiles": [
+    "include/linux/list.h.arabic.md",
     "include/linux/of_graph.h.md",
     "include/linux/of_irq.h.md",
     "include/linux/of_reserved_mem.h.md",
@@ -248,7 +249,6 @@
     "include/linux/clk.h.md",
     "include/linux/clk-provider.h.md",
     "include/linux/sh_clk.h.md",
-    "include/linux/of_clk.h.md",
     "include/linux/mfd",
     "drivers/tty/serial",
     "drivers/tty",
