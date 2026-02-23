@@ -2,7 +2,7 @@
 
 ## Language
 
-- **ALL prose**: Arabic — Very concise, very comprehensive.
+- **ALL prose**: Egyptian Arabic — Very concise, very comprehensive.
 - **ALL technical terms**: English.
 - **Code blocks**: Original C with Simple concise English comments where helpful.
 - **Never** translate function/struct/macro names to Arabic.
