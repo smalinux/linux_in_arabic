@@ -150,15 +150,15 @@
     "expandedKeys": []
   },
   "README.md": {
-    "scroll": 90.77799479166667,
+    "scroll": 137.03199404761904,
     "cursor": {
       "from": {
-        "line": 104,
-        "ch": 33
+        "line": 171,
+        "ch": 0
       },
       "to": {
-        "line": 104,
-        "ch": 3
+        "line": 171,
+        "ch": 0
       }
     },
     "expandedKeys": [
@@ -351,5 +351,19 @@
     "expandedKeys": [
       "item-2-0"
     ]
+  },
+  "ggggg.md": {
+    "scroll": 0,
+    "cursor": {
+      "from": {
+        "line": 0,
+        "ch": 0
+      },
+      "to": {
+        "line": 0,
+        "ch": 0
+      }
+    },
+    "expandedKeys": []
   }
 }

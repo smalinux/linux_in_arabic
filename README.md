@@ -113,29 +113,20 @@ K:	(devm_)?gpio_(request|free|direction|get|set)
 K:	GPIOD_FLAGS_BIT_NONEXCLUSIVE
 K:	devm_gpiod_unhinge
 ```
-```
-```
 
-- [ ] [[gpio.h]]
+- [ ] [gpio.h](include/linux/gpio.h.md)
 - [ ] [of_gpio.h](include/linux/of_gpio.h.md)
 - [ ] [aspeed.h](include/linux/aspeed.h.md)
 - [ ] [consumer.h](old/pinctrl/consumer.h.md)
 - [ ] [driver.h](include/linux/driver.h.md)
 - [ ] [machine.h](old/pinctrl/machine.h.md)
-- [ ] 
-aspeed.h
-consumer.h
-driver.h
-forwarder.h
-generic.h
-gpio-nomadik.h
-gpio-reg.h
-machine.h
-property.h
-regmap.h
-
-
-
+- [ ] [consumer.h](old/pinctrl/consumer.h.md)
+- [ ] [forwarder.h](include/linux/forwarder.h.md)
+- [ ] [generic.h](include/linux/generic.h.md)
+- [ ] [gpio-nomadik.h](include/linux/gpio-nomadik.h.md)
+- [ ] [gpio-reg.h](include/linux/gpio-reg.h.md)
+- [ ] [property.h](include/linux/property.h.md)
+- [ ] [regmap.h](include/linux/regmap.h.md)
 
 ## `I2C SUBSYSTEM`
 
@@ -179,7 +170,10 @@ F:	drivers/i2c/busses/
 F:	include/dt-bindings/i2c/
 ```
 
-
+- [ ] [include/dt-bindings/i2c/i2c.h](include/dt-bindings/i2c/i2c.h.md)
+- [ ] [i2c-dev.h](include/linux/i2c-dev.h.md)
+- [ ] [i2c-smbus.h](include/linux/i2c-smbus.h.md)
+- [ ] [include/linux/i2c.h](include/linux/i2c.h.md)
 ## `SPI SUBSYSTEM`
 
 ```
@@ -197,6 +191,13 @@ F:	include/uapi/linux/spi/
 F:	tools/spi/
 ```
 
+- [ ] [ad7877.h](include/linux/spi/ad7877.h.md)
+- [ ] [eeprom.h](include/linux/spi/eeprom.h.md)
+- [ ] [flash.h](include/linux/spi/flash.h.md)
+- [ ] [mmc_spi.h](include/linux/spi/mmc_spi.h.md)
+- [ ] [spi_gpio.h](include/linux/spi/spi_gpio.h.md)
+- [ ] [spi.h](include/linux/spi/spi.h.md)
+- [ ] [spi-mem.h](include/linux/spi/spi-mem.h.md)
 
 ## `IRQ SUBSYSTEM`
 
@@ -213,6 +214,7 @@ F:	include/linux/irqreturn.h
 F:	kernel/irq/
 F:	lib/group_cpus.c
 ```
+
 
 
 ## `PCI SUBSYSTEM`
