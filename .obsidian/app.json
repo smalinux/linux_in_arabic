@@ -3,5 +3,6 @@
   "showUnsupportedFiles": false,
   "uriCallbacks": false,
   "useMarkdownLinks": true,
-  "newLinkFormat": "relative"
+  "newLinkFormat": "relative",
+  "attachmentFolderPath": "assets"
 }

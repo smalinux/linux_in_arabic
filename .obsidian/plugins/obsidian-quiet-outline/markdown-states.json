@@ -170,11 +170,11 @@
     "cursor": {
       "from": {
         "line": 0,
-        "ch": 0
+        "ch": 47
       },
       "to": {
         "line": 0,
-        "ch": 0
+        "ch": 47
       }
     },
     "expandedKeys": []
@@ -361,6 +361,20 @@
       },
       "to": {
         "line": 0,
+        "ch": 0
+      }
+    },
+    "expandedKeys": []
+  },
+  "books.md": {
+    "scroll": 0,
+    "cursor": {
+      "from": {
+        "line": 1,
+        "ch": 0
+      },
+      "to": {
+        "line": 1,
         "ch": 0
       }
     },

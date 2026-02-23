@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "README.md",
+                "file": "books.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "README"
+              "title": "books"
             }
           }
         ]
@@ -94,7 +94,7 @@
             "state": {
               "type": "backlink",
               "state": {
-                "file": "README.md",
+                "file": "books.md",
                 "collapseAll": true,
                 "extraContext": false,
                 "sortOrder": "alphabetical",
@@ -104,7 +104,7 @@
                 "unlinkedCollapsed": true
               },
               "icon": "links-coming-in",
-              "title": "Backlinks for README"
+              "title": "Backlinks for books"
             }
           },
           {
@@ -180,6 +180,12 @@
   },
   "active": "87d8bfb909d07b5c",
   "lastOpenFiles": [
+    "assets/Pasted image 20260223223812.png",
+    "Pasted image 20260223223716.png",
+    "assets",
+    "Pasted image 20260223223642.png",
+    "README.md",
+    "books.md",
     "include/linux/i2c-smbus.h.md",
     "include/linux/i2c-dev.h.md",
     "include/dt-bindings/i2c/i2c.h.md",
@@ -194,7 +200,6 @@
     "include/linux/spi/eeprom.h.md",
     "include/linux/spi",
     "ggggg.md",
-    "README.md",
     "include/linux/consumer.h.md",
     "include/linux/gpio-nomadik.h.md",
     "include/linux/generic.h.md",
@@ -207,15 +212,12 @@
     "include/linux/of_gpio.h.md",
     "include/linux/driver.h.md",
     "include/linux/aspeed.h.md",
-    "include/linux/platform_device.h.md",
-    "include/linux/auxiliary_bus.h.md",
     "drivers/base",
     "include/linux/mfd",
     "drivers/tty/serial",
     "drivers/tty",
     "include/linux/bitmap.h.md.tmp.531031.1771607440678",
     "include/linux/clk-provider.h.md.tmp.416533.1771562490382",
-    "include/linux/list.h.md.tmp.410042.1771559991495",
     "external/linux/Documentation/dev-tools/kunit/kunit_suitememorydiagram.svg",
     "external/linux/Documentation/arch/x86/suspend.svg",
     "external/linux/Documentation/arch/x86/resume.svg",
@@ -223,8 +225,6 @@
     "external/linux/Documentation/admin-guide/blockdev/drbd/DRBD-8.3-data-packets.svg",
     "external/linux/Documentation/admin-guide/media/ipu6_isys_graph.svg",
     "external/linux/Documentation/admin-guide/media/ipu3_rcb.svg",
-    "external/linux/Documentation/RCU/Design/Memory-Ordering/rcu_node-lock.svg",
-    "external/linux/Documentation/RCU/Design/Memory-Ordering/TreeRCU-qs.svg",
-    "external/linux/Documentation/RCU/Design/Memory-Ordering/TreeRCU-hotplug.svg"
+    "external/linux/Documentation/RCU/Design/Memory-Ordering/rcu_node-lock.svg"
   ]
 }
