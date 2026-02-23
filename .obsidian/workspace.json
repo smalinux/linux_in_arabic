@@ -20,48 +20,6 @@
               "icon": "lucide-file",
               "title": "README"
             }
-          },
-          {
-            "id": "972509da3307ffc1",
-            "type": "leaf",
-            "state": {
-              "type": "markdown",
-              "state": {
-                "file": "include/linux/platform_device.h.md",
-                "mode": "source",
-                "source": false
-              },
-              "icon": "lucide-file",
-              "title": "platform_device.h"
-            }
-          },
-          {
-            "id": "f9e97195e7815be5",
-            "type": "leaf",
-            "state": {
-              "type": "markdown",
-              "state": {
-                "file": "include/linux/auxiliary_bus.h.md",
-                "mode": "source",
-                "source": false
-              },
-              "icon": "lucide-file",
-              "title": "auxiliary_bus.h"
-            }
-          },
-          {
-            "id": "da14273735090098",
-            "type": "leaf",
-            "state": {
-              "type": "markdown",
-              "state": {
-                "file": "README.md",
-                "mode": "source",
-                "source": false
-              },
-              "icon": "lucide-file",
-              "title": "README"
-            }
           }
         ]
       }
@@ -222,7 +180,13 @@
   },
   "active": "87d8bfb909d07b5c",
   "lastOpenFiles": [
-    "include/linux/list.h.arabic.md",
+    "include/linux/of_gpio.h.md",
+    "README.md",
+    "include/linux/driver.h.md",
+    "include/linux/aspeed.h.md",
+    "include/linux/platform_device.h.md",
+    "include/linux/auxiliary_bus.h.md",
+    "include/linux/list.h.md",
     "include/linux/of_graph.h.md",
     "include/linux/of_irq.h.md",
     "include/linux/of_reserved_mem.h.md",
@@ -234,21 +198,15 @@
     "include/linux/of_platform.h.md",
     "external/linux/include/linux/of_mdio.h.md",
     "include/linux/of_iommu.h.md",
-    "include/linux/of_gpio.h.md",
     "include/linux/of_pdt.h.md",
     "external/linux/include/linux/of_net.h.md",
     "include/linux/of_dma.h.md",
     "include/linux/of.h.md",
-    "include/linux/platform_device.h.md",
-    "README.md",
-    "include/linux/auxiliary_bus.h.md",
     "resources.md",
     "TODO.md",
     "drivers/base/auxiliary.c.md",
     "drivers/base",
     "include/linux/clk.h.md",
-    "include/linux/clk-provider.h.md",
-    "include/linux/sh_clk.h.md",
     "include/linux/mfd",
     "drivers/tty/serial",
     "drivers/tty",

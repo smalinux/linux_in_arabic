@@ -150,15 +150,15 @@
     "expandedKeys": []
   },
   "README.md": {
-    "scroll": 60.585565476190474,
+    "scroll": 90.77799479166667,
     "cursor": {
       "from": {
-        "line": 774,
-        "ch": 0
+        "line": 121,
+        "ch": 6
       },
       "to": {
-        "line": 774,
-        "ch": 0
+        "line": 121,
+        "ch": 6
       }
     },
     "expandedKeys": [
@@ -316,6 +316,40 @@
       "item-3-204",
       "item-3-170",
       "item-3-86"
+    ]
+  },
+  "include/linux/list.h.arabic.md": {
+    "scroll": 0,
+    "cursor": {
+      "from": {
+        "line": 0,
+        "ch": 0
+      },
+      "to": {
+        "line": 0,
+        "ch": 0
+      }
+    },
+    "expandedKeys": [
+      "item-2-0",
+      "item-3-6",
+      "item-2-15"
+    ]
+  },
+  "include/linux/of_gpio.h.md": {
+    "scroll": 24.610026041666668,
+    "cursor": {
+      "from": {
+        "line": 2399,
+        "ch": 0
+      },
+      "to": {
+        "line": 2399,
+        "ch": 0
+      }
+    },
+    "expandedKeys": [
+      "item-2-0"
     ]
   }
 }

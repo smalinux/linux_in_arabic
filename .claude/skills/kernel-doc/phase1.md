@@ -13,6 +13,7 @@ You produce **only Phase 1** of a Linux kernel Arabic documentation file.
 ## Style
 
 - ELI5 — real-world analogies.
+- First Explain the big picture of this file from theory side before any code.
 - **ALL prose**: Arabic — Very concise, very comprehensive.
 
 ## Steps

@@ -2,333 +2,674 @@
 
 ### ما هو هذا الملف؟
 
-الـ `include/linux/of_gpio.h` هو **header** صغير جداً — لا يتجاوز 38 سطراً — لكنه يمثل جسراً بين عالمَين داخل الـ Linux kernel:
-
-- عالم **Device Tree (OF = Open Firmware)**: الطريقة التي يصف بها الـ hardware نفسه للـ kernel عبر ملفات `.dts`.
-- عالم **GPIO API**: الطريقة التي يتحكم بها الـ kernel في أطراف الـ GPIO (أطراف إدخال/إخراج رقمية عامة).
+**`include/linux/of_gpio.h`** هو header بسيط جداً — بالكاد فيه سطور — لكنه يمثل نقطة وصل بين عالمين مهمين جداً في الـ Linux kernel: عالم **Open Firmware / Device Tree** وعالم **GPIO**.
 
 ---
 
-### القصة — لماذا هذا الجسر ضروري؟
+### الـ Subsystem
 
-تخيل أنك تبني جهازاً مدمجاً (embedded board) مثل Raspberry Pi. على هذا الجهاز عشرات أطراف الـ **GPIO** — بعضها يتحكم في LED، وبعضها يقرأ حالة زر ضغط.
+الملف جزء من **GPIO SUBSYSTEM**، تحت إشراف:
+- Linus Walleij
+- Bartosz Golaszewski
 
-الـ **bootloader** أو firmware يصف الـ hardware في ملف يسمى **Device Tree Blob (DTB)**:
+**الـ mailing list:** `linux-gpio@vger.kernel.org`
 
-```
-// مثال من ملف .dts
+---
+
+### قصة المشكلة — ELI5
+
+تخيل إنك بتبني جهاز embedded زي Raspberry Pi أو router. الجهاز ده فيه pins كتير — بعضها بيتحكم في LED، بعضها بيقرأ زرار، بعضها بيتكلم مع sensor. الـ pins دي اسمها **GPIO (General Purpose Input/Output)**.
+
+دلوقتي السؤال: **الـ kernel بيعرف إيه الـ pin رقم كام مثلاً؟ وبيعرف إيه إنه active-low ولا active-high؟**
+
+في الأيام القديمة — الـ kernel كان بيتعرف على التفاصيل دي من **hardcoded C code**. يعني كل بورد كان ليه `board_file.c` مكتوب فيه "الـ LED على GPIO 17". ده كان كارثة — أي تغيير في الـ hardware يحتاج تغيير في الـ kernel source وإعادة compile.
+
+الحل كان **Device Tree (DT)** — ملف نص خارجي (`.dts`) بيوصف الـ hardware. بدل ما تـhardcode في C، تكتب:
+
+```dts
 leds {
-    compatible = "gpio-leds";
     led-status {
-        gpios = <&gpio1 17 GPIO_ACTIVE_LOW>;  /* المتحكم gpio1، الطرف رقم 17 */
+        gpios = <&gpio1 17 GPIO_ACTIVE_LOW>;
     };
 };
 ```
 
-هنا `&gpio1` هو **phandle** — مؤشر إلى عقدة في شجرة الـ Device Tree. الرقم `17` هو رقم الطرف داخل ذلك المتحكم.
-
-الآن السؤال: كيف يقرأ **driver** الـ LED هذه المعلومات ويحصل على descriptor يستطيع به التحكم الفعلي في الطرف؟
-
-الجواب: عبر `of_get_named_gpio()` — الدالة الوحيدة التي يُصدّرها هذا الـ header.
+الـ kernel بيقرأ الملف ده عند الـ boot. لكن محتاج **bridge** بين الـ Device Tree parser وبين الـ GPIO API. ده بالظبط دور `of_gpio.h` — **OF** هنا اختصار **Open Firmware**، اللي هو الاسم التاريخي لنظام الـ Device Tree.
 
 ---
 
-### ما الذي يفعله `of_get_named_gpio()`؟
+### الهدف من الملف
 
-```c
-/*
- * np        : عقدة الجهاز في Device Tree (مثل عقدة leds)
- * list_name : اسم الخاصية في الـ DTS (مثل "gpios" أو "enable-gpio")
- * index     : الرقم التسلسلي إذا كانت الخاصية تحتوي عدة GPIOs
- *
- * الإرجاع: رقم GPIO عالمي (global GPIO number) أو قيمة سالبة عند الخطأ
- */
-extern int of_get_named_gpio(const struct device_node *np,
-                             const char *list_name, int index);
-```
-
-الدالة تمشي في شجرة الـ Device Tree، تقرأ الـ phandle، تحوّله إلى رقم GPIO حقيقي يمكن استخدامه مع الـ GPIO API التقليدي.
-
----
-
-### البنية الكاملة للنظام
-
-```
-Device Tree (.dts)
-      |
-      | (تحليل وقت الإقلاع)
-      v
-struct device_node   <-- تعريفه في include/linux/of.h
-      |
-      | of_get_named_gpio()
-      v
-رقم GPIO عالمي (integer)
-      |
-      | gpio_request() / gpio_direction_output() ...
-      v
-GPIO Hardware (pin على الـ SoC)
-```
-
----
-
-### الحالتان: مع أو بدون CONFIG_OF_GPIO
-
-الـ header يستخدم **compile-time guard** لدعم الأنظمة التي لا تحتوي على Device Tree:
-
-| الحالة | السلوك |
-|---|---|
-| `CONFIG_OF_GPIO=y` | الدالة الحقيقية تُربط من `drivers/gpio/gpiolib-of.c` |
-| `CONFIG_OF_GPIO=n` | stub inline تُرجع `-ENOSYS` حتى لا يفشل الـ build |
-
-هذا نمط شائع في الـ kernel: **graceful degradation** — الـ driver لا يعتمد بشكل صارم على الـ GPIO، فيُسمح له بالربط حتى على منصات بدون Device Tree.
-
----
-
-### ملاحظة مهمة: هذا الـ API قديم (Legacy)
-
-السطر 15 في الملف نفسه يقول:
-
-```c
-#include <linux/gpio.h>  /* FIXME: Shouldn't be here */
-```
-
-الـ `linux/gpio.h` نفسه يقول في أول سطوره:
-> "This is the LEGACY GPIO bulk include file ... should not be included in new code."
-
-الـ API الحديث هو `gpiod_get()` من `<linux/gpio/consumer.h>` — لكن `of_get_named_gpio()` لا تزال موجودة لدعم الـ drivers القديمة.
-
----
-
-### الملفات ذات الصلة التي يجب معرفتها
-
-| الملف | الدور |
-|---|---|
-| `include/linux/of_gpio.h` | **الـ header محل الدراسة** — الواجهة العامة |
-| `drivers/gpio/gpiolib-of.c` | التنفيذ الفعلي لـ `of_get_named_gpio()` وكل منطق ربط OF بالـ GPIO |
-| `drivers/gpio/gpiolib-of.h` | header داخلي لـ gpiolib-of.c |
-| `drivers/gpio/gpiolib.c` | النواة الأساسية لنظام GPIO في الـ kernel |
-| `include/linux/of.h` | تعريف `struct device_node` وكل دوال قراءة الـ Device Tree |
-| `include/linux/gpio/driver.h` | واجهة كتابة **driver** لمتحكم GPIO (`struct gpio_chip`) |
-| `include/linux/gpio/consumer.h` | الـ API الحديث للمستهلكين (بديل `of_get_named_gpio`) |
-| `include/linux/gpio.h` | الـ API القديم (legacy) — مشمول هنا بالخطأ |
-
----
-
-### الملفات المكوّنة للـ Subsystem (GPIO + OF)
-
-**Core:**
-- `drivers/gpio/gpiolib.c` — القلب النابض لنظام GPIO
-- `drivers/gpio/gpiolib-of.c` — ربط Device Tree بالـ GPIO
-
-**Headers:**
-- `include/linux/of_gpio.h` — الـ header محل الدراسة
-- `include/linux/gpio/driver.h` — واجهة الـ driver
-- `include/linux/gpio/consumer.h` — واجهة المستهلك الحديثة
-- `include/linux/of.h` — Device Tree types
-
-**Hardware Drivers (أمثلة):**
-- `drivers/gpio/gpio-mpc8xxx.c` — PowerPC
-- `drivers/gpio/gpio-pxa.c` — Intel PXA
-- `drivers/gpio/gpio-aspeed.c` — ASPEED BMC
-- `drivers/gpio/gpio-dwapb.c` — DesignWare APB GPIO
-## Phase 2: شرح الـ OF-GPIO Framework
-
----
-
-### المشكلة — لماذا يوجد هذا الـ Subsystem؟
-
-في الأنظمة المضمّنة المبنية على ARM، يحتوي الـ SoC على عشرات أو مئات من أطراف الـ GPIO موزّعة على عدة controllers. كل driver يحتاج GPIO يواجه سؤالاً أساسياً:
-
-> **كيف يعرف الـ driver أي GPIO بالضبط يجب أن يستخدم؟**
-
-قبل وجود Device Tree، كان الحل هو **hardcoding** أرقام الـ GPIO مباشرةً في كود الـ driver أو في بيانات الـ board file:
-
-```c
-/* الطريقة القديمة — hardcoded GPIO number في board file */
-static struct foo_platform_data bar_pdata = {
-    .reset_gpio = 42,   /* رقم عشوائي مرتبط بـ board معينة */
-    .power_gpio = 43,
-};
-```
-
-هذا النهج يكسر قاعدة أساسية في kernel: **driver يجب أن يصف السلوك، لا الهاردوير المحدد.** نفس الـ driver قد يعمل على boards مختلفة حيث نفس الوظيفة (reset, power, IRQ) متصلة بـ GPIO مختلف تماماً.
-
----
-
-### الحل — ماذا يفعل الـ OF-GPIO Framework؟
-
-**الـ OF** = **Open Firmware** — وهو المعيار الذي نشأ منه الـ Device Tree.
-
-الـ OF-GPIO framework يوفر **طبقة ترجمة** بين:
-- وصف الـ GPIO في الـ Device Tree (بيانات هاردوير، مستقلة عن الـ driver)
-- الـ GPIO API العامة في الكيرنل (`gpiod_get`, `gpio_request`, ...إلخ)
-
-بمعنى آخر: الـ framework يُجيب على السؤال — **"عند رؤية `reset-gpios = <&gpio1 5 GPIO_ACTIVE_LOW>` في الـ DTS، كيف أحوّل هذا إلى gpio descriptor حقيقي يمكن استخدامه؟"**
-
-الدالة المحورية التي يصدّرها هذا الهيدر هي:
+الملف بيعرّف دالة واحدة بس:
 
 ```c
 int of_get_named_gpio(const struct device_node *np,
                       const char *list_name, int index);
 ```
 
-هذه الدالة:
-1. تبحث عن property باسم `list_name` في الـ `device_node`
-2. تحلّل الـ phandle والـ specifier داخل تلك الـ property
-3. تترجمها إلى رقم GPIO عالمي (global GPIO number) داخل الـ kernel
+**الـ `device_node`** ده هو representation الـ node بتاع الـ Device Tree في الـ memory — يعني لما الـ kernel يقرأ الـ DTS، كل node بيتحول لـ `struct device_node`.
+
+**الوظيفة ببساطة:**
+> إديني node من الـ Device Tree + اسم الـ property + رقم index → أنا هارجعلك رقم الـ GPIO.
+
+مثال: driver بتاع LED يقول `of_get_named_gpio(np, "gpios", 0)` فيرجعله رقم GPIO 17 علشان يتعامل معاه.
 
 ---
 
-### تشبيه حقيقي — نظام العنونة البريدية
+### ليه الملف بسيط جداً؟
 
-تخيّل أن لديك شركة توصيل تعمل في مدن مختلفة. كل مدينة لها نظام ترقيم خاص بها للشوارع.
+لأن الـ implementation الحقيقية انتقلت من هنا لـ `drivers/gpio/gpiolib-of.c`. الـ header ده أصبح **legacy thin wrapper** — يعني موجود للـ backward compatibility مع الـ drivers القديمة اللي لسه بتستخدمه.
 
-| عنصر التشبيه | المقابل في الكيرنل |
+الـ modern API بقى في `include/linux/gpio/consumer.h` مع `devm_gpiod_get()` اللي أذكى وأأمن.
+
+---
+
+### الـ CONFIG_OF_GPIO Guard
+
+الملف بيستخدم compile-time guard:
+
+```c
+#ifdef CONFIG_OF_GPIO
+    // الـ real implementation
+    extern int of_get_named_gpio(...);
+#else
+    // stub بيرجع -ENOSYS
+    static inline int of_get_named_gpio(...) { return -ENOSYS; }
+#endif
+```
+
+ده يعني: لو الـ platform مش بتستخدم Device Tree (زي x86 القديم)، الـ drivers هتـlink تمام بس الـ function هترجع error بدل ما الـ build يفشل.
+
+---
+
+### الـ ASCII Diagram — كيف بتتفاعل الأجزاء
+
+```
+  Device Tree Source (.dts)
+         │
+         ▼
+  OF/DT Parser (drivers/of/)
+         │  device_node structs
+         ▼
+  of_get_named_gpio()          ← هنا include/linux/of_gpio.h
+  [gpiolib-of.c implementation]
+         │  GPIO number
+         ▼
+  GPIO Core API (gpiolib.c)
+         │
+         ▼
+  Hardware GPIO Controller Driver
+  (e.g., gpio-aspeed.c, gpio-pl061.c)
+         │
+         ▼
+  Physical GPIO Pin (LED, Button, etc.)
+```
+
+---
+
+### الملفات المرتبطة اللي المبرمج لازم يعرفها
+
+| الملف | الدور |
 |---|---|
-| رقم الشارع المحلي داخل المدينة | offset داخل `gpio_chip` (0..ngpio-1) |
-| اسم المدينة | اسم الـ `gpio_chip` / `device_node` |
-| العنوان الكامل = مدينة + شارع | Global GPIO number في الكيرنل |
-| دليل العناوين البريدي | الـ DTS property (`reset-gpios = <&gpio1 5 ...>`) |
-| موظف مكتب البريد الذي يترجم | `of_get_named_gpio()` + `of_xlate()` |
-| الشركة المركزية التي تفهم كل المدن | GPIO subsystem (gpiolib) |
-
-**التفاصيل:**
-- الـ `<&gpio1>` في الـ DTS يشير إلى `device_node` خاص — هذا هو "اسم المدينة"
-- الرقم `5` هو الـ offset داخل ذلك الـ chip — هذا هو "رقم الشارع المحلي"
-- `GPIO_ACTIVE_LOW` هي flags تصف كيفية استخدام الطرف — هذا مثل "الطابق الثالث"
-- `of_get_named_gpio()` تقرأ "العنوان" وتعيد رقماً عالمياً يفهمه كل الكيرنل
-
----
-
-### المعمارية الكاملة — أين يقع OF-GPIO في الكيرنل؟
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                   Driver Layer                          │
-│   (i2c-mux, regulators, leds, keys, spi-cs, ...etc)    │
-│                                                         │
-│   of_get_named_gpio(np, "reset-gpios", 0)               │
-│   gpiod_get(dev, "reset", GPIOD_OUT_LOW)                │
-└─────────────────────┬───────────────────────────────────┘
-                      │
-                      ▼
-┌─────────────────────────────────────────────────────────┐
-│              OF-GPIO Bridge Layer                       │
-│         (include/linux/of_gpio.h)                       │
-│                                                         │
-│  of_get_named_gpio()                                    │
-│    └─► of_get_named_gpio_flags()                        │
-│          └─► of_parse_phandle_with_args()   ← OF layer  │
-│                └─► gc->of_xlate()           ← per-chip  │
-└─────────────────────┬───────────────────────────────────┘
-                      │
-          ┌───────────┴────────────┐
-          ▼                        ▼
-┌──────────────────┐   ┌──────────────────────────────┐
-│   OF / DT Layer  │   │       GPIO Subsystem          │
-│  (linux/of.h)    │   │       (gpiolib)               │
-│                  │   │                               │
-│  device_node     │   │  gpio_chip  gpio_desc         │
-│  property        │   │  gpio_device                  │
-│  of_phandle_args │   │  gpiochip_add_data()          │
-└──────────────────┘   └──────────────┬───────────────┘
-                                       │
-                    ┌──────────────────┴──────────────┐
-                    ▼                                  ▼
-         ┌──────────────────┐              ┌──────────────────┐
-         │  SoC GPIO Driver │              │  I2C GPIO Expander│
-         │  (e.g. pl061,    │              │  (e.g. pca953x,  │
-         │   gpio-dwapb)    │              │   mcp23017)      │
-         │                  │              │                  │
-         │  struct gpio_chip│              │  struct gpio_chip│
-         │  .of_xlate = ... │              │  .of_xlate = ... │
-         │  .of_gpio_n_cells│              │  .can_sleep=true │
-         └──────────────────┘              └──────────────────┘
-```
+| `include/linux/of_gpio.h` | الـ header موضوع شرحنا (legacy OF GPIO API) |
+| `include/linux/gpio/consumer.h` | الـ modern GPIO consumer API (الأحدث والمفضل) |
+| `include/linux/gpio/driver.h` | الـ API بتاع كتابة GPIO controller driver |
+| `include/linux/of.h` | الـ Device Tree core API و `struct device_node` |
+| `include/linux/gpio.h` | Legacy GPIO API (integer-based، قديم) |
+| `drivers/gpio/gpiolib-of.c` | **الـ implementation الحقيقية** لكل دوال OF-GPIO |
+| `drivers/gpio/gpiolib.c` | الـ GPIO subsystem core |
+| `drivers/gpio/gpiolib-legacy.c` | الـ legacy integer-based GPIO API |
+| `drivers/gpio/gpiolib-devres.c` | الـ device resource managed GPIO helpers |
+| `Documentation/devicetree/bindings/gpio/` | الـ DT bindings specs للـ GPIO controllers |
+| `Documentation/driver-api/gpio/` | الـ driver developer documentation |
 
 ---
 
-### الـ Core Abstractions — الهياكل المحورية
+### ملفات الـ Subsystem الأساسية
 
-#### 1. الـ `device_node` — عقدة الـ Device Tree
+**Core:**
+- `drivers/gpio/gpiolib.c` — قلب الـ GPIO subsystem
+- `drivers/gpio/gpiolib-of.c` — OF/DT integration
+- `drivers/gpio/gpiolib-acpi-core.c` — ACPI integration (لـ x86)
+- `drivers/gpio/gpiolib-cdev.c` — character device interface (`/dev/gpiochipN`)
+- `drivers/gpio/gpiolib-sysfs.c` — sysfs interface
 
-```c
-/* من linux/of.h */
-struct device_node {
-    const char      *name;        /* اسم العقدة مثل "gpio@40021000" */
-    phandle          phandle;     /* معرّف فريد للإشارة إليها من عقد أخرى */
-    const char      *full_name;   /* المسار الكامل: /soc/gpio@40021000 */
-    struct fwnode_handle fwnode;  /* جسر للـ generic firmware node API */
+**Headers:**
+- `include/linux/gpio/consumer.h` — consumer API
+- `include/linux/gpio/driver.h` — driver API
+- `include/linux/gpio/machine.h` — board lookup tables
+- `include/linux/of_gpio.h` — legacy OF helper
 
-    struct property *properties;  /* قائمة مرتبطة بكل الـ properties */
-    struct device_node *parent;   /* العقدة الأب في شجرة الـ DT */
-    struct device_node *child;    /* أول عقدة ابن */
-    struct device_node *sibling;  /* العقدة المجاورة على نفس المستوى */
-};
-```
+**Hardware Drivers (أمثلة):**
+- `drivers/gpio/gpio-aspeed.c` — Aspeed BMC GPIO
+- `drivers/gpio/gpio-pl061.c` — ARM PrimeCell GPIO
+- `drivers/gpio/gpio-pxa.c` — Intel PXA GPIO
 
-**الـ `fwnode_handle`:** تجريد مشترك بين الـ OF (Device Tree) وACPI — يسمح للـ GPIO subsystem بالعمل على أي firmware interface دون تغيير الكود.
+---
 
-#### 2. الـ `property` — وصف خاصية واحدة
+### خلاصة
 
-```c
-struct property {
-    char         *name;    /* مثل "reset-gpios" */
-    int           length;  /* حجم البيانات بالبايت */
-    void         *value;   /* بيانات خام big-endian */
-    struct property *next; /* linked list من كل properties العقدة */
-};
-```
+**`of_gpio.h`** هو جسر بسيط (ولكن مهم تاريخياً) بين الـ Device Tree وبين الـ GPIO API. الـ driver القديم كان يقوله "روح في الـ Device Tree، جيبلي رقم الـ GPIO اللي اسمه كذا"، والـ function دي كانت بتعمل ده. الـ modern code بقى بيستخدم `devm_gpiod_get()` بدلاً منها، لكن الملف ده لسه موجود علشان مئات الـ drivers القديمة اللي بتستخدمه.
+## Phase 2: شرح الـ OF-GPIO (Open Firmware GPIO) Framework
 
-عندما تكتب في الـ DTS:
+---
+
+### المشكلة — ليه الـ OF-GPIO موجود أصلاً؟
+
+في أي SoC بتشتغل عليه — i.MX6، AM335x، BCM2835 — فيه GPIO controller واحد أو أكتر. الـ driver بتاع الـ GPIO controller بيعرف يتحكم في الـ pins، لكن المشكلة هي: **إزاي الـ driver بتاع الـ consumer** (مثلاً driver بتاع شريحة SPI أو LED) يعرف يقول "أنا عايز GPIO رقم 5 من الـ controller ده"؟
+
+**قبل الـ Device Tree:**
+كل board كان عنده `board_init.c` مليان hardcoded numbers زي `gpio_request(GPIO_PD5, ...)` — ده كان كارثة لأن نفس الـ driver مش هيشتغل على board تاني من غير تعديل في الـ C code.
+
+**بعد الـ Device Tree:**
+الـ board description اتحولت لـ `.dts` files، بس محتاجين طريقة تربط بين الـ DT property زي `reset-gpios = <&gpio2 5 GPIO_ACTIVE_LOW>` والـ actual GPIO line في الـ kernel — ده بالظبط اللي بيعمله **OF-GPIO**.
+
+**الـ OF-GPIO subsystem** هو الـ glue layer اللي بيترجم الـ phandle + specifier الموجودين في الـ Device Tree لـ GPIO descriptor (`struct gpio_desc`) قابل للاستخدام في أي driver.
+
+---
+
+### الحل — الـ approach بتاع الـ kernel
+
+الـ kernel بيستخدم نظام **phandle + cells** في الـ Device Tree:
+
 ```dts
-reset-gpios = <&gpio1 5 GPIO_ACTIVE_LOW>;
-```
-يُخزَّن هذا كـ `property` باسم `"reset-gpios"` وقيمة raw = 3 خلايا 32-bit.
+/* في ملف .dts */
+gpio2: gpio@20a0000 {
+    compatible = "fsl,imx6q-gpio";
+    #gpio-cells = <2>;   /* <pin_number  flags> */
+    ...
+};
 
-#### 3. الـ `of_phandle_args` — نتيجة تحليل الـ phandle
+my_device: sensor@0 {
+    reset-gpios = <&gpio2 5 GPIO_ACTIVE_LOW>;
+    /*               ^      ^       ^
+                  phandle  pin    polarity  */
+};
+```
+
+الـ `of_get_named_gpio()` بتاخد الـ `device_node` بتاع `my_device` واسم الـ property (`"reset-gpios"`) وtraces الـ phandle لـ `gpio2`، بعدين بتترجم الـ specifier `<5 GPIO_ACTIVE_LOW>` لـ GPIO number عن طريق الـ `of_xlate` callback الموجود في الـ `gpio_chip`.
+
+---
+
+### الـ Big Picture Architecture
+
+```
+                    ┌─────────────────────────────────────────┐
+                    │           Device Tree (.dts)             │
+                    │  reset-gpios = <&gpio2 5 GPIO_ACTIVE_LOW>│
+                    └───────────────┬─────────────────────────┘
+                                    │ of_get_named_gpio()
+                                    ▼
+┌───────────────────────────────────────────────────────────────┐
+│                    OF-GPIO Layer (of_gpio.h)                   │
+│                                                                │
+│  • يفك ضغط الـ phandle من الـ DT property                    │
+│  • يستدعي of_find_node_by_phandle() للوصول لـ gpio_chip       │
+│  • يستدعي of_xlate() لتحويل (pin=5, flags=ACTIVE_LOW)         │
+│    لـ GPIO number مطلق (global GPIO number)                   │
+└───────────────────────────────────┬───────────────────────────┘
+                                    │
+                                    ▼
+┌───────────────────────────────────────────────────────────────┐
+│                    GPIO Subsystem (gpiolib)                    │
+│                                                                │
+│  ┌─────────────────────────────────────────────────────────┐  │
+│  │              struct gpio_chip  (gpio/driver.h)           │  │
+│  │  .label          = "gpio2"                              │  │
+│  │  .ngpio          = 32                                   │  │
+│  │  .base           = 32  (لو dynamic: -1)                 │  │
+│  │  .of_gpio_n_cells= 2                                    │  │
+│  │  .of_xlate       = imx_gpio_of_xlate()  ◄── driver impl │  │
+│  │  .get()  / .set() / .direction_input()  ◄── driver impl │  │
+│  └─────────────────────────────────────────────────────────┘  │
+└───────────────────────────────────┬───────────────────────────┘
+                                    │
+                                    ▼
+┌───────────────────────────────────────────────────────────────┐
+│              Hardware GPIO Controller (e.g. i.MX6 GPIO2)      │
+│           Memory-mapped registers @ 0x020A_0000               │
+│    DR (data)  |  GDIR (direction)  |  PSR (pad status)        │
+└───────────────────────────────────────────────────────────────┘
+```
+
+**المستوى الأعلى: الـ consumers** (أي driver محتاج GPIO):
+- `drivers/net/phy/...` → reset pin
+- `drivers/spi/...` → chip select
+- `drivers/leds/...` → LED pin
+
+**المستوى الأدنى: الـ providers** (GPIO controller drivers):
+- `drivers/gpio/gpio-mxc.c` → i.MX GPIO
+- `drivers/gpio/gpio-pl061.c` → ARM PrimeCell GPIO
+- `drivers/gpio/gpio-pca953x.c` → I2C GPIO expander
+
+---
+
+### التشبيه الحقيقي — نظام العناوين البريدية
+
+تخيل إنك بتبعت جواب (GPIO request) لشخص في مدينة تانية.
+
+| المفهوم الحقيقي | التشبيه |
+|---|---|
+| الـ `device_node` بتاع الـ consumer | المرسِل |
+| الـ DT property `reset-gpios = <&gpio2 5 1>` | العنوان المكتوب على الجواب |
+| الـ phandle `&gpio2` | اسم المدينة / المنطقة |
+| الـ cells `<5 1>` | رقم الشارع والشقة |
+| الـ `of_get_named_gpio()` | مكتب البريد اللي بيترجم العنوان لإحداثيات GPS |
+| الـ `of_xlate()` | نظام ترقيم الشوارع المحلي لكل مدينة |
+| الـ `gpio_chip` | العمارة نفسها |
+| الـ `gpio_desc` اللي بترجع | المفتاح الفعلي للشقة |
+| الـ `.get()` / `.set()` | فتح/قفل الباب |
+
+**المهم في التشبيه ده:**
+- كل مدينة (GPIO controller) بيكون ليها نظام ترقيم خاص بيها (`of_xlate`) — بعض الـ controllers بتستخدم `(instance, pin, flags)` كـ 3 cells، وبعضها `(pin, flags)` كـ 2 cells. مكتب البريد (OF-GPIO layer) بيتعامل مع التنوع ده بشكل transparent.
+- الـ consumer مش محتاج يعرف أي حاجة عن نظام الترقيم الداخلي.
+
+---
+
+### الـ Core Abstraction — الفكرة المحورية
+
+**الـ OF-GPIO subsystem بيقدم abstraction layer واحدة فقط:**
+
+> تحويل **اسم property في DT** + **index** → **GPIO number** مقبول من الـ gpiolib.
+
+الـ API بتاعه بسيط جداً:
+
+```c
+/*
+ * np        : device_node بتاع الـ consumer (مش الـ GPIO controller)
+ * propname  : اسم الـ property في الـ DTS مثلاً "reset-gpios"
+ * index     : لو الـ property فيها أكتر من GPIO، نأخد الـ index ده
+ *
+ * returns   : GPIO number (global)، أو negative error
+ */
+int of_get_named_gpio(const struct device_node *np,
+                      const char *propname, int index);
+```
+
+**مثال من driver حقيقي:**
+
+```c
+/* من driver بتاع PHY أو أي device بيحتاج reset */
+static int my_probe(struct platform_device *pdev)
+{
+    struct device_node *np = pdev->dev.of_node;
+    int reset_gpio;
+
+    /* بيقرأ من DTS: reset-gpios = <&gpio3 12 GPIO_ACTIVE_LOW> */
+    reset_gpio = of_get_named_gpio(np, "reset-gpios", 0);
+    if (reset_gpio < 0) {
+        dev_err(&pdev->dev, "failed to get reset GPIO: %d\n", reset_gpio);
+        return reset_gpio;
+    }
+
+    /* بعد كده بنستخدم gpiolib API العادية */
+    gpio_request(reset_gpio, "my-reset");
+    gpio_direction_output(reset_gpio, 0); /* assert reset */
+}
+```
+
+> ملاحظة: الـ modern kernel بيفضل استخدام `devm_gpiod_get()` بدل `of_get_named_gpio()` مباشرة، لكن الأخيرة موجودة للـ legacy code وللفهم.
+
+---
+
+### الـ struct gpio_chip وعلاقته بـ OF-GPIO
+
+الـ `struct gpio_chip` هو الـ central struct اللي بيربط الـ OF-GPIO بالـ hardware. فيه section مخصص لـ OF:
+
+```
+struct gpio_chip
+┌────────────────────────────────────────────────┐
+│ label          : "gpio2"                        │
+│ ngpio          : 32                             │
+│ base           : 32                             │
+│ parent         : struct device *                │
+│ fwnode         : struct fwnode_handle *  ◄──┐  │
+│                                              │  │
+│ .get()                                       │  │
+│ .set()                                    linked │
+│ .direction_input()                        to DT  │
+│ .direction_output()                          │  │
+│                                              │  │
+│ [CONFIG_OF_GPIO section]                     │  │
+│ of_gpio_n_cells : 2                          │  │
+│ of_xlate        : imx_gpio_xlate() ◄─────────┘  │
+│ of_node_instance_match : NULL (optional)        │
+└────────────────────────────────────────────────┘
+```
+
+الـ `of_xlate` هو الـ callback اللي بيأخد `struct of_phandle_args`:
 
 ```c
 struct of_phandle_args {
-    struct device_node *np;         /* العقدة التي يشير إليها الـ phandle */
-    int                 args_count; /* عدد الـ cells بعد الـ phandle */
-    uint32_t            args[MAX_PHANDLE_ARGS]; /* قيم الـ cells */
+    struct device_node *np;      /* node بتاع الـ GPIO controller */
+    int args_count;              /* عدد الـ cells = of_gpio_n_cells */
+    uint32_t args[MAX_PHANDLE_ARGS]; /* القيم: {pin, flags} */
 };
 ```
 
-بعد تحليل `<&gpio1 5 GPIO_ACTIVE_LOW>`:
-- `np` → يشير إلى عقدة `gpio1`
-- `args_count` = 2
-- `args[0]` = 5 (offset)
-- `args[1]` = 1 (GPIO_ACTIVE_LOW)
+وبيرجع الـ GPIO offset داخل الـ chip:
 
-#### 4. الـ `gpio_chip` — التجريد الأساسي للـ GPIO Controller
+```c
+/* مثال implementation في gpio-mxc.c */
+static int imx_gpio_of_xlate(struct gpio_chip *gc,
+                              const struct of_phandle_args *gpiospec,
+                              u32 *flags)
+{
+    /* gpiospec->args[0] = pin number */
+    /* gpiospec->args[1] = flags (ACTIVE_LOW, etc.) */
+
+    if (flags)
+        *flags = gpiospec->args[1];
+
+    return gpiospec->args[0]; /* offset داخل الـ chip */
+}
+```
+
+---
+
+### الـ Parsing Flow — خطوة بخطوة
+
+```
+of_get_named_gpio(np, "reset-gpios", 0)
+        │
+        ▼
+of_parse_phandle_with_args(np, "reset-gpios", "#gpio-cells", 0, &args)
+        │   • بيبحث في properties بتاع np
+        │   • بيلاقي: reset-gpios = <&gpio2 5 1>
+        │   • بيتبع الـ phandle &gpio2
+        │   • بيقرأ #gpio-cells = 2
+        │   • args.np = gpio2_node
+        │   • args.args = {5, 1}
+        │
+        ▼
+of_find_gpiochip_by_fwnode(args.np->fwnode)
+        │   • بيبحث في قائمة الـ registered gpio_chips
+        │   • بيلاقي gpio_chip بتاع gpio2
+        │
+        ▼
+gc->of_xlate(gc, &args, &flags)
+        │   • بيرجع offset = 5
+        │
+        ▼
+gpiochip_offset_to_irq / gpio number = gc->base + offset
+        │   = 32 + 5 = 37  (global GPIO number)
+        │
+        ▼
+return 37
+```
+
+---
+
+### ما الـ OF-GPIO بيملكه مقابل ما بيديه للـ drivers
+
+| المسؤولية | الـ OF-GPIO Layer يملكها؟ | الـ GPIO Controller Driver يتولاها؟ |
+|---|---|---|
+| قراءة الـ DT property وتفكيك الـ phandle | نعم | لا |
+| البحث عن الـ gpio_chip المناسب من الـ fwnode | نعم | لا |
+| تحديد عدد الـ cells (`#gpio-cells`) | لا (الـ DT بيحدده) | الـ driver بيضبط `of_gpio_n_cells` |
+| ترجمة الـ cells لـ offset (`of_xlate`) | لا | نعم، لازم يوفره |
+| التحكم الفعلي في الـ hardware (get/set) | لا | نعم، لازم يوفره |
+| إدارة الـ IRQ domain | لا | اختياري عبر `gpio_irq_chip` |
+| الـ fallback لو `CONFIG_OF_GPIO` مش موجود | نعم (بترجع `-ENOSYS`) | لا |
+
+---
+
+### الـ Kconfig Guard — ليه مهم
+
+```c
+#ifdef CONFIG_OF_GPIO
+
+extern int of_get_named_gpio(const struct device_node *np,
+                             const char *list_name, int index);
+
+#else
+
+static inline int of_get_named_gpio(...)
+{
+    return -ENOSYS; /* Not supported */
+}
+
+#endif
+```
+
+ده pattern كلاسيكي في الـ kernel — الـ platforms اللي مش بتستخدم Device Tree (زي بعض الـ x86 أو الـ SPARC legacy) مش بيكون عندها `CONFIG_OF_GPIO`، فبدل ما الـ driver يفشل في الـ compile، الـ function بترجع `-ENOSYS` والـ driver ممكن يعمل fallback أو يكمل بدون الـ GPIO.
+
+الـ drivers اللي بتستخدم الـ OF-GPIO بتكتب:
+
+```c
+gpio = of_get_named_gpio(np, "reset-gpios", 0);
+if (gpio == -ENOSYS) {
+    /* DT غير موجود أو OF-GPIO مش مفعّل، نكمل بدون GPIO */
+    dev_warn(dev, "reset GPIO not available, skipping\n");
+} else if (gpio < 0) {
+    return gpio; /* error حقيقي */
+}
+```
+
+---
+
+### علاقة OF-GPIO بالـ Subsystems التانية
+
+**الـ Device Tree (OF) subsystem** — `include/linux/of.h`:
+اللي بيوفر الـ `device_node`، الـ `property`، وفنكشن زي `of_parse_phandle_with_args()`. الـ OF-GPIO بيبني فوقه مباشرة.
+
+**الـ GPIO subsystem (gpiolib)** — `include/linux/gpio/driver.h`:
+اللي بيوفر الـ `struct gpio_chip` وregistration API زي `gpiochip_add_data()`. الـ OF-GPIO بيستخدمه لما بيلاقي الـ chip ويعمل الترجمة.
+
+**الـ Pin Control subsystem (pinctrl)**:
+بعض الـ GPIO controllers هي نفسها pin controllers (مثلاً i.MX IOMUX). الـ `gpio_chip` ممكن يكون linked لـ `pinctrl_dev` عن طريق `add_pin_ranges()`.
+
+الرسم ده بيوضح العلاقة:
+
+```
+[ Consumer Driver ]
+       │
+       │ of_get_named_gpio("reset-gpios", 0)
+       ▼
+[ OF-GPIO Layer ]  ←──── يعتمد على ────→  [ OF / DT Subsystem ]
+       │                                    (of_parse_phandle_with_args)
+       │ يستخدم gpio_chip
+       ▼
+[ gpiolib (GPIO Core) ]
+       │
+       │ يستدعي of_xlate() و get()/set()
+       ▼
+[ GPIO Controller Driver ]
+       │
+       ▼
+[ Hardware Registers ]
+```
+## Phase 3: التفاصيل العميقة — الـ Structs والعلاقات
+
+---
+
+### ملاحظة أولية: حجم الـ File
+
+الـ `of_gpio.h` نفسه صغير جداً — بيحتوي على function واحدة بس: `of_get_named_gpio()`. لكن الـ file ده بيكون **واجهة** لمنظومة أكبر بكتير، وبيعتمد على structs معرّفة في:
+
+- `linux/of.h` — الـ Device Tree infrastructure
+- `linux/gpio/driver.h` — الـ GPIO chip abstraction
+
+الـ Phase ده هيغطي كل العلاقات دي بعمق.
+
+---
+
+### الـ Config Options والـ Flags — Cheatsheet
+
+#### Config Options
+
+| Option | المعنى | التأثير على `of_gpio.h` |
+|---|---|---|
+| `CONFIG_OF_GPIO` | تفعيل دعم GPIO عبر Device Tree | بيفعّل `of_get_named_gpio()` الحقيقية، أو بيرجّع `-ENOSYS` |
+| `CONFIG_OF` | تفعيل Open Firmware / Device Tree | شرط أساسي لـ `CONFIG_OF_GPIO` |
+| `CONFIG_OF_DYNAMIC` | دعم تعديل الـ Device Tree في runtime | بيفعّل reference counting لـ `device_node` |
+| `CONFIG_OF_KOBJ` | دمج الـ Device Tree nodes مع الـ kobject system | بيضيف `kobject` جوه `device_node` |
+| `CONFIG_GPIOLIB_IRQCHIP` | دعم IRQ controller جوه الـ gpio_chip | بيضيف `gpio_irq_chip` جوه `gpio_chip` |
+| `CONFIG_IRQ_DOMAIN_HIERARCHY` | دعم hierarchical IRQ domains | بيضيف fields للـ parent domain في `gpio_irq_chip` |
+| `CONFIG_GENERIC_MSI_IRQ` | دعم MSI interrupts | بيضيف `msiinfo` لـ `union gpio_irq_fwspec` |
+
+#### الـ `device_node` Flags (`_flags` field)
+
+| Flag | القيمة | المعنى |
+|---|---|---|
+| `OF_DYNAMIC` | `1` | الـ node والـ properties اتحجزت بـ `kmalloc` |
+| `OF_DETACHED` | `2` | الـ node انفصلت عن الـ Device Tree |
+| `OF_POPULATED` | `3` | الـ device اتعمل منها بالفعل |
+| `OF_POPULATED_BUS` | `4` | اتعمل platform bus للـ children |
+| `OF_OVERLAY` | `5` | اتحجزت لـ overlay |
+| `OF_OVERLAY_FREE_CSET` | `6` | موجودة في overlay cset بيتحذف دلوقتي |
+
+#### الـ GPIO Direction Constants
+
+| Constant | القيمة | المعنى |
+|---|---|---|
+| `GPIO_LINE_DIRECTION_IN` | `1` | الـ pin شغّال input |
+| `GPIO_LINE_DIRECTION_OUT` | `0` | الـ pin شغّال output |
+
+---
+
+### الـ Structs المهمة
+
+#### 1. `struct device_node`
+**الغرض:** تمثّل node واحدة في الـ Device Tree. كل جهاز أو controller في الـ DT عنده `device_node` خاص بيه.
+
+```c
+struct device_node {
+    const char        *name;        /* اسم الـ node (e.g., "gpio") */
+    phandle           phandle;      /* رقم فريد للـ node في الـ DT */
+    const char        *full_name;   /* المسار الكامل (e.g., "/soc/gpio@0") */
+    struct fwnode_handle fwnode;    /* ربط بالـ firmware node abstraction */
+
+    struct property   *properties;  /* linked list للـ properties */
+    struct property   *deadprops;   /* properties اتشالت (للـ dynamic DT) */
+    struct device_node *parent;     /* الـ parent node */
+    struct device_node *child;      /* أول child */
+    struct device_node *sibling;    /* الـ sibling التالي */
+
+    unsigned long     _flags;       /* OF_DYNAMIC, OF_POPULATED, إلخ */
+    void              *data;        /* بيانات خاصة بالـ platform */
+};
+```
+
+**العلاقات:**
+- بيحتوي على linked list من `struct property`
+- بيتربط بـ `struct fwnode_handle` لتجريد الـ firmware layer
+- الـ `of_get_named_gpio()` بتاخد pointer ليه كـ input
+
+---
+
+#### 2. `struct property`
+**الغرض:** تمثّل property واحدة جوه الـ Device Tree node (زي `gpios = <&gpio0 5 0>`).
+
+```c
+struct property {
+    char           *name;   /* اسم الـ property (e.g., "gpios", "reset-gpios") */
+    int            length;  /* حجم الـ value بالـ bytes */
+    void           *value;  /* قيمة الـ property (big-endian raw bytes) */
+    struct property *next;  /* التالي في الـ linked list */
+};
+```
+
+**العلاقات:**
+- مرتبطة بـ `device_node` عبر `properties` pointer
+- الـ `of_get_named_gpio()` بتبحث في الـ properties دي عن اسم الـ GPIO list
+
+---
+
+#### 3. `struct of_phandle_args`
+**الغرض:** بتمثّل نتيجة parse لـ phandle مع arguments. ده اللي بيتبني من الـ DT property زي `gpios = <&gpio0 5 GPIO_ACTIVE_LOW>`.
+
+```c
+struct of_phandle_args {
+    struct device_node *np;                    /* الـ node اللي الـ phandle بيشير ليها */
+    int                args_count;             /* عدد الـ cells (عادةً 2) */
+    uint32_t           args[MAX_PHANDLE_ARGS]; /* الـ cells نفسها (offset, flags) */
+};
+```
+
+**العلاقات:**
+- بتتعمل داخلياً في `of_get_named_gpio()` لما بتعمل parse للـ GPIO specifier
+- الـ `gpio_chip.of_xlate()` callback بتاخدها كـ input لتحويل `args` لـ GPIO number حقيقي
+
+---
+
+#### 4. `struct gpio_chip`
+**الغرض:** تجريد لـ GPIO controller كامل. كل driver بيكتب struct بيملأ الـ function pointers دي.
 
 ```c
 struct gpio_chip {
-    const char        *label;    /* اسم الـ controller */
-    struct device     *parent;   /* الـ device المرتبط */
-    struct fwnode_handle *fwnode;/* ربط مع firmware */
+    const char          *label;          /* اسم الـ controller */
+    struct gpio_device  *gpiodev;        /* الـ internal state (opaque) */
+    struct device       *parent;         /* الـ physical device */
+    struct fwnode_handle *fwnode;        /* firmware node */
 
-    /* Operations — يجب أن يُنفّذها كل driver */
+    /* --- Operations --- */
+    int  (*request)(struct gpio_chip *gc, unsigned int offset);
+    void (*free)(struct gpio_chip *gc, unsigned int offset);
     int  (*get_direction)(struct gpio_chip *gc, unsigned int offset);
     int  (*direction_input)(struct gpio_chip *gc, unsigned int offset);
     int  (*direction_output)(struct gpio_chip *gc, unsigned int offset, int value);
     int  (*get)(struct gpio_chip *gc, unsigned int offset);
     int  (*set)(struct gpio_chip *gc, unsigned int offset, int value);
 
-    int   base;   /* أول GPIO number عالمي لهذا الـ chip (deprecated) */
-    u16   ngpio;  /* عدد الأطراف في هذا الـ chip */
+    int  base;        /* أول GPIO number (deprecated: استخدم -1 للـ dynamic) */
+    u16  ngpio;       /* عدد الـ GPIO lines */
+    bool can_sleep;   /* true لو الـ I2C/SPI expander */
 
-#ifdef CONFIG_OF_GPIO
-    /* حقول خاصة بالـ OF-GPIO integration */
-    unsigned int of_gpio_n_cells;  /* عدد cells في الـ specifier (عادةً 2) */
+    /* CONFIG_OF_GPIO fields */
+    unsigned int  of_gpio_n_cells;  /* عدد cells في الـ DT specifier */
+    bool (*of_node_instance_match)(struct gpio_chip *gc, unsigned int i);
+    int  (*of_xlate)(struct gpio_chip *gc,
+                     const struct of_phandle_args *gpiospec, u32 *flags);
 
-    /* callback لترجمة of_phandle_args → offset + flags */
-    int (*of_xlate)(struct gpio_chip *gc,
-                    const struct of_phandle_args *gpiospec,
-                    u32 *flags);
-#endif
+    /* CONFIG_GPIOLIB_IRQCHIP */
+    struct gpio_irq_chip irq;
+};
+```
+
+**العلاقات:**
+- بيحتوي على `gpio_irq_chip` embedded
+- بيتربط بـ `device_node` عبر `fwnode` pointer
+- الـ `of_xlate` callback بتستخدم `of_phandle_args`
+
+---
+
+#### 5. `struct gpio_irq_chip`
+**الغرض:** بتضيف IRQ controller functionality للـ `gpio_chip`. يعني كل GPIO line ممكن تكون interrupt source.
+
+```c
+struct gpio_irq_chip {
+    struct irq_chip    *chip;           /* الـ IRQ chip operations */
+    struct irq_domain  *domain;         /* mapping بين hwirq و Linux IRQ */
+    irq_flow_handler_t  handler;        /* الـ IRQ handler (e.g., handle_edge_irq) */
+    unsigned int        default_type;   /* IRQ_TYPE_EDGE_RISING, etc. */
+    bool                threaded;       /* true لو I2C/SPI chip محتاج threaded IRQ */
+    bool                initialized;    /* guard flag قبل ما يتعمل init */
+    unsigned long      *valid_mask;     /* bitmask للـ GPIOs اللي ممكن تطلع interrupt */
+    unsigned int        num_parents;    /* عدد الـ parent interrupt lines */
+    unsigned int       *parents;        /* array بـ parent IRQ numbers */
+};
+```
+
+**العلاقات:**
+- embedded جوه `gpio_chip`
+- بيتربط بـ `irq_domain` للـ Linux IRQ subsystem
+- بيتربط بـ `irq_chip` للـ hardware operations
+
+---
+
+#### 6. `struct of_phandle_iterator`
+**الغرض:** iterator بيتستخدم داخلياً لما بيعمل parse لـ list من phandles في property واحدة (زي لما عندك `gpios = <&gpio0 5 0>, <&gpio1 3 0>`).
+
+```c
+struct of_phandle_iterator {
+    const char        *cells_name;   /* اسم الـ #cells property */
+    int                cell_count;   /* عدد الـ cells لكل entry */
+    const struct device_node *parent; /* الـ parent node */
+    const __be32      *list_end;     /* نهاية الـ list */
+    const __be32      *cur;          /* الموقع الحالي */
+    phandle            phandle;      /* الـ phandle الحالي */
+    struct device_node *node;        /* الـ node المفصودة */
 };
 ```
 
@@ -337,625 +678,358 @@ struct gpio_chip {
 ### رسم العلاقات بين الـ Structs
 
 ```
-DTS Source:
-  reset-gpios = <&gpio1 5 1>;
+Device Tree (binary blob in memory)
          │
-         │   of_get_named_gpio(np, "reset-gpios", 0)
          ▼
-  ┌─────────────────────────────────┐
-  │  struct property                │
-  │  .name   = "reset-gpios"        │
-  │  .value  = [phandle=gpio1][5][1]│
-  └────────────────┬────────────────┘
-                   │  of_parse_phandle_with_args()
-                   ▼
-  ┌─────────────────────────────────┐
-  │  struct of_phandle_args         │
-  │  .np        → device_node(gpio1)│
-  │  .args_count = 2                │
-  │  .args[0]   = 5  (offset)       │
-  │  .args[1]   = 1  (ACTIVE_LOW)   │
-  └────────────────┬────────────────┘
-                   │  gc->of_xlate(gc, &gpiospec, &flags)
-                   ▼
-  ┌─────────────────────────────────┐
-  │  struct gpio_chip (gpio1)       │
-  │  .base   = 32                   │
-  │  .ngpio  = 32                   │
-  │  .of_xlate → of_gpio_simple_xlate│
-  │                                 │
-  │  returns: offset = 5            │
-  │  flags:   GPIO_ACTIVE_LOW       │
-  └────────────────┬────────────────┘
-                   │  base + offset
-                   ▼
-         Global GPIO number = 37
-                   │
-                   ▼
-  ┌─────────────────────────────────┐
-  │  struct gpio_desc               │
-  │  (داخل gpiolib)                  │
-  │  → يمكن للـ driver استخدامه     │
-  │    عبر gpiod_get_value()        │
-  └─────────────────────────────────┘
+┌─────────────────────────────┐
+│       device_node           │
+│  name: "gpio@40021000"      │
+│  full_name: "/soc/gpio@..."  │
+│  fwnode ──────────────────────────────────────┐
+│  properties ─────────────┐   │               │
+│  parent ──► device_node  │   │               │
+│  child  ──► device_node  │   │               │
+└─────────────────────────────┘               │
+                              │               │
+                              ▼               ▼
+                    ┌───────────────┐   ┌─────────────────┐
+                    │   property    │   │  fwnode_handle  │
+                    │  name:"gpios" │   │  (abstraction)  │
+                    │  value: [raw] │   └────────┬────────┘
+                    │  next ────────┤            │
+                    └───────────────┘            │ container_of
+                    ┌───────────────┐            │
+                    │   property    │◄───────────┘
+                    │  name:"#gpio  │
+                    │   -cells"     │
+                    └───────────────┘
+
+of_get_named_gpio(np, "reset-gpios", 0)
+         │
+         │ يبحث في np->properties عن "reset-gpios"
+         │ يبني of_phandle_args
+         │
+         ▼
+┌──────────────────────────┐
+│    of_phandle_args       │
+│  np ──► device_node      │◄── الـ GPIO controller node
+│  args_count = 2          │
+│  args[0] = 5  (offset)   │
+│  args[1] = 1  (flags)    │
+└──────────┬───────────────┘
+           │ يمرر لـ
+           ▼
+┌──────────────────────────────────────────────────┐
+│                  gpio_chip                        │
+│  label: "stm32-gpio"                             │
+│  base: 80  (or dynamic)                          │
+│  ngpio: 16                                        │
+│  of_gpio_n_cells: 2                              │
+│  gpiodev ──► gpio_device (opaque, internal)      │
+│  fwnode  ──► fwnode_handle ──► device_node       │
+│                                                   │
+│  of_xlate() ─────────────────────────────────────┤
+│    reads args[0]=offset, args[1]=flags           │
+│    returns chip-relative GPIO number              │
+│                                                   │
+│  irq: gpio_irq_chip                              │
+│    ├── chip ──► irq_chip                         │
+│    ├── domain ──► irq_domain                     │
+│    ├── parents[] ──► parent IRQ numbers           │
+│    └── valid_mask ──► bitmask                    │
+└──────────────────────────────────────────────────┘
 ```
 
 ---
 
-### الـ Config Guard — `CONFIG_OF_GPIO`
+### رسم الـ Lifecycle
 
-الهيدر يستخدم compile-time guard ذكي:
+#### أ. إنشاء الـ Device Tree Node وربطها بالـ GPIO Controller
+
+```
+Boot / DTB Load
+      │
+      ▼
+┌──────────────────────────────────────────┐
+│  of_flat_dt_to_node()                    │
+│  يحوّل الـ DTB الـ binary لـ linked     │
+│  tree من device_node structs في memory   │
+└─────────────────┬────────────────────────┘
+                  │
+                  ▼
+         device_node مُبني في memory
+         flags = 0 (fresh)
+                  │
+                  ▼
+┌──────────────────────────────────────────┐
+│  Driver probe() يشتغل                   │
+│  platform_get_resource() / devm_ioremap()│
+│  يملأ gpio_chip fields                  │
+└─────────────────┬────────────────────────┘
+                  │
+                  ▼
+┌──────────────────────────────────────────┐
+│  gpiochip_add_data()                     │
+│  - يسجّل gpio_chip في gpiolib           │
+│  - يعمل irq_domain لو irq.chip != NULL  │
+│  - يربط gpio_chip->fwnode بالـ DT node  │
+│  - يضرب OF_POPULATED flag               │
+└─────────────────┬────────────────────────┘
+                  │
+                  ▼
+         gpio_chip جاهز للاستخدام
+
+```
+
+#### ب. استخدام `of_get_named_gpio()` من Driver تاني
+
+```
+Consumer Driver probe()
+      │
+      ▼
+of_get_named_gpio(dev->of_node, "reset-gpios", 0)
+      │
+      ├── of_parse_phandle_with_args()
+      │       │
+      │       ├── يبحث في properties عن "reset-gpios"
+      │       ├── يقرأ الـ phandle → يجيب device_node للـ GPIO controller
+      │       ├── يقرأ #gpio-cells من الـ controller node
+      │       └── يبني of_phandle_args { np, args_count, args[] }
+      │
+      ├── of_find_gpio() → gpiochip_find_base_with_of()
+      │       │
+      │       └── يلف على كل gpio_chip مسجّل
+      │           يتأكد إن gc->fwnode يطابق np->fwnode
+      │
+      └── gc->of_xlate(gc, &gpiospec, &flags)
+              │
+              └── يرجع GPIO number absolute (base + offset)
+
+      │
+      ▼
+    GPIO number (integer) → يتستخدم مع gpiod_get_index() / gpio_request()
+
+```
+
+#### ج. Teardown
+
+```
+Consumer Driver remove()
+      │
+      ▼
+gpio_free(gpio_num)
+      │
+      ▼
+gpiochip_remove(gc)
+      │
+      ├── يشيل الـ irq_domain
+      ├── يفكّ ربط الـ fwnode
+      └── OF_POPULATED flag يتمسح
+
+```
+
+---
+
+### رسم الـ Call Flow الكامل
+
+```
+Consumer Driver (e.g., reset controller):
+  of_get_named_gpio(np, "reset-gpios", 0)
+    │
+    ▼
+  of_parse_phandle_with_args(np, "reset-gpios", "#gpio-cells", 0, &args)
+    │
+    ├── of_find_node_by_phandle(phandle)
+    │     └── يتنقل في شجرة الـ device_node
+    │
+    └── يملأ of_phandle_args:
+          args.np        = &gpio_controller_node
+          args.args_count = 2
+          args.args[0]   = 5   ← offset
+          args.args[1]   = 1   ← GPIO_ACTIVE_LOW
+    │
+    ▼
+  gpiochip_find() → يجيب gpio_chip المناسب
+    │
+    ▼
+  gc->of_xlate(gc, &args, &flags)
+    │
+    ├── يقرأ args.args[0] = 5 → offset
+    ├── يقرأ args.args[1] = flags
+    └── يرجع: gc->base + 5
+    │
+    ▼
+  GPIO number = 85 (مثلاً لو base=80)
+    │
+    ▼
+  gpio_request(85, "reset")
+    │
+    ▼
+  gpio_direction_output(85, 0)  ← reset active
+    │
+    ▼
+  gc->direction_output(gc, 5, 0)
+    │
+    ▼
+  Hardware register write
+```
+
+---
+
+### الـ `CONFIG_OF_GPIO` Guard — شرح مهم
+
+الـ file بيستخدم compile-time guard بأسلوب نظيف:
 
 ```c
 #ifdef CONFIG_OF_GPIO
-/* الدالة الحقيقية — مُعرَّفة في drivers/gpio/gpiolib-of.c */
+
+/* التعريف الحقيقي — بيشتغل لما يكون في device tree support */
 extern int of_get_named_gpio(const struct device_node *np,
-                             const char *list_name, int index);
-#else
-/* stub يُعيد -ENOSYS لأجهزة بدون Device Tree */
+                              const char *list_name, int index);
+
+#else /* CONFIG_OF_GPIO */
+
+/* Stub — بيرجّع -ENOSYS عشان drivers ما تكسرش */
 static inline int of_get_named_gpio(const struct device_node *np,
                                     const char *propname, int index)
 {
-    return -ENOSYS;
+    return -ENOSYS;  /* Not implemented */
 }
+
 #endif
 ```
 
-**لماذا هذا مهم؟** يوجد platforms (مثل بعض x86 أو SPARC configurations) لا تستخدم Device Tree. الـ drivers التي تعتمد على GPIO لكنها مكتوبة بشكل portable يمكنها compile بدون OF دون تغيير الكود — ترى `ENOSYS` وتتعامل معها.
-
----
-
-### ما يملكه الـ OF-GPIO Framework مقابل ما يُفوّضه للـ Drivers
-
-| المسؤولية | OF-GPIO Framework | GPIO Driver (gpio_chip) |
-|---|---|---|
-| قراءة الـ property من الـ DT | **يملكها** — `of_parse_phandle_with_args()` | لا شأن له |
-| إيجاد الـ `gpio_chip` المناسب | **يملكها** — يبحث عن chip مرتبط بـ `device_node` | لا شأن له |
-| ترجمة cells → offset + flags | **يُفوّض** | `of_xlate()` callback |
-| التحقق من صحة الـ offset | **يُفوّض** جزئياً | الـ driver يعرف `ngpio` |
-| قراءة/كتابة قيمة الطرف | **لا يتدخل** | `get()` / `set()` |
-| ضبط الاتجاه | **لا يتدخل** | `direction_input()` / `direction_output()` |
-| إدارة الـ IRQ mapping | **لا يتدخل** (شأن `gpio_irq_chip`) | `to_irq()` |
-| الـ clock/power management | **لا يتدخل** | `request()` / `free()` |
-
----
-
-### مثال حقيقي — قراءة GPIO من Driver
-
+**الفايدة:** drivers ممكن تكتب:
 ```c
-/* driver يريد GPIO المسمى "reset" من الـ DTS */
-static int my_driver_probe(struct platform_device *pdev)
-{
-    struct device_node *np = pdev->dev.of_node;
-    int gpio_num;
-
-    /* OF-GPIO يترجم "reset-gpios" من الـ DTS إلى رقم عالمي */
-    gpio_num = of_get_named_gpio(np, "reset-gpios", 0);
-    if (!gpio_is_valid(gpio_num)) {
-        dev_err(&pdev->dev, "invalid reset GPIO\n");
-        return -EINVAL;
-    }
-
-    /* الآن نستخدم الـ GPIO API العادية */
-    return devm_gpio_request_one(&pdev->dev, gpio_num,
-                                 GPIOF_OUT_INIT_HIGH, "my-reset");
+gpio = of_get_named_gpio(np, "reset-gpios", 0);
+if (gpio < 0) {
+    /* fallback to platform data or skip */
 }
 ```
+من غير ما تعمل `#ifdef` في كل مكان.
 
-والـ DTS المقابل:
+---
+
+### الـ of_xlate و #gpio-cells — علاقة حيوية
+
+الـ Device Tree بيوصف GPIO كده:
+
 ```dts
-my-device@0 {
-    compatible = "vendor,my-device";
-    reset-gpios = <&gpio1 5 GPIO_ACTIVE_LOW>;
-    /*              ▲      ▲        ▲
-                  chip  offset   polarity  */
+/* الـ GPIO controller node */
+gpio0: gpio@40021000 {
+    compatible = "vendor,gpio";
+    #gpio-cells = <2>;   /* عدد الـ args بعد الـ phandle */
+    gpio-controller;
+    ngpios = <16>;
+};
+
+/* الـ consumer node */
+led-controller {
+    reset-gpios = <&gpio0 5 GPIO_ACTIVE_LOW>;
+    /*              ^     ^ ^
+                  phandle offset flags */
 };
 ```
 
----
+الـ `of_gpio_n_cells = 2` في الـ `gpio_chip` لازم يتطابق مع `#gpio-cells = <2>` في الـ DT.
 
-### الـ Subsystem الذي يجب فهمه أولاً
-
-قبل الغوص في تفاصيل OF-GPIO، يجب معرفة:
-
-- **GPIO Subsystem (gpiolib):** المنظومة الأساسية التي تدير `gpio_chip` و`gpio_desc` وتوفر الـ API للـ drivers — OF-GPIO هو مجرد **طبقة ترجمة فوقها**.
-- **Device Tree / OF Layer:** آلية وصف الهاردوير في ملفات `.dts` — الـ OF-GPIO يعتمد عليها كلياً لقراءة بيانات الـ GPIO من شجرة الأجهزة.
-- **pinctrl subsystem:** يُذكر لأن `gpio/driver.h` يتضمنه — يدير multiplexing الأطراف؛ في كثير من الأحيان يجب ضبط الـ pinmux قبل استخدام الـ GPIO.
-## Phase 3: التفاصيل العميقة — الـ Structs والعلاقات
-
----
-
-### الملف: `include/linux/of_gpio.h`
-
-الـ header الخاص بـ **OF GPIO helpers** — وهو الجسر بين نظام **Device Tree (Open Firmware)** وطبقة **GPIO** في Linux kernel. يتيح للـ drivers استخراج أرقام الـ GPIO pins مباشرةً من خصائص الـ Device Tree node.
-
----
-
-### 0. جدول الـ Config Options والـ Flags
-
-#### Config Options
-
-| Option | الأثر |
-|---|---|
-| `CONFIG_OF_GPIO` | يُفعّل دعم OF لـ GPIO؛ بدونه تُعيد الدالة `-ENOSYS` دائماً |
-| `CONFIG_GPIOLIB_IRQCHIP` | يُدمج IRQ chip داخل gpiolib، يُفعّل حقل `irq` في `gpio_chip` |
-| `CONFIG_OF_GPIO` (في `gpio_chip`) | يُفعّل حقول `of_gpio_n_cells` و`of_xlate` و`of_node_instance_match` |
-| `CONFIG_IRQ_DOMAIN_HIERARCHY` | يُفعّل دعم الـ hierarchical interrupt domains في `gpio_irq_chip` |
-| `CONFIG_GENERIC_MSI_IRQ` | يُضيف دعم MSI داخل `union gpio_irq_fwspec` |
-| `CONFIG_OF_DYNAMIC` / `CONFIG_SPARC` | يُضيف `_flags` لـ `struct property` |
-| `CONFIG_OF_KOBJ` | يُضيف `kobj` لـ `device_node` و`attr` لـ `property` |
-
-#### GPIO Direction Constants
-
-| Macro | القيمة | المعنى |
-|---|---|---|
-| `GPIO_LINE_DIRECTION_IN` | `1` | الـ pin مُهيَّأ كـ input |
-| `GPIO_LINE_DIRECTION_OUT` | `0` | الـ pin مُهيَّأ كـ output |
-
-#### قيم الـ Return من `of_get_named_gpio`
-
-| الحالة | القيمة |
-|---|---|
-| نجاح | رقم الـ GPIO (غير سالب) |
-| `CONFIG_OF_GPIO` غير مُفعَّل | `-ENOSYS` |
-| الـ property غير موجودة | `-ENOENT` |
-| الـ index خارج النطاق | `-EINVAL` |
-
----
-
-### 1. الـ Structs المهمة
-
----
-
-#### `struct device_node` — (من `include/linux/of.h`)
-
-**الغرض:** تمثيل node واحدة في شجرة الـ Device Tree داخل الذاكرة.
-
-| الحقل | النوع | الدور |
-|---|---|---|
-| `name` | `const char *` | اسم الـ node (مثلاً `gpio`) |
-| `phandle` | `phandle` (u32) | معرّف فريد يُستخدم للإشارة إليها من nodes أخرى |
-| `full_name` | `const char *` | المسار الكامل في الشجرة (مثلاً `/soc/gpio@4000`) |
-| `fwnode` | `struct fwnode_handle` | واجهة موحّدة مع firmware subsystem |
-| `properties` | `struct property *` | قائمة مرتبطة بكل الخصائص (مثل `gpios = <&gpio 10 0>`) |
-| `deadprops` | `struct property *` | الخصائص المحذوفة ديناميكياً |
-| `parent` | `struct device_node *` | الـ node الأب في الشجرة |
-| `child` | `struct device_node *` | أول node ابن |
-| `sibling` | `struct device_node *` | الـ node الأخ التالي |
-| `_flags` | `unsigned long` | flags داخلية (initialized, detached...) |
-| `data` | `void *` | بيانات خاصة بالمنصة |
-
-**كيف تتصل:** `of_get_named_gpio` تأخذ مؤشراً إلى `device_node` وتقرأ خاصية `gpios` من `properties` لاستخراج phandle الـ GPIO controller ورقم الـ pin.
-
----
-
-#### `struct property` — (من `include/linux/of.h`)
-
-**الغرض:** تمثيل خاصية واحدة داخل `device_node` مثل `gpios = <&gpio 10 0>`.
-
-| الحقل | النوع | الدور |
-|---|---|---|
-| `name` | `char *` | اسم الخاصية (مثلاً `"reset-gpios"`) |
-| `length` | `int` | الحجم بالـ bytes |
-| `value` | `void *` | القيمة الخام بصيغة big-endian |
-| `next` | `struct property *` | الخاصية التالية في القائمة المرتبطة |
-
----
-
-#### `struct of_phandle_args` — (من `include/linux/of.h`)
-
-**الغرض:** حاوية مؤقتة لتخزين نتيجة تفسير مرجع phandle من الـ Device Tree مع وسائطه.
-
-| الحقل | النوع | الدور |
-|---|---|---|
-| `np` | `struct device_node *` | مؤشر لـ node الـ GPIO controller |
-| `args_count` | `int` | عدد الخلايا (عادةً 2: offset + flags) |
-| `args[MAX_PHANDLE_ARGS]` | `uint32_t[]` | الوسائط: `args[0]`=offset, `args[1]`=flags |
-
-**كيف تتصل:** الـ OF core يملأ هذه البنية عند تفسير `gpios = <&gpio 10 0>`، ثم يُمرَّر `args` إلى `gc->of_xlate`.
-
----
-
-#### `struct gpio_chip` — (من `include/linux/gpio/driver.h`)
-
-**الغرض:** التجريد الأساسي لـ **GPIO controller** — يُمثّل أي controller مهما كان نوعه (SOC، FPGA، I2C expander).
-
-| الحقل | النوع | الدور |
-|---|---|---|
-| `label` | `const char *` | اسم وصفي للـ controller |
-| `gpiodev` | `struct gpio_device *` | الحالة الداخلية الـ opaque في gpiolib |
-| `parent` | `struct device *` | الـ device الأب في device model |
-| `fwnode` | `struct fwnode_handle *` | ربط الـ chip بـ firmware node |
-| `owner` | `struct module *` | يمنع إزالة الـ module أثناء الاستخدام |
-| `request` | `fn ptr` | hook لتفعيل الـ pin (clock، power) |
-| `free` | `fn ptr` | hook لتعطيل الـ pin |
-| `get_direction` | `fn ptr` | إرجاع اتجاه الـ pin (input/output) |
-| `direction_input` | `fn ptr` | ضبط الـ pin كـ input |
-| `direction_output` | `fn ptr` | ضبط الـ pin كـ output مع قيمة |
-| `get` | `fn ptr` | قراءة قيمة الـ pin |
-| `set` | `fn ptr` | كتابة قيمة الـ pin |
-| `to_irq` | `fn ptr` | تحويل GPIO offset إلى Linux IRQ number |
-| `base` | `int` | رقم أول GPIO في الـ global space (أو -1 ديناميكي) |
-| `ngpio` | `u16` | عدد الـ pins التي يتحكم فيها |
-| `can_sleep` | `bool` | `true` إذا كانت العمليات قد تنام (I2C/SPI) |
-| `irq` | `struct gpio_irq_chip` | تكامل IRQ (بشرط `CONFIG_GPIOLIB_IRQCHIP`) |
-| `of_gpio_n_cells` | `unsigned int` | عدد خلايا مُحدّد GPIO في Device Tree |
-| `of_xlate` | `fn ptr` | تحويل `of_phandle_args` إلى chip-relative offset + flags |
-| `of_node_instance_match` | `fn ptr` | لـ controllers متعددة في node واحدة |
-
----
-
-#### `struct gpio_irq_chip` — (من `include/linux/gpio/driver.h`)
-
-**الغرض:** دمج **IRQ controller** داخل `gpio_chip` — يجعل كل GPIO pin مصدراً محتملاً للـ interrupt.
-
-| الحقل | النوع | الدور |
-|---|---|---|
-| `chip` | `struct irq_chip *` | الـ IRQ chip الفعلي |
-| `domain` | `struct irq_domain *` | يربط hwirq بـ Linux IRQ numbers |
-| `handler` | `irq_flow_handler_t` | معالج الـ IRQ (مثلاً `handle_edge_irq`) |
-| `default_type` | `unsigned int` | نوع الـ trigger الافتراضي |
-| `parent_handler` | `irq_flow_handler_t` | معالج الـ interrupt للـ parent |
-| `num_parents` | `unsigned int` | عدد الـ parent interrupts |
-| `parents` | `unsigned int *` | مصفوفة بأرقام الـ parent IRQs |
-| `threaded` | `bool` | `true` إذا كان الـ handling في thread منفصل |
-| `initialized` | `bool` | حماية من الاستخدام قبل التهيئة |
-| `valid_mask` | `unsigned long *` | bitmask للـ pins الصالحة كـ interrupts |
-
----
-
-### 2. مخططات علاقات الـ Structs
-
-```
-Device Tree (DTS)
-      │
-      │  gpios = <&gpio_ctrl 10 0>;
-      │  reset-gpios = <&gpio_ctrl 5 GPIO_ACTIVE_LOW>;
-      ▼
-┌─────────────────────────────┐
-│       device_node           │◄── np (الـ consumer device)
-│  full_name: "/soc/led"      │
-│  properties ─────────────► │property: name="reset-gpios"
-│                             │          value=[phandle, 5, 1]
-│  parent ──────────────────► │device_node: "/soc"
-└─────────────────────────────┘
-          │
-          │ of_get_named_gpio() تبحث في properties
-          │ وتحلّل الـ phandle
-          ▼
-┌─────────────────────────────┐
-│     of_phandle_args         │  (مؤقت على الـ stack)
-│  np ──────────────────────► │device_node: "/soc/gpio@4000"
-│  args_count = 2             │
-│  args[0] = 5  (offset)      │
-│  args[1] = 1  (flags)       │
-└─────────────────────────────┘
-          │
-          │ تُمرَّر إلى gc->of_xlate()
-          ▼
-┌─────────────────────────────────────────────┐
-│              gpio_chip                       │
-│  label = "gpio@4000"                        │
-│  base = 32                                  │
-│  ngpio = 32                                 │
-│  of_gpio_n_cells = 2                        │
-│  of_xlate ─────────────────► fn: يحوّل     │
-│                                args → offset │
-│  gpiodev ──────────────────► gpio_device   │
-│  parent  ──────────────────► struct device  │
-│  irq ──────────────────────► gpio_irq_chip  │
-└─────────────────────────────────────────────┘
-          │
-          │ base + offset = GPIO number المطلق
-          ▼
-     GPIO number = 32 + 5 = 37
-```
-
----
-
-#### علاقة `gpio_chip` ↔ `gpio_irq_chip` ↔ `irq_domain`
-
-```
-┌──────────────────────────────────────────┐
-│            gpio_chip                      │
-│  irq:                                    │
-│  ┌────────────────────────────────────┐  │
-│  │        gpio_irq_chip               │  │
-│  │  chip ──────────────► irq_chip     │  │
-│  │  domain ────────────► irq_domain   │  │
-│  │  handler = handle_edge_irq        │  │
-│  │  parents[0] = 45 (parent IRQ)     │  │
-│  │  valid_mask = 0xFFFFFFFF          │  │
-│  └────────────────────────────────────┘  │
-└──────────────────────────────────────────┘
-                    │
-          irq_domain يربط:
-          hwirq 5 ──► Linux IRQ 120
-```
-
----
-
-### 3. دورة حياة OF GPIO
-
-```
-[Boot / Driver Probe]
-        │
-        ▼
-Driver يُهيّئ struct gpio_chip
-  ├── يملأ: label, base=-1, ngpio=32
-  ├── يسجّل callbacks: get, set, direction_*
-  ├── يضبط: of_gpio_n_cells = 2
-  └── يسجّل of_xlate callback
-        │
-        ▼
-gpiochip_add_data(gc, driver_data)
-  ├── gpiolib تختار base ديناميكياً
-  ├── تُنشئ gpio_device داخلياً
-  ├── تُنشئ irq_domain (إذا gpio_irq_chip مهيَّأ)
-  └── تُسجَّل في قائمة gpio_devices العامة
-        │
-        ▼
-[Consumer Driver Probe - يستخدم GPIO]
-        │
-        ▼
-of_get_named_gpio(np, "reset-gpios", 0)
-  ├── of_parse_phandle_with_args()
-  │     يقرأ الـ property من device_node
-  │     يملأ of_phandle_args
-  ├── يبحث عن gpio_chip المرتبط بالـ phandle
-  ├── يستدعي gc->of_xlate(gc, &args, &flags)
-  └── يُعيد: gc->base + offset
-        │
-        ▼
-[استخدام GPIO]
-  gpio_request(gpio_num, "reset")
-  gpio_direction_output(gpio_num, 1)
-  gpio_set_value(gpio_num, 0)
-        │
-        ▼
-[Driver Remove / Teardown]
-  gpio_free(gpio_num)
-  gpiochip_remove(gc)
-    ├── إزالة irq_domain
-    ├── إزالة gpio_device
-    └── تحرير الـ base range
-```
-
----
-
-### 4. مخططات تدفق الاستدعاء (Call Flow)
-
-#### `of_get_named_gpio` — التدفق الكامل
-
-```
-Consumer driver يستدعي:
-of_get_named_gpio(np, "reset-gpios", 0)
-  │
-  ▼
-of_get_named_gpio_flags()          [drivers/gpio/gpiolib-of.c]
-  │
-  ├── of_parse_phandle_with_args(np, "reset-gpios", "#gpio-cells", 0, &args)
-  │     │
-  │     ├── يقرأ np->properties ابحث عن "reset-gpios"
-  │     ├── يُفسَّر phandle → device_node للـ GPIO controller
-  │     ├── يقرأ "#gpio-cells" من controller node
-  │     └── يملأ args.np, args.args_count, args.args[]
-  │
-  ├── gpiod_get_from_of_node()
-  │     │
-  │     ├── يبحث عن gpio_chip المُسجَّل لهذا device_node
-  │     └── يستدعي gc->of_xlate(gc, &args, &flags)
-  │           │
-  │           └── يُعيد: offset داخل الـ chip
-  │
-  └── يُعيد: gc->base + offset   (رقم GPIO المطلق)
-```
-
-#### ضبط قيمة GPIO — تدفق من Consumer إلى Hardware
-
-```
-consumer يستدعي:
-gpio_set_value(gpio_num, value)
-  │
-  ▼
-gpiod_set_value(desc, value)      [gpiolib core]
-  │
-  ├── يتحقق من ownership وصحة الـ desc
-  │
-  ▼
-gpiod_set_value_nocheck()
-  │
-  ▼
-gc->set(gc, offset, value)        [driver callback]
-  │
-  ▼
-writel(value, gpio_base + offset_reg)   [hardware register]
-```
-
-#### تحويل GPIO إلى IRQ (OF Context)
-
-```
-consumer يستدعي:
-gpiod_to_irq(desc)
-  │
-  ▼
-gc->to_irq(gc, offset)            [driver callback أو gpiolib default]
-  │
-  ▼
-irq_find_mapping(gc->irq.domain, offset)
-  │
-  ├── irq_domain يبحث في جدول الـ mapping
-  └── يُعيد: Linux IRQ number
-```
-
----
-
-### 5. استراتيجية الـ Locking
-
-#### جدول الـ Locks وما تحميه
-
-| الـ Lock | النوع | ما يحميه |
-|---|---|---|
-| `gpio_lock` (في gpiolib) | `spinlock_t` | قائمة `gpio_devices` العامة عند التسجيل/الإزالة |
-| `gc->gpiodev->srcu` | `struct srcu_struct` | الوصول الـ RCU لقائمة الـ descriptors |
-| `gpio_desc->request_lock` | ضمني في gpiolib | تجنّب double-request لنفس الـ pin |
-| `irq_domain` locks | داخلية في IRQ subsystem | mapping table للـ hwirq → Linux IRQ |
-| `lockdep: lock_key` | `struct lock_class_key` | تتبع نظام lockdep لـ IRQ locks |
-| `lockdep: request_key` | `struct lock_class_key` | تتبع lockdep لـ IRQ request locks |
-
-#### ترتيب الـ Locks (Lock Ordering)
-
-```
-[قاعدة: يجب الالتزام بهذا الترتيب لتجنّب deadlock]
-
-1. gpio_lock (spinlock — قصير المدة فقط)
-        │
-        ▼
-2. irq_domain_mutex (إذا احتجنا mapping)
-        │
-        ▼
-3. chip-specific lock (إذا كان الـ driver يستخدم lock خاص)
-        │
-        ▼
-4. hardware register access
-
-[ملاحظة مهمة]
-- إذا كان can_sleep=true (I2C/SPI expander):
-  → لا يجوز استدعاء gpio_set_value من interrupt context
-  → يجب استخدام threaded IRQ
-  → gpiolib تتحقق من هذا وترفع WARN_ON
-```
-
-#### نمط الـ SRCU في gpiolib
+الـ `of_xlate` الـ default بتعمل كده:
 
 ```c
-/* القراءة — RCU read lock */
-srcu_read_lock(&gpio_devices_srcu);
-    /* الوصول الآمن للـ gpio_device */
-srcu_read_unlock(&gpio_devices_srcu);
-
-/* الكتابة — عند التسجيل */
-spin_lock_irqsave(&gpio_lock, flags);
-    list_add(&gdev->list, &gpio_devices);
-spin_unlock_irqrestore(&gpio_lock, flags);
-synchronize_srcu(&gpio_devices_srcu);
+/* Default xlate في gpiolib/of.c */
+int of_gpio_simple_xlate(struct gpio_chip *gc,
+                         const struct of_phandle_args *gpiospec,
+                         u32 *flags)
+{
+    if (flags)
+        *flags = gpiospec->args[1];   /* GPIO_ACTIVE_LOW أو ACTIVE_HIGH */
+    return gpiospec->args[0];         /* الـ offset مباشرةً */
+}
 ```
 
 ---
 
-### ملخص العلاقات
+### الـ Locking Strategy
+
+#### 1. الـ `device_node` Reference Counting
+الـ `device_node` مش protected بـ mutex عادي — بتستخدم **reference counting**:
+
+| Function | Action |
+|---|---|
+| `of_node_get(node)` | يزوّد الـ refcount |
+| `of_node_put(node)` | ينقّص ويحذف لو وصل صفر |
+| `DEFINE_FREE(device_node, ...)` | cleanup بـ scope-based (C cleanup attribute) |
+
+الـ `CONFIG_OF_DYNAMIC` هو اللي بيفعّل الـ real refcounting — من غيره الـ functions دي no-ops.
+
+#### 2. الـ `gpio_chip` Locking
+
+الـ `gpio_chip` محمي على مستويين:
+
+| Lock | نوعه | يحمي إيه |
+|---|---|---|
+| `gpio_lock` (في `gpio_device`) | `spinlock_t` | قائمة الـ GPIO chips المسجّلة |
+| `gc->bgpio_lock` | `spinlock_t` | الـ register access للـ basic GPIO |
+| `gc->irq.lock_key` | `lock_class_key` | lockdep class للـ IRQ lock |
+| `gc->irq.request_key` | `lock_class_key` | lockdep class للـ IRQ request |
+
+#### 3. الـ `of_get_named_gpio()` — لا تحتاج lock
+
+الدالة نفسها **read-only** — بتقرأ بس من الـ DT ومابتغيّرش state. الـ DT nodes محمية بـ `of_node_get/put` لو `CONFIG_OF_DYNAMIC`.
+
+#### Lock Ordering
 
 ```
-device_node ──properties──► property ("reset-gpios")
-     │                              │
-     │                         phandle → device_node (controller)
-     │                              │
-     └──────────────────────────────┤
-                                    ▼
-                             gpio_chip
-                          ┌────────────────┐
-                          │ of_xlate()     │
-                          │ base, ngpio    │
-                          │ get/set/dir    │
-                          │ irq ──────────►gpio_irq_chip
-                          │ gpiodev ──────►gpio_device (opaque)
-                          │ parent ───────►struct device
-                          └────────────────┘
-                                    │
-                      of_get_named_gpio()
-                                    │
-                                    ▼
-                         GPIO number (integer)
-                      ──► consumer driver يستخدمه
-                          لطلب الـ pin وضبطه وقراءته
+gpio_lock (spinlock)
+    └─► bgpio_lock (spinlock) — لو بتكتب register
+            └─► irq lock — من خلال irq_chip callbacks
+
+NEVER: irq lock → gpio_lock (deadlock!)
 ```
+
+#### 4. `initialized` flag في `gpio_irq_chip`
+
+```c
+bool initialized;  /* في gpio_irq_chip */
+```
+
+ده **guard flag** — الـ IRQ callbacks مش المفروض تتنادى قبل `gpiochip_irqchip_add()` تخلّص. الـ gpiolib بيتأكد منه قبل أي IRQ operation.
+
+---
+
+### ملخص العلاقات في جملة واحدة
+
+**الـ `of_gpio.h` هي الـ bridge** اللي بيعمل translate من **اسم symbolic في الـ Device Tree** (زي `"reset-gpios"`) لـ **GPIO number حقيقي** يعرف الـ kernel يشتغل بيه، عبر `device_node` → `of_phandle_args` → `gpio_chip.of_xlate`.
 ## Phase 4: شرح الـ Functions
 
-### ملخص سريع — Cheatsheet
+### جدول الـ API — Cheatsheet
 
-| الـ Function | الـ Header | الـ Config Guard | القيمة المُرجعة |
+| Function | Header | Config Guard | Return |
 |---|---|---|---|
-| `of_get_named_gpio()` | `linux/of_gpio.h` | `CONFIG_OF_GPIO` | GPIO number أو errno سالب |
-| `of_get_named_gpio()` (stub) | `linux/of_gpio.h` | `!CONFIG_OF_GPIO` | `-ENOSYS` دائماً |
+| `of_get_named_gpio()` | `linux/of_gpio.h` | `CONFIG_OF_GPIO` | GPIO number أو negative errno |
 
 ---
 
 ### تصنيف الـ Functions
 
-الـ header يحتوي على **function واحدة فعلية** فقط، مع **stub** مقابلها لحالة غياب الـ `CONFIG_OF_GPIO`. هذا النمط شائع جداً في kernel لضمان أن الـ drivers تُكمّل الـ linking حتى بدون دعم الـ OF GPIO.
+الـ header ده بسيط جداً — بيعرّف **function واحدة بس** هي `of_get_named_gpio()`. الـ header كله هو abstraction layer صغيرة فوق الـ Device Tree GPIO lookup API. الفكرة: بدل ما الـ driver يشتغل مباشرة مع الـ DT phandle parsing، يستخدم الـ helper ده عشان يجيب رقم الـ GPIO من الـ DT property باسمها.
 
 ---
 
-### المجموعة الوحيدة: Device Tree GPIO Lookup
+### Group: DT GPIO Lookup
 
-هذه المجموعة مسؤولة عن **ترجمة مرجع GPIO من الـ Device Tree** إلى رقم GPIO صالح للاستخدام مع الـ legacy GPIO API. الـ function تقرأ الـ property المُسمّاة من الـ `device_node`، تحلّ الـ phandle المُشير إلى الـ GPIO controller، ثم تُرجع الـ GPIO number الـ global بعد دمج `gpio_chip->base` مع الـ offset المُعطى في الـ DT.
+الـ group ده مسؤول عن **ربط الـ Device Tree GPIO properties بالـ Linux GPIO numbering system**. الـ driver بيحدد اسم الـ property (زي `"reset-gpios"`) وعايز الـ GPIO رقم كام في النظام — الـ function دي بتعمل الـ resolution الكاملة من الـ phandle لحد رقم GPIO قابل للاستخدام مع الـ legacy `gpio_*` API.
 
 ---
 
-### `of_get_named_gpio` — النسخة الفعلية
+### `of_get_named_gpio()`
 
 ```c
+/* CONFIG_OF_GPIO enabled — real implementation (extern in of_gpio.c) */
 extern int of_get_named_gpio(const struct device_node *np,
                              const char *list_name, int index);
-```
 
-**ما تفعله:**
-تقرأ الـ property المُسمّاة `list_name` من الـ `device_node`، تُحلّل الـ phandle داخلها عند الـ `index` المُحدد، ثم تُترجمه إلى رقم GPIO صالح عبر `of_get_named_gpiod_flags()` → `gpiod_to_gpio()` داخلياً. هي الطريقة الرسمية للحصول على GPIO من DT property مثل `reset-gpios = <&gpio1 5 GPIO_ACTIVE_LOW>`.
-
-**المعاملات:**
-
-| المعامل | النوع | الشرح |
-|---|---|---|
-| `np` | `const struct device_node *` | الـ node الذي يحتوي على الـ property، عادةً `pdev->dev.of_node` |
-| `list_name` | `const char *` | اسم الـ DT property مثل `"reset-gpios"` أو `"enable-gpios"` |
-| `index` | `int` | رقم الـ GPIO داخل الـ list (0-based)، للـ properties التي تحتوي أكثر من GPIO |
-
-**القيمة المُرجعة:**
-
-- **قيمة موجبة أو صفر**: رقم الـ GPIO الـ global (`gpio_chip->base + offset`) جاهز للاستخدام مع `gpio_request()` أو `gpio_direction_input()` إلخ.
-- **قيمة سالبة**: error code:
-  - `-ENOENT`: الـ property غير موجودة في الـ node.
-  - `-EINVAL`: الـ property موجودة لكن الـ format خاطئ أو الـ index خارج النطاق.
-  - `-EPROBE_DEFER`: الـ GPIO controller لم يُسجَّل بعد — يجب إعادة المحاولة لاحقاً.
-  - `-ENODEV`: الـ GPIO chip غير موجود.
-
-**تفاصيل مهمة:**
-
-- تُستدعى في **سياق الـ probe** فقط، وهو سياق يُسمح فيه بالـ sleeping لأن بعض مسارات الـ resolution تحتاج mutex.
-- داخلياً تستدعي `of_get_named_gpiod_flags()` ثم `desc_to_gpio()` لتحويل الـ `gpio_desc` إلى رقم integer — هذا الـ bridge هو السبب في التعليق `/* FIXME: Shouldn't be here */` على `#include <linux/gpio.h>`؛ الـ OF layer يجب أن لا يعتمد على الـ legacy integer GPIO API.
-- لا تحجز (request) الـ GPIO — المُستدعي مسؤول عن `gpio_request()` أو `devm_gpio_request()` لاحقاً.
-- تدعم الـ `index` لأن DT property واحدة قد تُعرّف أكثر من GPIO في قائمة.
-- الـ `-EPROBE_DEFER` يجب أن يُعاد propagation بشكل صحيح من الـ probe function وإلا يختل ترتيب التهيئة.
-
-**من يستدعيها:**
-
-الـ platform drivers في مرحلة الـ `probe`، مثال:
-
-```c
-static int my_driver_probe(struct platform_device *pdev)
-{
-    int reset_gpio;
-
-    /* Read index 0 of "reset-gpios" property from DT */
-    reset_gpio = of_get_named_gpio(pdev->dev.of_node, "reset-gpios", 0);
-    if (reset_gpio < 0) {
-        if (reset_gpio == -EPROBE_DEFER)
-            return reset_gpio; /* retry later */
-        dev_err(&pdev->dev, "failed to get reset gpio: %d\n", reset_gpio);
-        return reset_gpio;
-    }
-
-    /* Now request and use the GPIO */
-    return devm_gpio_request_one(&pdev->dev, reset_gpio,
-                                 GPIOF_OUT_INIT_HIGH, "my-reset");
-}
-```
-
----
-
-### `of_get_named_gpio` — الـ Stub (بدون CONFIG_OF_GPIO)
-
-```c
+/* CONFIG_OF_GPIO disabled — stub that always fails */
 static inline int of_get_named_gpio(const struct device_node *np,
                                     const char *propname, int index)
 {
@@ -963,739 +1037,640 @@ static inline int of_get_named_gpio(const struct device_node *np,
 }
 ```
 
-**ما تفعله:**
-نسخة فارغة تُرجع `-ENOSYS` دائماً. تُوجد لضمان أن الـ drivers التي لا تعتمد **صراحةً** على GPIO-OF support تُكمّل الـ compilation والـ linking بدون أخطاء حتى على منصات لا تدعم `CONFIG_OF_GPIO`.
+**الـ function بتعمل إيه:**
+بتقرأ DT property باسمها من الـ `device_node`، بتعمل resolve للـ GPIO phandle اللي فيها، وبترجع الـ **global GPIO number** المقابل للـ GPIO المطلوب في الـ list. الـ implementation الحقيقية موجودة في `drivers/gpio/gpiolib-of.c` وبتستخدم `of_get_named_gpiod_flags()` تحت الغطاء.
 
-**تفاصيل مهمة:**
+الـ flow الداخلي بيمر على:
+1. `of_parse_phandle_with_args()` — بتحوّل الـ property لـ `of_phandle_args`
+2. `of_find_gpio()` — بتجيب الـ `gpio_chip` المسؤول
+3. `gpio_chip->of_xlate()` — بتترجم الـ DT args لـ hwirq offset
+4. `gpio_chip->base + offset` — بيطلع الـ global GPIO number
 
-- الـ `static inline` يضمن zero overhead — الـ compiler يُزيل الاستدعاء كاملاً إذا كان الـ driver يتحقق صحيح من الـ return value.
-- الـ driver الصحيح يجب أن يتعامل مع `-ENOSYS` كحالة "GPIO غير متاح" وليس كـ fatal error.
-- المعاملات متطابقة مع النسخة الحقيقية لضمان تبادلية الـ API عبر الـ Kconfig options.
+**Parameters:**
+
+| Parameter | Type | Description |
+|---|---|---|
+| `np` | `const struct device_node *` | الـ device node اللي فيه الـ property، عادةً `pdev->dev.of_node` |
+| `list_name` | `const char *` | اسم الـ DT property بدون suffix، مثلاً `"reset-gpios"` أو `"enable-gpios"` |
+| `index` | `int` | رقم الـ GPIO داخل الـ list (zero-based)، لو الـ property فيها GPIO واحد بس يبقى `0` |
+
+**Return Value:**
+- **≥ 0**: رقم الـ GPIO العالمي (global GPIO number) — جاهز للاستخدام مع `gpio_request()` أو `gpio_direction_input()` إلخ.
+- **`-ENOENT`**: الـ property مش موجودة في الـ DT.
+- **`-EINVAL`**: الـ property موجودة بس الـ format غلط أو الـ index أكبر من عدد الـ GPIOs في الـ list.
+- **`-ENOSYS`**: الـ kernel متبناش بـ `CONFIG_OF_GPIO` (بيرجع الـ stub).
+- **`-EPROBE_DEFER`**: الـ GPIO controller اللي الـ phandle بيشاور عليه لسه ماتسجلش — الـ driver المستدعي لازم يرجع `EPROBE_DEFER` من `probe()`.
+- **باقي الـ negative errno**: errors من الـ `gpio_chip->of_xlate()` أو الـ DT parsing.
+
+**Key Details:**
+
+- **Locking**: مفيش lock صريح في الـ wrapper نفسه، لكن الـ `of_parse_phandle_with_args()` بتاخد `of_mutex` داخلياً لما بتمشي في الـ DT tree.
+- **Legacy API**: الـ function دي جزء من الـ **legacy GPIO API** (integer-based)، مش الـ descriptor-based الحديث. الـ kernel نفسه بيشجع استخدام `devm_gpiod_get()` بدلها في الكود الجديد، لكنها لسه موجودة لـ backward compatibility.
+- **الـ `list_name` convention**: الـ kernel بيتوقع إن الـ DT property اسمها `<list_name>-gpios` أو `<list_name>-gpio`، يعني لو بعتله `"reset"` هيدور على `"reset-gpios"`. **ملحوظة مهمة**: الـ function الحديثة `of_get_named_gpiod_flags()` بتعمل الـ strip للـ suffix تلقائياً، لكن `of_get_named_gpio()` بتاخد الاسم كامل زي ما هو بما فيه الـ `-gpios`.
+- **Error path**: لو الـ GPIO controller مش موجود وقت الـ probe، الـ function بترجع `EPROBE_DEFER` — ده مش error حقيقي، ده signal للـ driver core إنه يعيد الـ probe تاني.
+
+**Who calls it:**
+بيتكلمها الـ platform drivers في `probe()` function عشان تجيب أرقام GPIOs من الـ DT. مثال:
+
+```c
+static int my_driver_probe(struct platform_device *pdev)
+{
+    struct device_node *np = pdev->dev.of_node;
+    int gpio_num;
+
+    /* get first GPIO from "reset-gpios" property */
+    gpio_num = of_get_named_gpio(np, "reset-gpios", 0);
+    if (gpio_num < 0) {
+        if (gpio_num == -EPROBE_DEFER)
+            return -EPROBE_DEFER; /* retry later */
+        dev_err(&pdev->dev, "failed to get reset GPIO: %d\n", gpio_num);
+        return gpio_num;
+    }
+
+    /* now use legacy API */
+    return gpio_request(gpio_num, "my-reset");
+}
+```
 
 ---
 
-### تدفق العمل الداخلي — Pseudocode Flow
+### Pseudocode Flow (CONFIG_OF_GPIO enabled)
 
 ```
-of_get_named_gpio(np, list_name, index)
+of_get_named_gpio(np, "reset-gpios", 0)
 │
-├── of_get_named_gpiod_flags(np, list_name, index, &flags)
-│   ├── of_parse_phandle_with_args(np, list_name, "#gpio-cells", index, &args)
-│   │   └── يُحلّل الـ phandle ويستخرج args[] من الـ DT property
-│   ├── يبحث عن gpio_chip المرتبط بالـ args.np
-│   │   └── إذا لم يجد → -EPROBE_DEFER
-│   └── يُنشئ gpio_desc من (gpio_chip, offset=args.args[0])
+├─► of_get_named_gpiod_flags(np, "reset-gpios", 0, &flags)
+│       │
+│       ├─► of_parse_phandle_with_args(np, "reset-gpios",
+│       │         "#gpio-cells", 0, &gpiospec)
+│       │       └─► parses DT: finds phandle → gpio controller node
+│       │                      reads args (pin number, flags)
+│       │
+│       ├─► of_find_gpio(np, "reset-gpios", 0, &flags)
+│       │       └─► of_xlate(chip, &gpiospec, &flags)
+│       │               └─► returns hwirq (offset within chip)
+│       │
+│       └─► returns gpio_desc*
 │
-└── desc_to_gpio(desc)
-    └── يُرجع gpio_chip->base + hwirq  ← الرقم النهائي
+└─► desc_to_gpio(desc)
+        └─► returns chip->base + hwirq  (global GPIO number)
 ```
 
 ---
 
-### ملاحظة معمارية
+### ملاحظة على الـ Stub
 
-الـ header `of_gpio.h` هو **bridge layer** بين:
+لما `CONFIG_OF_GPIO` مش مفعّل، الـ `static inline` stub بترجع `-ENOSYS` على طول. ده بيخلي الـ drivers اللي بتستخدم `of_get_named_gpio()` تـ link بدون مشكلة حتى على platforms من غير OF GPIO support، طالما الـ driver بيـ handle الـ negative return بصورة صحيحة.
 
-- **الـ OF/DT subsystem** (`linux/of.h`) الذي يعمل بـ `device_node` و `property`.
-- **الـ legacy integer GPIO API** (`linux/gpio.h`) الذي يعمل بأرقام GPIO الـ global.
-
-الاتجاه الحديث في الـ kernel هو استخدام `devm_gpiod_get()` / `gpiod_get()` مباشرةً مع الـ descriptor-based API بدلاً من `of_get_named_gpio()`. هذه الأخيرة باقية للـ legacy drivers التي تعتمد على الـ integer GPIO numbers.
+```c
+/* stub — no DT GPIO support compiled in */
+static inline int of_get_named_gpio(const struct device_node *np,
+                                    const char *propname, int index)
+{
+    return -ENOSYS; /* always fail gracefully */
+}
+```
 ## Phase 5: دليل الـ Debugging الشامل
 
-يغطي هذا الدليل تقنيات debugging كاملة لـ subsystem الـ `of_gpio` — وهو الطبقة التي تربط بين الـ **Device Tree** وواجهة الـ **GPIO** في الـ Linux kernel، محورها الرئيسي دالة `of_get_named_gpio()` والـ `struct device_node` المرتبطة بها.
+الـ `of_gpio.h` بيوفر الـ OF (Open Firmware / Device Tree) helpers للـ GPIO API. الـ debugging هنا بيتمحور حوالين ٣ محاور: **Device Tree parsing**، **GPIO subsystem state**، و**hardware line state**.
 
 ---
 
 ### Software Level
 
-#### 1. مدخلات الـ debugfs
+#### 1. الـ debugfs entries
 
-الـ **debugfs** يكشف حالة الـ GPIO والـ Device Tree داخلياً:
+الـ GPIO subsystem بيعرض معلوماتها الكاملة جوه `/sys/kernel/debug/gpio`:
 
 ```bash
-# Mount debugfs إن لم يكن مُوصَّلاً
-mount -t debugfs none /sys/kernel/debug
-
-# عرض كل GPIO chips المسجّلة مع تفاصيل كل line
+# اقرأ حالة كل GPIO lines المسجلة في الكيرنل
 cat /sys/kernel/debug/gpio
-
-# عرض شجرة الـ Device Tree كاملة بصيغة مقروءة
-cat /sys/kernel/debug/of_component_probe   # إن وُجد
-ls /sys/kernel/debug/pinctrl/              # لكل pinctrl controller
-cat /sys/kernel/debug/pinctrl/<controller>/pins
-cat /sys/kernel/debug/pinctrl/<controller>/pingroups
-cat /sys/kernel/debug/pinctrl/<controller>/pinmux-pins
 ```
 
-**تفسير output الـ `/sys/kernel/debug/gpio`:**
+**مثال على الـ output:**
 
 ```
-gpiochip0: GPIOs 0-31, parent: platform/gpio0, gpio-controller:
- gpio-5  (                    ) in  hi    IRQ
- gpio-12 (reset               ) out lo
- gpio-18 (spi-cs              ) out hi
+gpiochip0: GPIOs 0-31, parent: platform/gpio0, gpio0:
+ gpio-5   (reset-gpio           ) out lo
+ gpio-12  (enable-gpio          ) out hi
+ gpio-17  (irq-gpio             ) in  hi IRQ
 ```
 
-- **in/out**: اتجاه الـ GPIO
-- **hi/lo**: القيمة الحالية
-- **IRQ**: مُستخدم كـ interrupt
+**تفسير الـ output:**
+- الاسم جنب الـ GPIO number = الـ `list_name` اللي اتبعت في `of_get_named_gpio()`
+- `out lo` / `out hi` = direction + value
+- `in hi IRQ` = input مربوط بـ interrupt
 
 ```bash
-# قراءة GPIO chip محددة مع كل consumers
-cat /sys/kernel/debug/gpio | grep -A5 "gpiochip0"
+# شوف الـ GPIO chips المسجلة
+ls /sys/kernel/debug/gpio*
 
-# فحص الـ DT nodes التي طلبت GPIO بعينه
-grep -r "gpios" /sys/firmware/devicetree/base/ 2>/dev/null | head -20
+# لو في kernel جديد بيستخدم gpio-cdev
+cat /sys/kernel/debug/gpio | grep -A5 "gpiochip"
 ```
 
-#### 2. مدخلات الـ sysfs
+#### 2. الـ sysfs entries
 
 ```bash
-# قائمة كل GPIO controllers
-ls /sys/bus/platform/drivers/gpio*/
+# اعرف كل gpiochips موجودة
 ls /sys/class/gpio/
 
-# export GPIO يدوياً للاختبار (GPIO رقم 18 مثلاً)
-echo 18 > /sys/class/gpio/export
-cat /sys/class/gpio/gpio18/direction
-cat /sys/class/gpio/gpio18/value
-cat /sys/class/gpio/gpio18/edge
+# output:
+# export  gpiochip0  gpiochip32  unexport
 
-# عرض الـ device node المرتبط بالـ GPIO chip
-ls -la /sys/class/gpio/gpiochip0/device/of_node
+# اعرف معلومات gpiochip معين
+cat /sys/class/gpio/gpiochip0/label     # اسم الـ chip
+cat /sys/class/gpio/gpiochip0/base      # base GPIO number
+cat /sys/class/gpio/gpiochip0/ngpio     # عدد الـ lines
+
+# export GPIO يدوياً عشان تتعامل معاه
+echo 17 > /sys/class/gpio/export
+cat /sys/class/gpio/gpio17/direction    # in / out
+cat /sys/class/gpio/gpio17/value        # 0 / 1
+
+# الـ Device Tree path للـ GPIO chip
 cat /sys/class/gpio/gpiochip0/device/of_node/compatible
-
-# فحص الـ properties من الـ DT عبر sysfs
-ls /sys/firmware/devicetree/base/
-# تصفح node معين
-ls /sys/firmware/devicetree/base/leds/
-xxd /sys/firmware/devicetree/base/leds/gpios   # قراءة الـ phandle + args
 ```
 
-**جدول مسارات الـ sysfs الجوهرية:**
+**جدول الـ sysfs paths المهمة:**
 
-| المسار | ما يكشفه |
-|--------|----------|
-| `/sys/class/gpio/gpiochipN/base` | رقم أول GPIO في الـ chip |
-| `/sys/class/gpio/gpiochipN/ngpio` | عدد الـ GPIOs |
-| `/sys/class/gpio/gpiochipN/label` | اسم الـ chip |
+| Path | المحتوى |
+|------|---------|
+| `/sys/class/gpio/gpiochipN/label` | اسم الـ controller |
+| `/sys/class/gpio/gpiochipN/base` | رقم أول GPIO |
+| `/sys/class/gpio/gpiochipN/ngpio` | عدد الـ lines |
 | `/sys/class/gpio/gpioN/direction` | `in` أو `out` |
-| `/sys/class/gpio/gpioN/value` | `0` أو `1` |
-| `/sys/firmware/devicetree/base/` | شجرة الـ DT كاملة |
+| `/sys/class/gpio/gpioN/value` | القيمة الحالية `0`/`1` |
+| `/sys/class/gpio/gpioN/active_low` | inverted logic |
+| `/sys/bus/platform/drivers/gpio*/` | الـ driver binding |
 
-#### 3. الـ ftrace — تتبع مسار `of_get_named_gpio()`
-
-```bash
-# تفعيل tracing للـ GPIO و OF subsystems
-cd /sys/kernel/debug/tracing
-
-# عرض الـ events المتاحة
-grep -i gpio available_events
-grep -i "of\b"  available_events
-
-# تفعيل events الـ GPIO
-echo 1 > events/gpio/enable
-
-# تتبع function calls مباشرة
-echo function > current_tracer
-echo "of_get_named_gpio" > set_ftrace_filter
-echo "of_get_named_gpio_flags" >> set_ftrace_filter
-echo "gpiod_get_index" >> set_ftrace_filter
-echo "of_parse_phandle_with_args" >> set_ftrace_filter
-echo 1 > tracing_on
-# شغّل الـ driver أو أعد تحميله
-cat trace
-echo 0 > tracing_on
-echo nop > current_tracer
-```
-
-**مثال على output متوقع:**
-
-```
-      modprobe-1234  [000] ....  12.345678: of_get_named_gpio <-mydriver_probe
-      modprobe-1234  [000] ....  12.345679: of_parse_phandle_with_args <-of_get_named_gpio
-      modprobe-1234  [000] ....  12.345680: of_xlate_and_get_gpiod_flags <-of_get_named_gpio
-```
+#### 3. الـ ftrace — tracepoints وإيفنتات مفيدة
 
 ```bash
-# function_graph tracer لرؤية التسلسل الكامل
-echo function_graph > current_tracer
-echo "of_get_named_gpio" > set_graph_function
-echo 1 > tracing_on
-# trigger the driver load
-cat trace | head -50
+# شوف الـ available events اللي علاقتها بالـ GPIO والـ OF
+grep -r "gpio\|of_gpio" /sys/kernel/tracing/available_events
+
+# فعّل tracing للـ GPIO requests
+echo 1 > /sys/kernel/tracing/events/gpio/enable
+
+# تابع parsing الـ Device Tree properties
+echo 1 > /sys/kernel/tracing/events/of/enable
+
+# ابدأ الـ tracing وشغّل الـ driver
+echo 1 > /sys/kernel/tracing/tracing_on
+modprobe <your_driver>   # أو insmod
+echo 0 > /sys/kernel/tracing/tracing_on
+
+# اقرأ النتيجة
+cat /sys/kernel/tracing/trace
 ```
 
-#### 4. تفعيل الـ printk والـ dynamic debug
+**filter على function معينة:**
 
 ```bash
-# تفعيل debug messages لـ GPIO subsystem بأكمله
-echo "file drivers/gpio/*.c +p" > /sys/kernel/debug/dynamic_debug/control
-echo "file include/linux/of_gpio.h +p" > /sys/kernel/debug/dynamic_debug/control
+# trace الـ of_get_named_gpio فقط
+echo "of_get_named_gpio" > /sys/kernel/tracing/set_ftrace_filter
+echo "function" > /sys/kernel/tracing/current_tracer
+echo 1 > /sys/kernel/tracing/tracing_on
+```
 
-# تفعيل debug للـ OF/DT subsystem
+#### 4. الـ printk والـ dynamic debug
+
+```bash
+# فعّل dynamic debug لـ of_gpio subsystem بالكامل
+echo "file of_gpio.c +p" > /sys/kernel/debug/dynamic_debug/control
+
+# فعّل debug لملفات الـ OF parsing كلها
 echo "file drivers/of/*.c +p" > /sys/kernel/debug/dynamic_debug/control
-echo "file lib/devres.c +p" >> /sys/kernel/debug/dynamic_debug/control
 
-# رؤية كل الـ dynamic debug flags النشطة
+# فعّل debug للـ GPIO driver بتاعك (مثلاً gpio-pl061)
+echo "file drivers/gpio/gpio-pl061.c +p" > /sys/kernel/debug/dynamic_debug/control
+
+# شوف اللي اتفعّل
 cat /sys/kernel/debug/dynamic_debug/control | grep gpio
 
-# رفع مستوى الـ loglevel مؤقتاً
-echo 8 > /proc/sys/kernel/printk
-
-# تفعيل debug من سطر kernel boot
-# في /etc/default/grub:
-# GRUB_CMDLINE_LINUX="... dyndbg='file of_gpio.c +p; file gpiolib-of.c +p'"
+# أو عن طريق kernel cmdline
+# dyndbg="file of_gpio.c +p"
 ```
 
-**إضافة `pr_debug()` في kernel module مخصص:**
+**في الـ driver نفسه** — ضيف `dev_dbg` في الأماكن الحساسة:
 
 ```c
-#define pr_fmt(fmt) "mydrv: " fmt
-#define DEBUG  /* يجب قبل أي include لتفعيل pr_debug */
-
-#include <linux/of_gpio.h>
-
-static int mydrv_probe(struct platform_device *pdev)
-{
-    int gpio;
-    gpio = of_get_named_gpio(pdev->dev.of_node, "reset-gpios", 0);
-    pr_debug("of_get_named_gpio returned: %d\n", gpio);  /* يظهر مع dyndbg */
-    if (gpio < 0) {
-        dev_err(&pdev->dev, "GPIO request failed: %d\n", gpio);
-        return gpio;
-    }
-    return 0;
-}
+/* داخل probe() بعد of_get_named_gpio */
+gpio_num = of_get_named_gpio(np, "reset-gpios", 0);
+dev_dbg(dev, "of_get_named_gpio('reset-gpios', 0) = %d\n", gpio_num);
+if (gpio_num < 0)
+    dev_err(dev, "failed to get reset GPIO: %d\n", gpio_num);
 ```
 
-#### 5. خيارات الـ Kernel Config للـ Debugging
+#### 5. الـ Kernel Config options للـ Debugging
 
-| الخيار | الوظيفة |
-|--------|----------|
-| `CONFIG_OF_GPIO` | تفعيل دعم GPIO من DT (شرط أساسي) |
-| `CONFIG_GPIOLIB` | مكتبة GPIO الأساسية |
-| `CONFIG_DEBUG_GPIO` | رسائل debug مفصّلة لكل عمليات GPIO |
-| `CONFIG_GPIO_SYSFS` | كشف GPIO عبر sysfs للاختبار اليدوي |
-| `CONFIG_OF_DYNAMIC` | دعم تعديل DT ديناميكياً (overlays) |
-| `CONFIG_OF_OVERLAY` | دعم DT overlays للاختبار |
-| `CONFIG_PROVE_LOCKING` | كشف deadlocks في GPIO locks |
-| `CONFIG_DEBUG_SPINLOCK` | كشف مشاكل spinlock في GPIO IRQ |
-| `CONFIG_DYNAMIC_DEBUG` | تفعيل `pr_debug()` ديناميكياً بلا recompile |
-| `CONFIG_FTRACE` | تتبع function calls |
-| `CONFIG_FUNCTION_TRACER` | تتبع كل دوال الكيرنل |
-| `CONFIG_OF_UNITTEST` | اختبارات وحدة لـ OF/DT subsystem |
+| Config | الغرض |
+|--------|-------|
+| `CONFIG_OF_GPIO` | لازم يكون `y` عشان `of_get_named_gpio` تشتغل |
+| `CONFIG_GPIOLIB` | الـ GPIO subsystem الأساسي |
+| `CONFIG_DEBUG_GPIO` | يفعّل debug messages في الـ GPIO core |
+| `CONFIG_GPIO_SYSFS` | يعرض الـ GPIOs في sysfs |
+| `CONFIG_OF_DYNAMIC` | يدعم تعديل الـ DT في runtime |
+| `CONFIG_OF_UNITTEST` | unit tests للـ OF subsystem |
+| `CONFIG_PROVE_LOCKING` | يكشف locking bugs في GPIO |
+| `CONFIG_DEBUG_FS` | يعرض `/sys/kernel/debug/gpio` |
+| `CONFIG_DYNAMIC_DEBUG` | يفعّل dynamic debug system |
+| `CONFIG_GPIOLIB_IRQCHIP` | debug للـ GPIO-based IRQs |
 
 ```bash
-# التحقق من الخيارات المُفعّلة في الـ kernel الحالي
-zcat /proc/config.gz | grep -E "CONFIG_(OF_GPIO|DEBUG_GPIO|GPIO_SYSFS|OF_OVERLAY)"
-# أو
-grep -E "CONFIG_(OF_GPIO|DEBUG_GPIO)" /boot/config-$(uname -r)
+# تأكد إن الـ configs متفعلة
+zcat /proc/config.gz | grep -E "CONFIG_(OF_GPIO|DEBUG_GPIO|GPIOLIB|GPIO_SYSFS)"
 ```
 
-#### 6. أدوات الـ devlink والـ GPIO-specific
+#### 6. أدوات خاصة بالـ Subsystem
+
+**الـ `gpioinfo` و `gpioget` و `gpioset`** من `libgpiod`:
 
 ```bash
-# gpiodetect: عرض كل GPIO chips
-gpiodetect          # من حزمة libgpiod-tools
+# اعرف كل GPIO chips والـ lines بتاعتها
+gpioinfo
 
-# gpioinfo: تفاصيل كل line في chip معينة
-gpioinfo gpiochip0
+# اقرأ قيمة GPIO line معينة (chip0, line 17)
+gpioget gpiochip0 17
 
-# gpioget: قراءة قيمة GPIO
-gpioget gpiochip0 5
+# اكتب قيمة
+gpioset gpiochip0 17=1
 
-# gpiomon: مراقبة تغيرات GPIO
-gpiomon --num-events=10 gpiochip0 5
-
-# فحص DT من userspace
-dtc -I fs /sys/firmware/devicetree/base > /tmp/current.dts 2>/dev/null
-grep -A5 "reset-gpios\|gpios" /tmp/current.dts
-
-# fdt_dump بديل
-fdtdump /sys/firmware/fdt 2>/dev/null | grep -A3 "gpio"
+# تابع تغيير قيمة GPIO
+gpiomon gpiochip0 17
 ```
 
-#### 7. جدول رسائل الخطأ الشائعة
+**فحص الـ Device Tree node مباشرة:**
 
-| رسالة الخطأ | المعنى | الحل |
-|-------------|--------|-------|
-| `of_get_named_gpio: invalid GPIO` | رقم GPIO خارج النطاق أو سالب | تحقق من DT property وقيمة args |
-| `GPIO: pin X is not set as output` | محاولة كتابة على GPIO مُضبوط كـ input | استدعِ `gpio_direction_output()` أولاً |
-| `can't request region for resource` | تعارض على عنوان الـ GPIO controller | تحقق من عدم تعارض `iomem` |
-| `-EPROBE_DEFER` من `of_get_named_gpio` | الـ GPIO chip لم يُسجَّل بعد | طبيعي، الـ kernel سيعيد المحاولة تلقائياً |
-| `-ENOENT` | الـ property غير موجودة في DT | راجع اسم الـ property في DTS |
-| `-EINVAL` | صيغة الـ property غير صحيحة (cells خاطئة) | تحقق من `#gpio-cells` في الـ GPIO controller node |
-| `gpiochip_add: GPIOs X..Y already in use` | تعارض بين drivers | راجع من يملك نطاق GPIO هذا |
-| `of_parse_phandle_with_args: phandle not found` | الـ phandle في DT يشير إلى node غير موجود | تحقق من صحة الـ phandle |
-| `irq: type not supported` | نوع الـ IRQ trigger غير مدعوم من الـ chip | راجع `irq_set_irq_type()` والـ driver |
-| `Unable to request GPIO` | الـ GPIO مُحجوز بالفعل من driver آخر | استخدم `gpioinfo` لمعرفة المالك |
+```bash
+# اقرأ property اسمها reset-gpios من DT
+cat /proc/device-tree/soc/mydevice@1000/reset-gpios | hexdump -C
 
-#### 8. نقاط استراتيجية لـ `dump_stack()` و`WARN_ON()`
+# اعرف الـ phandle الخاص بالـ GPIO controller
+cat /proc/device-tree/soc/mydevice@1000/reset-gpios | xxd
+```
+
+#### 7. جدول الـ Error Messages الشائعة
+
+| رسالة الـ Kernel Log | السبب | الحل |
+|---------------------|-------|------|
+| `of_get_named_gpio: ret = -ENOENT` | الـ property مش موجودة في الـ DTS | تأكد من اسم الـ property في الـ DTS |
+| `of_get_named_gpio: ret = -EPROBE_DEFER` | الـ GPIO controller لسه مش جاهز | الـ driver هيتجرب تاني، مش error حقيقي |
+| `of_get_named_gpio: ret = -EINVAL` | الـ index أكبر من عدد الـ GPIOs في الـ property | خفّض الـ index أو صحح الـ DTS |
+| `gpio: no more GPIOs available` | استنفدت كل الـ GPIO lines | راجع الـ `ngpio` في الـ chip |
+| `gpiod_request: gpio-17 (reset) status -EBUSY` | الـ GPIO محجوز من driver تاني | اعرف مين بيستخدمه: `cat /sys/kernel/debug/gpio` |
+| `gpio_request: chip not found` | الـ GPIO chip مش متسجل | الـ GPIO controller driver مش loaded |
+| `OF: /soc/gpio: could not get #gpio-cells` | الـ DTS ناقصاها `#gpio-cells` | ضيف `#gpio-cells = <2>;` في الـ GPIO controller node |
+| `-ENOSYS` returned | الـ kernel متبناش بـ `CONFIG_OF_GPIO` | ابني الـ kernel مع `CONFIG_OF_GPIO=y` |
+
+#### 8. أماكن استراتيجية لـ `dump_stack()` و `WARN_ON()`
 
 ```c
-#include <linux/of_gpio.h>
-#include <linux/bug.h>
+/* في of_get_named_gpio — قبل return القيمة */
+int gpio = of_get_named_gpio(np, propname, index);
+WARN_ON(gpio == -EBUSY); /* GPIO متحجوز — مش متوقع هنا */
 
-static int mydrv_get_gpio(struct device_node *np, const char *prop)
-{
-    int gpio;
-
-    /* نقطة 1: تحقق من صحة الـ device_node قبل أي عملية */
-    if (WARN_ON(!np)) {
-        pr_err("NULL device_node passed\n");
-        return -EINVAL;
-    }
-
-    gpio = of_get_named_gpio(np, prop, 0);
-
-    /* نقطة 2: رصد EPROBE_DEFER لتحليل ترتيب التهيئة */
-    if (gpio == -EPROBE_DEFER) {
-        pr_debug("GPIO provider not ready yet for '%s'\n", prop);
-        return gpio;   /* لا dump_stack هنا — هذا سلوك طبيعي */
-    }
-
-    /* نقطة 3: dump stack عند فشل غير متوقع */
-    if (WARN_ON(gpio < 0 && gpio != -ENOENT)) {
-        dump_stack();  /* يكشف من استدعى هذه الدالة */
-        return gpio;
-    }
-
-    /* نقطة 4: WARN إذا طُلب GPIO خارج نطاق الـ chip */
-    WARN_ON(gpio > 1024);  /* حد تقريبي — يكشف قيم مشبوهة */
-
-    return gpio;
+/* تأكد إن الـ node مش NULL قبل الاستخدام */
+if (WARN_ON(!np)) {
+    dump_stack(); /* عشان تعرف مين بعتك node فاضي */
+    return -EINVAL;
 }
-```
 
-**أماكن إضافة `WARN_ON()` في الـ gpiolib-of.c:**
-
-```c
-/* عند xlate: تحقق من تطابق عدد الـ args مع #gpio-cells */
-WARN_ON(gpiospec->args_count != gc->of_gpio_n_cells);
-
-/* عند تسجيل chip جديدة: تحقق من عدم تداخل النطاقات */
-WARN_ON(gpio_is_valid(gc->base) &&
-        gpiochip_find_base(gc->ngpio) != gc->base);
+/* في الـ probe() بعد الحصول على GPIO */
+gpio = of_get_named_gpio(np, "enable-gpios", 0);
+if (gpio < 0 && gpio != -EPROBE_DEFER) {
+    WARN(1, "unexpected error %d getting enable GPIO\n", gpio);
+}
 ```
 
 ---
 
 ### Hardware Level
 
-#### 1. التحقق من تطابق الحالة بين الـ Hardware والـ Kernel
+#### 1. التحقق إن الـ Hardware State بيطابق الـ Kernel State
 
 ```bash
-# 1. قراءة قيمة GPIO من الـ kernel
-cat /sys/class/gpio/gpio18/value    # ما يراه الـ kernel
+# اقرأ القيمة من الـ kernel
+gpioget gpiochip0 5
 
-# 2. تصدير GPIO وقياسه بـ multimeter في نفس الوقت
-echo 18 > /sys/class/gpio/export
-echo out > /sys/class/gpio/gpio18/direction
-echo 1 > /sys/class/gpio/gpio18/value
-# قِس الجهد على الـ pin — يجب أن يكون VCC (3.3V أو 5V حسب الـ SoC)
-echo 0 > /sys/class/gpio/gpio18/value
-# الجهد يجب أن يصبح 0V (أو قريب منه)
+# قارنها بالقراءة المباشرة من الـ register
+# (لازم تعرف base address الـ GPIO controller من الـ datasheet)
+devmem2 0x40020014 w    # قرأ GPIO input data register
 
-# 3. التحقق من الـ pull-up/pull-down
-# إذا كان GPIO كـ input وقيمته غير ثابتة، قد يكون floating
-cat /sys/class/gpio/gpio18/value    # قرأ عدة مرات، يجب أن يستقر
+# تأكد إن الـ direction في الـ kernel بيطابق الـ hardware
+cat /sys/class/gpio/gpio5/direction
 ```
 
-#### 2. تقنيات Register Dump
+#### 2. الـ Register Dump
 
 ```bash
-# قراءة سجل GPIO controller مباشرة (مثال لـ BCM2835 - Raspberry Pi)
-# عنوان GPIO base = 0x3F200000 لـ RPi 2/3
+# قرأ GPIO data register مباشرة (مثال: STM32 GPIOA)
+# GPIOA base = 0x40020000
+devmem2 0x40020000 w   # MODER   — direction لكل pin
+devmem2 0x40020004 w   # OTYPER  — output type
+devmem2 0x40020008 w   # OSPEEDR — speed
+devmem2 0x4002000C w   # PUPDR   — pull-up/pull-down
+devmem2 0x40020010 w   # IDR     — input data
+devmem2 0x40020014 w   # ODR     — output data
 
-# باستخدام devmem2
-devmem2 0x3F200034 w   # GPLEV0 - قيم GPIOs 0-31
-devmem2 0x3F200038 w   # GPLEV1 - قيم GPIOs 32-53
-
-# قراءة GPFSEL (Function Select) لـ GPIOs 0-9
-devmem2 0x3F200000 w   # GPFSEL0
-
-# باستخدام /dev/mem (يحتاج CONFIG_DEVMEM=y)
-python3 -c "
-import mmap, struct
-with open('/dev/mem', 'rb') as f:
-    m = mmap.mmap(f.fileno(), 4096, offset=0x3F200000)
-    val = struct.unpack('<I', m[0x34:0x38])[0]
-    print(f'GPLEV0 = 0x{val:08X}')
-    for i in range(32):
-        print(f'GPIO{i} = {(val >> i) & 1}')
-"
-
-# باستخدام io utility (من package io أو memtool)
-io -4 0x3F200034   # قراءة 4 bytes
-
-# فحص الـ iomem المُخصص للـ GPIO controller
-cat /proc/iomem | grep -i gpio
+# أو عن طريق /dev/mem مع io tool
+io -4 -r 0x40020010    # قرأ 32-bit register
 ```
 
-**مثال لهيكل سجلات GPIO نموذجي (ARM SoC):**
+**مثال على تفسير نتيجة IDR:**
 
 ```
-عنوان قاعدة GPIO = 0xXXXX0000
-+-----------+--------+---------------------------+
-| Offset    | الاسم  | الوظيفة                   |
-+-----------+--------+---------------------------+
-| 0x000     | GPDIR  | Data Direction Register    |
-| 0x004     | GPDAT  | Data Register (R/W)        |
-| 0x008     | GPEN   | Output Enable              |
-| 0x00C     | GPINTCFG| Interrupt Config          |
-| 0x010     | GPINTSTAT| Interrupt Status         |
-+-----------+--------+---------------------------+
+0x40020010 = 0x00000020  →  binary: 0000 0000 0010 0000
+                          →  bit 5 = 1  →  GPIO5 = HIGH
 ```
 
 #### 3. نصائح الـ Logic Analyzer والـ Oscilloscope
 
-**إعداد الـ Logic Analyzer لتحليل GPIO:**
-
-```
-Channel Setup:
-- CH0: GPIO pin المُختبَر
-- CH1: CLK signal (إن وُجد)
-- CH2: Enable/CS signal
-- Trigger: Rising/Falling edge على CH0
-
-معدل الأخذ المناسب:
-- GPIO عادي: 1MHz يكفي
-- GPIO كـ SPI CS: 10-100MHz
-- GPIO كـ I2C: 400kHz - 1MHz
-
-Decode Options:
-- إذا GPIO مرتبط بـ SPI: فعّل SPI decoder
-- إذا GPIO مرتبط بـ I2C: فعّل I2C decoder
-```
-
-**نقاط قياس حرجة:**
-
-```
-SoC GPIO Pin ──────────────── Target Device
-        |                           |
-        +── 10KΩ Pull-up ── VCC     |
-        |                           |
-      [CH0 Logic Analyzer]          |
-        |                           |
-        +──────────────────────────>|
-             قِس هنا بالـ probe
-```
-
-```bash
-# مزامنة kernel event مع قياس الـ oscilloscope
-# أضف toggle في الكود:
-echo 1 > /sys/class/gpio/gpio18/value  # rising edge
-cat /sys/class/gpio/gpio18/value        # تأكيد
-echo 0 > /sys/class/gpio/gpio18/value  # falling edge
-# على الـ oscilloscope: يجب رؤية نبضة واضحة
-```
+- **Trigger point**: شيّل trigger على الـ falling/rising edge للـ GPIO line اللي بتدي مشكلة.
+- **Timing**: قيس الـ delay بين `of_get_named_gpio()` وأول استخدام فعلي للـ pin — لو في تأخير في الـ `gpio_request()` ممكن تلاقي `EPROBE_DEFER`.
+- **Voltage levels**: تأكد إن الـ GPIO line بتوصل الـ voltage الصح (3.3V أو 1.8V حسب الـ SoC).
+- **Pull resistors**: لو الـ line بتطرطش (floating) وإنت مش مصرّح pull في الـ DTS، هتشوف noise على الـ analyzer.
+- **Glitches**: لو الـ GPIO بيولع وبيطفي بسرعة، ابحث عن `gpio_set_value` بيتكال من interrupt context بدون `gpio_set_value_cansleep`.
 
 #### 4. مشاكل الـ Hardware الشائعة وأنماطها في الـ Kernel Log
 
-| مشكلة الـ Hardware | نمط في dmesg | التحقق |
-|-------------------|--------------|--------|
-| GPIO floating (غير موصول بـ pull) | قيمة تتقلب عشوائياً | `gpiomon gpiochip0 N` — يرى toggles مستمرة |
-| جهد خاطئ (5V على SoC 3.3V) | `GPIO: timeout waiting for GPIO to settle` | قِس بـ multimeter على الـ GPIO pad |
-| تعارض PIN مع pinctrl | `pin X is already requested` | `cat /sys/kernel/debug/pinctrl/*/pins` |
-| GPIO controller لم يُهيَّأ | `gpiochip_add: base 0 is invalid` | تحقق من ترتيب تهيئة الـ drivers |
-| مشكلة power domain | GPIO يعمل أحياناً فقط | تحقق من `CONFIG_PM` وتسلسل الـ power |
-| GPIO مُتحكَّم به من firmware | `can't map GPIO to IRQ` | تحقق من ACPI/UEFI GPIO ownership |
+| المشكلة | Pattern في الـ Log | التفسير |
+|---------|------------------|---------|
+| الـ GPIO line فاضية (floating) | قيمة بتتغير من تلقاء نفسها في `gpiomon` | مفيش pull resistor — ضيفه في DTS أو hardware |
+| الـ GPIO controller مش مشتغل | `gpio_request failed: -ENODEV` | تأكد إن الـ clock للـ GPIO controller متفعّل |
+| تعارض في الـ pinmux | `pin X already requested by Y` | الـ pin متاخد من driver تاني عبر pinctrl |
+| مشكلة في الـ voltage translator | القيمة صح في الـ kernel بس الـ hardware مش بيستجاوب | افحص الـ level shifter بالـ oscilloscope |
+| الـ active_low مش مضبوط | السلوك معكوس | راجع الـ `GPIO_ACTIVE_LOW` flag في الـ DTS |
 
-**أنماط dmesg المشبوهة:**
+#### 5. الـ Device Tree Debugging
 
 ```bash
-# ابحث عن رسائل GPIO في dmesg
-dmesg | grep -i "gpio\|of_gpio\|gpiochip" | grep -E "error|fail|invalid|warn"
+# تأكد إن الـ DT node موجود ومتحمّل
+ls /proc/device-tree/soc/mydevice@1000/
 
-# أنماط خطيرة
-dmesg | grep "gpio.*-EPROBE_DEFER"   # driver ينتظر
-dmesg | grep "GPIO.*busy"            # تعارض
-dmesg | grep "gpiolib: detected"     # اكتشاف تلقائي
+# اقرأ الـ reset-gpios property
+xxd /proc/device-tree/soc/mydevice@1000/reset-gpios
+# output مثال:
+# 00000000: 0000 0003 0000 0011 0000 0001  ....
+# byte 0-3: phandle للـ GPIO controller (= 0x3)
+# byte 4-7: GPIO number (= 17 = 0x11)
+# byte 8-11: flags (= 1 = GPIO_ACTIVE_LOW)
+
+# تأكد إن الـ GPIO controller node عنده #gpio-cells = <2>
+cat /proc/device-tree/soc/gpio@40020000/#gpio-cells | xxd
+
+# تحقق من الـ compatible string
+cat /proc/device-tree/soc/gpio@40020000/compatible
+
+# افحص الـ DT overlay لو في overlay محمّل
+cat /sys/firmware/devicetree/base/__symbols__/gpio0
 ```
 
-#### 5. تصحيح الـ Device Tree والتحقق من تطابقه مع الـ Hardware
+**أهم حاجة في الـ DTS** — تأكد من الـ format الصح:
+
+```dts
+/* GPIO controller node */
+gpio0: gpio@40020000 {
+    compatible = "vendor,gpio-ctrl";
+    reg = <0x40020000 0x400>;
+    #gpio-cells = <2>;   /* لازم تبقى 2: (gpio-number, flags) */
+    gpio-controller;
+};
+
+/* Device node بيستخدم الـ GPIO */
+mydevice@1000 {
+    compatible = "vendor,mydevice";
+    reg = <0x1000 0x100>;
+    reset-gpios = <&gpio0 17 GPIO_ACTIVE_LOW>;
+    /*              ↑       ↑       ↑
+                  phandle  number  flags */
+};
+```
+
+**لو `of_get_named_gpio` رجعت -EINVAL:**
 
 ```bash
-# 1. استخراج الـ DT المُحمَّل حالياً
-dtc -I fs -O dts /sys/firmware/devicetree/base -o /tmp/live.dts 2>/dev/null
-
-# 2. البحث عن كل GPIO references
-grep -n "gpios\|gpio-controller\|gpio-cells" /tmp/live.dts
-
-# 3. مثال نموذجي لـ node صحيح:
-cat << 'EOF'
-/* DTS صحيح */
-gpio0: gpio@3f200000 {
-    compatible = "brcm,bcm2835-gpio";
-    reg = <0x3f200000 0xb4>;
-    gpio-controller;
-    #gpio-cells = <2>;        /* يجب أن يتطابق مع args في of_get_named_gpio */
-    gpio-ranges = <&pmx 0 0 54>;
-};
-
-mydevice {
-    compatible = "vendor,mydev";
-    reset-gpios = <&gpio0 18 GPIO_ACTIVE_LOW>;
-    /*              ^      ^  ^
-                    phandle pin flags  */
-};
-EOF
-
-# 4. التحقق من تطابق #gpio-cells مع عدد الـ args
-# of_get_named_gpio(np, "reset-gpios", 0) يتوقع args[0]=pin, args[1]=flags
-# إذا #gpio-cells = <2> فهذا صحيح
-xxd /sys/firmware/devicetree/base/gpio@3f200000/\#gpio-cells
-
-# 5. DT Overlay للاختبار بدون reboot
-cat > /tmp/test_gpio.dts << 'EOF'
-/dts-v1/;
-/plugin/;
-/ {
-    fragment@0 {
-        target-path = "/";
-        __overlay__ {
-            test_gpio_node {
-                compatible = "test,gpio-debug";
-                test-gpios = <&gpio0 20 0>;
-                status = "okay";
-            };
-        };
-    };
-};
-EOF
-dtc -I dts -O dtb /tmp/test_gpio.dts -o /tmp/test_gpio.dtbo
-# تحميل الـ overlay (يحتاج CONFIG_OF_OVERLAY + configfs)
-mkdir -p /sys/kernel/config/device-tree/overlays/test
-cp /tmp/test_gpio.dtbo /sys/kernel/config/device-tree/overlays/test/dtbo
-
-# 6. التحقق من أن الـ OF node مُرتبط بالـ device الصحيح
-ls -la /sys/bus/platform/devices/*/of_node
-readlink /sys/bus/platform/devices/mydevice/of_node
-# يجب أن يشير إلى /sys/firmware/devicetree/base/mydevice
+# تحقق إن #gpio-cells في الـ controller = 2
+# وإن الـ property اسمها صح (بتنتهي بـ -gpios أو -gpio)
+dtc -I fs /proc/device-tree 2>/dev/null | grep -A3 "mydevice"
 ```
 
 ---
 
-### Practical Commands
+### Practical Commands — جاهز للـ Copy-Paste
 
-#### أوامر جاهزة للنسخ والتشغيل
-
-**أولاً: فحص شامل سريع لـ GPIO + OF:**
+#### فحص حالة الـ GPIO بالكامل
 
 ```bash
 #!/bin/bash
-# gpio_of_debug.sh — فحص شامل لـ of_gpio subsystem
+# gpio_debug.sh — فحص شامل للـ GPIO state
 
 echo "=== GPIO Chips ==="
-gpiodetect 2>/dev/null || ls /sys/class/gpio/gpiochip*/label
-
-echo "=== GPIO Details ==="
 gpioinfo 2>/dev/null || cat /sys/kernel/debug/gpio
 
-echo "=== DT GPIO References ==="
-dtc -I fs /sys/firmware/devicetree/base -o - 2>/dev/null | \
-    grep -A2 "gpios\s*="
-
-echo "=== Active GPIO Requests ==="
-cat /sys/kernel/debug/gpio | grep -v "^$\|^gpio"
-
-echo "=== Pinctrl Status ==="
-for f in /sys/kernel/debug/pinctrl/*/pinmux-pins; do
-    echo "--- $f ---"
-    cat "$f" | grep "gpio\|GPIO"
+echo ""
+echo "=== GPIO sysfs ==="
+for chip in /sys/class/gpio/gpiochip*; do
+    echo "Chip: $(basename $chip)"
+    echo "  Label: $(cat $chip/label)"
+    echo "  Base:  $(cat $chip/base)"
+    echo "  NGpio: $(cat $chip/ngpio)"
 done
 
-echo "=== Kernel Config Check ==="
-zcat /proc/config.gz 2>/dev/null | grep -E "CONFIG_(OF_GPIO|DEBUG_GPIO|GPIO_SYSFS)="
+echo ""
+echo "=== Exported GPIOs ==="
+for gpio in /sys/class/gpio/gpio*; do
+    [ -d "$gpio" ] || continue
+    n=$(basename $gpio | sed 's/gpio//')
+    dir=$(cat $gpio/direction 2>/dev/null)
+    val=$(cat $gpio/value 2>/dev/null)
+    echo "  GPIO$n: direction=$dir value=$val"
+done
 ```
 
-**ثانياً: تتبع `of_get_named_gpio()` بالكامل:**
+#### تفعيل debug وتشغيل الـ driver
 
 ```bash
-#!/bin/bash
-# trace_of_gpio.sh
+# خطوة 1: فعّل dynamic debug
+echo "file of_gpio.c +p" > /sys/kernel/debug/dynamic_debug/control
+echo "file drivers/gpio/*.c +p" > /sys/kernel/debug/dynamic_debug/control
 
-TRACEDIR=/sys/kernel/debug/tracing
+# خطوة 2: فعّل ftrace
+echo nop > /sys/kernel/tracing/current_tracer
+echo 1 > /sys/kernel/tracing/events/gpio/enable
+echo 1 > /sys/kernel/tracing/tracing_on
 
-# إيقاف أي tracing سابق
-echo 0 > $TRACEDIR/tracing_on
-echo nop > $TRACEDIR/current_tracer
-echo "" > $TRACEDIR/set_ftrace_filter
+# خطوة 3: حمّل الـ driver
+modprobe my_gpio_driver
 
-# إعداد الـ function graph tracer
-echo function_graph > $TRACEDIR/current_tracer
-cat >> $TRACEDIR/set_graph_function << 'FUNCS'
-of_get_named_gpio
-of_parse_phandle_with_args
-of_xlate_and_get_gpiod_flags
-gpiod_get_index
-FUNCS
+# خطوة 4: اقرأ النتيجة
+echo 0 > /sys/kernel/tracing/tracing_on
+cat /sys/kernel/tracing/trace | grep -i gpio
 
-echo 1 > $TRACEDIR/tracing_on
-echo "Loading module (replace with your module name)..."
-modprobe mydriver 2>&1
-sleep 2
-echo 0 > $TRACEDIR/tracing_on
-
-echo "=== Trace Output ==="
-cat $TRACEDIR/trace
-
-# تنظيف
-echo nop > $TRACEDIR/current_tracer
+# خطوة 5: شوف الـ kernel messages
+dmesg | tail -50 | grep -iE "gpio|of_gpio|gpiochip"
 ```
 
-**ثالثاً: اختبار GPIO بعينه من الـ DT:**
+#### فحص الـ EPROBE_DEFER
 
 ```bash
-#!/bin/bash
-# test_gpio_from_dt.sh GPIO_NUMBER
+# شوف الـ drivers اللي في حالة deferred probe
+cat /sys/kernel/debug/devices_deferred
 
-GPIO=${1:-18}
-echo "Testing GPIO $GPIO"
-
-# Export
-echo $GPIO > /sys/class/gpio/export 2>/dev/null || true
-
-# Direction test
-echo "=== Setting as output ==="
-echo out > /sys/class/gpio/gpio${GPIO}/direction
-echo 1 > /sys/class/gpio/gpio${GPIO}/value
-sleep 0.1
-VAL=$(cat /sys/class/gpio/gpio${GPIO}/value)
-echo "Written 1, Read: $VAL"
-
-echo 0 > /sys/class/gpio/gpio${GPIO}/value
-sleep 0.1
-VAL=$(cat /sys/class/gpio/gpio${GPIO}/value)
-echo "Written 0, Read: $VAL"
-
-# Input test
-echo "=== Setting as input ==="
-echo in > /sys/class/gpio/gpio${GPIO}/direction
-echo "Current value: $(cat /sys/class/gpio/gpio${GPIO}/value)"
-
-# Cleanup
-echo $GPIO > /sys/class/gpio/unexport
+# أو
+dmesg | grep "EPROBE_DEFER\|probe deferred"
 ```
 
-**رابعاً: فحص DT لـ GPIO property محددة:**
+#### مراقبة تغيير GPIO line في real-time
 
 ```bash
-#!/bin/bash
-# check_dt_gpio_prop.sh <node_path> <property_name>
-# مثال: ./check_dt_gpio_prop.sh /leds/led0 gpios
+# باستخدام gpiomon (libgpiod)
+gpiomon --num-events=10 --rising-edge --falling-edge gpiochip0 17
 
-NODE_PATH=${1:-/}
-PROP=${2:-gpios}
-DT_BASE=/sys/firmware/devicetree/base
+# أو export وقرأ في loop
+echo 17 > /sys/class/gpio/export
+while true; do
+    val=$(cat /sys/class/gpio/gpio17/value)
+    echo "$(date +%s.%N): gpio17=$val"
+    sleep 0.1
+done
+```
 
-FULL_PATH="${DT_BASE}${NODE_PATH}"
+**تفسير الـ output:**
 
-if [ ! -d "$FULL_PATH" ]; then
-    echo "Node not found: $FULL_PATH"
-    exit 1
-fi
+```
+1708690000.123456789: gpio17=0
+1708690000.234567890: gpio17=1    ← rising edge هنا
+1708690000.345678901: gpio17=1
+```
 
-PROP_FILE="${FULL_PATH}/${PROP}"
-if [ ! -f "$PROP_FILE" ]; then
-    echo "Property '$PROP' not found in $NODE_PATH"
-    echo "Available properties:"
-    ls "$FULL_PATH"
-    exit 1
-fi
+#### Register dump سريع
 
-echo "=== Raw bytes of '$PROP' ==="
-xxd "$PROP_FILE"
-
-echo "=== Interpreted as phandle + args ==="
+```bash
+# بدل devmem2 لو مش موجود
 python3 -c "
-import struct, sys
-data = open('$PROP_FILE', 'rb').read()
-words = struct.unpack('>%dI' % (len(data)//4), data)
-print(f'phandle: 0x{words[0]:08X} ({words[0]})')
-for i, a in enumerate(words[1:], 1):
-    print(f'arg[{i-1}]: {a} (0x{a:08X})')
+import mmap, struct, os
+GPIO_BASE = 0x40020000
+GPIO_SIZE = 0x400
+f = os.open('/dev/mem', os.O_RDONLY | os.O_SYNC)
+mem = mmap.mmap(f, GPIO_SIZE, mmap.MAP_SHARED, mmap.PROT_READ, offset=GPIO_BASE)
+idr = struct.unpack('<I', mem[0x10:0x14])[0]
+print(f'IDR = 0x{idr:08X}  (binary: {idr:032b})')
+mem.close()
+os.close(f)
 "
-```
-
-**خامساً: قراءة registers الـ GPIO controller مباشرة:**
-
-```bash
-#!/bin/bash
-# dump_gpio_regs.sh <base_address> <size>
-# مثال: ./dump_gpio_regs.sh 0x3F200000 0xB4
-
-BASE=${1:-0x3F200000}
-SIZE=${2:-0xB4}
-
-if ! command -v devmem2 &>/dev/null; then
-    echo "devmem2 not found, trying /dev/mem..."
-    python3 -c "
-import mmap, struct, sys
-base = $BASE
-size = $SIZE
-with open('/dev/mem', 'rb') as f:
-    m = mmap.mmap(f.fileno(), (size+4095)&~4095, offset=base&~4095)
-    off = base & 4095
-    for i in range(0, size, 4):
-        val = struct.unpack('<I', m[off+i:off+i+4])[0]
-        print(f'0x{base+i:08X}: 0x{val:08X}  {val:032b}')
-"
-    exit 0
-fi
-
-echo "=== GPIO Register Dump @ $BASE ==="
-ADDR=$BASE
-while [ $((ADDR - BASE)) -lt $SIZE ]; do
-    VAL=$(devmem2 $ADDR w 2>/dev/null | grep "Value at" | awk '{print $NF}')
-    printf "0x%08X: %s\n" $ADDR "$VAL"
-    ADDR=$((ADDR + 4))
-done
-```
-
-#### تفسير النتائج المتوقعة
-
-**`gpioinfo` output طبيعي:**
-```
-gpiochip0 - 54 lines:
-        line   0:      unnamed       unused   input  active-high
-        line  18:  "reset-gpio"      "mydrv"  output active-low  [used]
-        line  25:     "led-red"      "leds"   output active-high [used]
-```
-- **unused**: GPIO حر، لا driver يمتلكه
-- **used**: مُحجوز من driver (الاسم بين `""`)
-- **active-low**: الـ kernel يعكس المنطق تلقائياً
-
-**`/sys/kernel/debug/gpio` output مع مشكلة:**
-```
-gpio-18  (reset               ) out hi    -- تحذير: DT يقول active-low لكن قيمة hi تعني فعلياً LOW
-```
-
-**`dmesg` عند نجاح تهيئة GPIO من DT:**
-```
-[    2.345678] mydriver: GPIO 18 (reset) obtained from DT property 'reset-gpios'
-[    2.345679] mydriver: GPIO direction set to output, initial value: 0
 ```
 ## Phase 6: سيناريوهات من الحياة العملية
 
 ---
 
-### السيناريو 1: بوابة صناعية على RK3562 — GPIO لا يستجيب عند التشغيل
+### السيناريو الأول: Industrial Gateway على RK3562 — الـ `reset-gpios` مش شغال
 
 #### العنوان
-**الـ** `of_get_named_gpio` يُرجع `-ENOSYS` على بوابة صناعية مبنية على RK3562
+**الـ GPIO reset مش بيتفعل في industrial gateway بيستخدم RK3562**
 
 #### السياق
-شركة تبني **industrial gateway** تعمل بنظام Linux مخصص على **Rockchip RK3562**.
-المنتج يتحكم في relay خارجي عبر GPIO لفتح/غلق دوائر كهربائية.
-المبرمج يستخدم driver مكتوب منذ سنتين على منصة مختلفة.
+شركة بتصمم industrial gateway بيشتغل على RK3562 SoC. الـ board بيحمل chip خارجية (RS-485 transceiver) محتاجة GPIO line للـ hardware reset. الـ DT بيحدد `reset-gpios` property، والـ driver بيستخدم `of_get_named_gpio()`.
 
 #### المشكلة
-عند boot، الـ driver يستدعي `of_get_named_gpio()` ويحصل على `-ENOSYS` دائماً، مما يجعل الـ relay يبقى مغلقاً ولا يمكن التحكم فيه.
+الـ driver بيطلع `probe()` بنجاح، لكن الـ RS-485 chip مش بتتعرف — الـ transceiver مش بيشتغل خالص. الـ engineer يشوف الكود يلاقي:
+
+```c
+gpio_num = of_get_named_gpio(np, "reset-gpios", 0);
+if (gpio_num < 0) {
+    dev_err(dev, "failed to get reset gpio\n");
+    return gpio_num;
+}
+```
+
+الـ log مش بيطلع أي error، يعني الـ function رجعت قيمة >= 0، بس الـ reset مش بيحصل.
 
 #### التحليل
-بالنظر في `of_gpio.h`:
+الـ `of_get_named_gpio()` في `of_gpio.h` بتاخد:
+- `np` — الـ `device_node` للـ device
+- `list_name` — اسم الـ property (`"reset-gpios"`)
+- `index` — الـ index في الـ list
+
+الـ function بترجع رقم GPIO **global** من الـ GPIO space. المشكلة مش في الـ API نفسه — المشكلة إن الـ engineer استخدم الرقم الناتج كـ "active high" من غير ما يشيك على الـ flags:
+
+```c
+/* WRONG: ignores active-low flag from DT */
+gpio_direction_output(gpio_num, 1); /* should be 0 for active-low reset */
+```
+
+الـ DT عنده:
+```dts
+reset-gpios = <&gpio2 5 GPIO_ACTIVE_LOW>;
+```
+
+الـ `of_get_named_gpio()` بترجع بس رقم الـ GPIO من غير ما تحمل معاها الـ polarity. الـ `GPIO_ACTIVE_LOW` flag بتتضيع لو المبرمج مش بيستخدم `gpiod` API الحديث.
+
+#### الحل
+
+**Option 1 — استخدام الـ `gpiod` API الحديث بدل `of_get_named_gpio()`:**
+
+```c
+#include <linux/gpio/consumer.h>
+
+/* In probe(): */
+struct gpio_desc *reset_gpio;
+
+reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_LOW);
+if (IS_ERR(reset_gpio)) {
+    dev_err(dev, "failed to get reset gpio: %ld\n", PTR_ERR(reset_gpio));
+    return PTR_ERR(reset_gpio);
+}
+
+/* Assert reset (handles active-low automatically) */
+gpiod_set_value_cansleep(reset_gpio, 1);
+msleep(10);
+gpiod_set_value_cansleep(reset_gpio, 0);
+```
+
+**Option 2 — لو لازم تفضل مع `of_get_named_gpio()` لأسباب legacy:**
+
+```c
+enum of_gpio_flags flags;
+int gpio_num;
+
+/* Use the extended form to get flags */
+gpio_num = of_get_named_gpio_flags(np, "reset-gpios", 0, &flags);
+if (!gpio_is_valid(gpio_num))
+    return -EINVAL;
+
+/* Check polarity manually */
+int assert_val = (flags & OF_GPIO_ACTIVE_LOW) ? 0 : 1;
+gpio_direction_output(gpio_num, assert_val); /* assert reset */
+msleep(10);
+gpio_direction_output(gpio_num, !assert_val); /* deassert reset */
+```
+
+**Debug commands:**
+
+```bash
+# تشوف القيمة الحالية للـ GPIO
+gpioinfo gpiochip2 | grep -i "line 5"
+
+# تقرا الـ DT property مباشرة
+cat /proc/device-tree/rs485/reset-gpios | xxd
+```
+
+#### الدرس المستفاد
+**الـ `of_get_named_gpio()` بترجع رقم بس — مش بتحمل الـ polarity.** أي كود جديد لازم يستخدم `gpiod` API اللي بيتعامل مع الـ `GPIO_ACTIVE_LOW` flag أوتوماتيك. الـ `of_gpio.h` نفسه فيه comment يقول `FIXME: Shouldn't be here` — ده مؤشر إن الـ API ده legacy.
+
+---
+
+### السيناريو الثاني: Android TV Box على Allwinner H616 — الـ `CONFIG_OF_GPIO` مش enabled
+
+#### العنوان
+**الـ driver بيرجع `-ENOSYS` على Allwinner H616 Android TV box**
+
+#### السياق
+فريق بيعمل port لـ Android على TV box بيستخدم Allwinner H616. الـ box عنده HDMI HPD (Hot Plug Detect) GPIO. الـ driver بيستخدم `of_get_named_gpio()` وبيفاجأ بـ `-ENOSYS` في كل مرة.
+
+#### المشكلة
+الـ kernel configuration مش عندها `CONFIG_OF_GPIO=y`. الـ `of_gpio.h` عنده:
 
 ```c
 #ifdef CONFIG_OF_GPIO
@@ -1707,718 +1682,647 @@ extern int of_get_named_gpio(const struct device_node *np,
 
 #include <linux/errno.h>
 
-/* Drivers may not strictly depend on the GPIO support, so let them link. */
 static inline int of_get_named_gpio(const struct device_node *np,
                                    const char *propname, int index)
 {
-    return -ENOSYS;  /* <-- هذا ما يحدث! */
+    return -ENOSYS;  /* <-- هنا المشكلة */
 }
 
 #endif /* CONFIG_OF_GPIO */
 ```
 
-الملف يحتوي على **compile-time guard**: إذا لم يكن `CONFIG_OF_GPIO` مُفعَّلاً في الـ kernel config، فإن `of_get_named_gpio` ترجع `-ENOSYS` دائماً بغض النظر عن أي شيء في الـ Device Tree.
+الـ driver بيعمل:
+```c
+gpio = of_get_named_gpio(np, "hpd-gpios", 0);
+if (gpio < 0) {
+    dev_warn(dev, "no HPD gpio, ret=%d\n", gpio);
+    return 0; /* silently ignores! */
+}
+```
 
-التحقق من الـ config:
+الـ `-ENOSYS` بيعمل early return وما فيش HDMI HPD detection خالص.
+
+#### التحليل
+الـ `of_gpio.h` بيوفر stub إن `CONFIG_OF_GPIO` مش موجود — بالذات علشان drivers مش لازم تـ depend على GPIO support. الـ comment في الـ header بيقول بصراحة:
+
+```c
+/* Drivers may not strictly depend on the GPIO support, so let them link. */
+```
+
+يعني الـ design decision: الـ header بيخلي الـ compilation تعدي، لكن الـ runtime بيرجع `-ENOSYS`. المشكلة في الـ Kconfig مش في الـ كود نفسه.
+
+#### الحل
+
+**خطوة 1 — تشيك الـ Kconfig:**
 
 ```bash
-# على الجهاز
+grep -r "CONFIG_OF_GPIO" /workspace/external/linux/arch/arm64/configs/
+# أو
 zcat /proc/config.gz | grep OF_GPIO
-# النتيجة: CONFIG_OF_GPIO is not set  <-- المشكلة هنا
 ```
 
-#### الحل
+**خطوة 2 — تضيف الـ config:**
 
-```bash
-# في menuconfig
-make menuconfig
-# Device Drivers → GPIO Support → GPIO lib → OF GPIO
-
-# أو مباشرة في .config
-echo "CONFIG_OF_GPIO=y" >> arch/arm64/configs/rk3562_gateway_defconfig
-
-# إعادة البناء
-make -j$(nproc) Image dtbs modules
+```kconfig
+# في allwinner_h616_defconfig
+CONFIG_GPIOLIB=y
+CONFIG_OF_GPIO=y
+CONFIG_GPIO_SUNXI=y
 ```
 
-في الـ DT يجب التأكد من وجود الـ property بالاسم الصحيح:
-
-```c
-/* في driver */
-gpio_num = of_get_named_gpio(np, "relay-gpios", 0);
-```
+**خطوة 3 — تأكد الـ DT صح:**
 
 ```dts
-/* في .dts */
-my-relay-controller {
-    compatible = "vendor,relay-ctrl";
-    relay-gpios = <&gpio2 5 GPIO_ACTIVE_HIGH>;
-};
-```
-
-#### الدرس المستفاد
-**الـ** `of_gpio.h` يُعرِّف نسختين من `of_get_named_gpio` — واحدة حقيقية وأخرى stub تُرجع `-ENOSYS`. النسخة المُستخدمة تعتمد فقط على `CONFIG_OF_GPIO` وقت الـ compile. دائماً تحقق من الـ kernel config قبل افتراض أن الـ DT هو المشكلة.
-
----
-
-### السيناريو 2: Android TV Box على Allwinner H616 — HDMI CEC GPIO يعمل أحياناً فقط
-
-#### العنوان
-GPIO الخاص بـ HDMI CEC يُحضر قيماً غير صحيحة بسبب خطأ في `index` بـ `of_get_named_gpio`
-
-#### السياق
-منتج **Android TV box** مبني على **Allwinner H616**.
-الـ HDMI CEC يحتاج GPIO للتحكم، والـ DT يُعرِّف قائمة تحتوي على GPIO واحد فقط.
-المطور الجديد يُعدِّل الـ driver ليضيف دعم HDMI second port مستقبلاً ويغيِّر بعض القيم.
-
-#### المشكلة
-CEC يتوقف عن العمل بشكل عشوائي. أحياناً يعمل بعد reboot وأحياناً لا.
-
-#### التحليل
-`of_get_named_gpio` signature:
-
-```c
-extern int of_get_named_gpio(const struct device_node *np,
-                             const char *list_name, int index);
-```
-
-**الـ** `index` يُحدد أي GPIO تأخذ من القائمة (zero-based).
-
-المطور كتب:
-
-```c
-/* خطأ: index=1 لكن القائمة تحتوي فقط GPIO واحد */
-int cec_gpio = of_get_named_gpio(np, "hdmi-cec-gpios", 1);
-```
-
-لكن الـ DT:
-
-```dts
-hdmi_cec: cec-controller {
-    compatible = "allwinner,h616-cec";
-    hdmi-cec-gpios = <&pio 7 4 GPIO_ACTIVE_LOW>;  /* GPIO واحد فقط */
-};
-```
-
-عندما يكون الـ `index` خارج نطاق القائمة، `of_get_named_gpio` تستدعي داخلياً `of_get_named_gpio_flags` التي تُرجع `-ENOENT` أو قيمة غير صحيحة، مما يؤدي لاستخدام رقم GPIO عشوائي أو خاطئ.
-
-التشخيص:
-
-```bash
-# على الجهاز
-cat /sys/kernel/debug/gpio | grep cec
-# لا يظهر شيء — دليل على فشل التسجيل
-
-dmesg | grep -i cec
-# [ 3.421] cec-controller: failed to get cec gpio: -22
-```
-
-#### الحل
-
-```c
-/* الصحيح: index=0 للـ GPIO الأول والوحيد */
-int cec_gpio = of_get_named_gpio(np, "hdmi-cec-gpios", 0);
-
-if (!gpio_is_valid(cec_gpio)) {
-    dev_err(dev, "failed to get cec gpio: %d\n", cec_gpio);
-    return cec_gpio;
-}
-```
-
-للتوسع المستقبلي، يجب تعريف قائمة في الـ DT:
-
-```dts
-/* دعم منفذين */
-hdmi-cec-gpios = <&pio 7 4 GPIO_ACTIVE_LOW>,
-                 <&pio 7 5 GPIO_ACTIVE_LOW>;
-```
-
-#### الدرس المستفاد
-**الـ** `index` في `of_get_named_gpio` هو zero-based ويجب أن يتطابق مع عدد العناصر في الـ DT property. خطأ بسيط في الـ index يُعطي GPIO رقم خاطئ أو error، والـ GPIO الخاطئ قد يعمل أحياناً بالصدفة إذا تطابق مع GPIO آخر نشط.
-
----
-
-### السيناريو 3: IoT Sensor Node على STM32MP1 — Driver لا يُترجَم لـ non-OF platform
-
-#### العنوان
-Driver مكتوب لـ OF يفشل عند نقله لـ STM32MP1 bare-metal build بدون Device Tree
-
-#### السياق
-فريق يطور **IoT sensor node** على **STM32MP157** يستخدمه في بيئتين:
-1. Linux مع Device Tree (بيئة التطوير)
-2. بيئة bare-metal مخصصة بدون OF (الإنتاج المبسَّط)
-
-الـ driver يستخدم `of_get_named_gpio` مباشرة بدون أي fallback.
-
-#### المشكلة
-عند build الـ production kernel بدون `CONFIG_OF_GPIO`، الـ driver يُترجَم لكنه لا يعمل — كل GPIO calls تُرجع `-ENOSYS` ولا يوجد أي error واضح في الـ log.
-
-#### التحليل
-الملف `of_gpio.h` يوفر الـ stub تلقائياً:
-
-```c
-#else /* CONFIG_OF_GPIO */
-
-#include <linux/errno.h>
-
-/* Drivers may not strictly depend on the GPIO support, so let them link. */
-static inline int of_get_named_gpio(const struct device_node *np,
-                                   const char *propname, int index)
-{
-    return -ENOSYS;  /* stub يمنع linker error لكن لا يعمل */
-}
-
-#endif /* CONFIG_OF_GPIO */
-```
-
-التعليق في الكود `"Drivers may not strictly depend on the GPIO support, so let them link."` يشرح الهدف: السماح بالـ compilation بدون OF دون كسر الـ linker. لكن الـ driver لم يتعامل مع `-ENOSYS` كـ non-fatal error.
-
-```c
-/* driver الأصلي — لا يتعامل مع ENOSYS */
-static int sensor_probe(struct platform_device *pdev)
-{
-    int gpio = of_get_named_gpio(pdev->dev.of_node, "sensor-gpios", 0);
-
-    /* لا يوجد فحص لـ ENOSYS */
-    if (gpio < 0) {
-        dev_err(&pdev->dev, "gpio error\n");
-        return gpio;  /* يُرجع -ENOSYS ويفشل probe */
-    }
-    ...
-}
-```
-
-#### الحل
-
-```c
-static int sensor_probe(struct platform_device *pdev)
-{
-    int gpio;
-
-#ifdef CONFIG_OF_GPIO
-    /* مسار OF: استخدم DT */
-    if (pdev->dev.of_node) {
-        gpio = of_get_named_gpio(pdev->dev.of_node, "sensor-gpios", 0);
-        if (!gpio_is_valid(gpio)) {
-            dev_err(&pdev->dev, "invalid gpio from DT: %d\n", gpio);
-            return -EINVAL;
-        }
-    }
-#else
-    /* مسار non-OF: استخدم platform_data أو hardcoded للـ production */
-    struct sensor_platform_data *pdata = dev_get_platdata(&pdev->dev);
-    if (!pdata) {
-        dev_err(&pdev->dev, "no platform data, no OF — cannot get gpio\n");
-        return -ENODEV;
-    }
-    gpio = pdata->gpio_num;
-#endif
-    ...
-}
-```
-
-#### الدرس المستفاد
-**الـ** stub في `of_gpio.h` مُصمَّم لمنع linker errors وليس لإسقاط الـ GPIO silently. Driver صحيح يجب أن يفحص `-ENOSYS` بشكل صريح أو يستخدم `#ifdef CONFIG_OF_GPIO` لتوفير مسار بديل على platforms بدون OF.
-
----
-
-### السيناريو 4: Automotive ECU على i.MX8MP — تعارض أسماء GPIO properties في DT
-
-#### العنوان
-**الـ** `of_get_named_gpio` يُرجع `-EINVAL` على ECU مبني على i.MX8MP بسبب اسم property خاطئ
-
-#### السياق
-شركة automotive تبني **ECU (Engine Control Unit)** على **NXP i.MX8M Plus**.
-الـ ECU يتحكم في عدة actuators عبر GPIO.
-مهندس جديد يُعدِّل الـ DT ويُغيِّر أسماء الـ properties لتتوافق مع standard معين.
-
-#### المشكلة
-بعد تعديل الـ DT، بعض الـ actuators توقفت عن العمل. الـ dmesg يُظهر:
-
-```
-[  4.123] imx8-ecu: gpio request failed: -22
-[  4.124] imx8-ecu: probe failed
-```
-
-#### التحليل
-`of_get_named_gpio` تبحث عن property باسم محدد:
-
-```c
-extern int of_get_named_gpio(const struct device_node *np,
-                             const char *list_name,  /* اسم الـ property */
-                             int index);
-```
-
-الـ driver يستدعي:
-
-```c
-/* driver يبحث عن "actuator-gpios" */
-int act_gpio = of_get_named_gpio(np, "actuator-gpios", 0);
-```
-
-لكن المهندس غيَّر اسم الـ property في الـ DT:
-
-```dts
-/* قبل التعديل — يعمل */
-ecu-actuator {
-    compatible = "vendor,imx8-actuator";
-    actuator-gpios = <&gpio4 12 GPIO_ACTIVE_HIGH>;
-};
-
-/* بعد التعديل — لا يعمل */
-ecu-actuator {
-    compatible = "vendor,imx8-actuator";
-    output-gpios = <&gpio4 12 GPIO_ACTIVE_HIGH>;  /* اسم مختلف! */
-};
-```
-
-عندما لا تجد `of_get_named_gpio` الـ property بالاسم المطلوب، تُرجع `-ENOENT` أو `-EINVAL`. الـ `-22` في dmesg هو `EINVAL`.
-
-أداة التشخيص:
-
-```bash
-# فحص الـ DT على الجهاز
-cat /proc/device-tree/ecu-actuator/output-gpios | xxd
-# تجد الـ property لكن بالاسم الخاطئ
-
-# أو استخدام dtc
-dtc -I fs /proc/device-tree 2>/dev/null | grep -A5 "ecu-actuator"
-```
-
-#### الحل
-
-خياران:
-
-**الخيار 1**: إعادة الاسم الأصلي في الـ DT:
-
-```dts
-ecu-actuator {
-    compatible = "vendor,imx8-actuator";
-    actuator-gpios = <&gpio4 12 GPIO_ACTIVE_HIGH>;
-};
-```
-
-**الخيار 2**: تعديل الـ driver ليقبل كلا الاسمين (للتوافقية):
-
-```c
-/* محاولة الاسم الجديد أولاً، ثم القديم */
-int act_gpio = of_get_named_gpio(np, "output-gpios", 0);
-if (!gpio_is_valid(act_gpio)) {
-    /* fallback للاسم القديم */
-    act_gpio = of_get_named_gpio(np, "actuator-gpios", 0);
-    if (!gpio_is_valid(act_gpio)) {
-        dev_err(dev, "no valid gpio found: %d\n", act_gpio);
-        return -EINVAL;
-    }
-    dev_warn(dev, "deprecated 'actuator-gpios', use 'output-gpios'\n");
-}
-```
-
-#### الدرس المستفاد
-**الـ** `list_name` في `of_get_named_gpio` يجب أن يتطابق حرفياً مع اسم الـ property في الـ DT. لا توجد أي magic lookup أو aliases. تغيير اسم الـ property في الـ DT دون تغيير الـ driver يكسر الـ GPIO lookup بصمت تقريباً. في بيئات automotive حيث الـ DT والـ driver يُطوَّران بشكل منفصل، يجب توثيق أسماء الـ properties وتثبيتها في binding documentation.
-
----
-
-### السيناريو 5: Custom Board Bring-up على AM62x — تشخيص GPIO عبر فهم بنية الـ header
-
-#### العنوان
-مهندس bring-up يستخدم فهم `of_gpio.h` لتشخيص لماذا GPIO لـ SPI CS لا يظهر في sysfs على **TI AM62x**
-
-#### السياق
-فريق يقوم بـ **custom board bring-up** على **Texas Instruments AM62x** (BeaglePlay-class SoC).
-اللوحة تحتوي على SPI flash خارجي، والـ chip select يُدار عبر GPIO.
-المهندس يحاول التحقق من أن الـ GPIO يعمل في مرحلة مبكرة قبل كتابة الـ SPI driver الكامل.
-
-#### المشكلة
-`of_get_named_gpio` تُرجع قيمة سالبة في early bring-up. المهندس لا يعرف إن كانت المشكلة في الـ DT، الـ config، أم الـ hardware.
-
-#### التحليل
-المهندس يبدأ بقراءة `of_gpio.h` ليفهم الـ flow:
-
-```c
-/* of_gpio.h — الـ header بالكامل */
-#ifdef CONFIG_OF_GPIO
-    /* النسخة الحقيقية — تحتاج OF GPIO subsystem */
-    extern int of_get_named_gpio(...);
-#else
-    /* stub — يُرجع -ENOSYS دائماً */
-    static inline int of_get_named_gpio(...) { return -ENOSYS; }
-#endif
-```
-
-الـ header يُضمِّن أيضاً:
-- `<linux/gpio/driver.h>` — بنى الـ GPIO chip
-- `<linux/gpio.h>` — الـ API الأساسي
-- `<linux/of.h>` — `struct device_node` وtools الـ DT
-
-منهجية التشخيص المنظَّمة:
-
-```bash
-# الخطوة 1: تحقق من CONFIG_OF_GPIO
-zcat /proc/config.gz | grep "OF_GPIO\|GPIOLIB"
-# يجب أن تكون: CONFIG_OF_GPIO=y و CONFIG_GPIOLIB=y
-
-# الخطوة 2: تحقق من وجود الـ DT node
-ls /proc/device-tree/ | grep spi
-cat /proc/device-tree/spi@0/cs-gpios | xxd
-# إذا لم يوجد الملف: الـ property مفقودة من الـ DT
-
-# الخطوة 3: تحقق من الـ GPIO controller
-cat /sys/kernel/debug/gpio
-# ابحث عن gpio chip الخاص بـ AM62x
-
-# الخطوة 4: اختبر الـ GPIO مباشرة
-gpioget $(gpiodetect | grep am62 | head -1 | awk '{print $1}') 15
-```
-
-الـ DT الصحيح:
-
-```dts
-/* في am62x-custom-board.dts */
-&spi0 {
+/* sun50i-h616.dtsi */
+&hdmi {
+    hpd-gpios = <&pio 7 4 GPIO_ACTIVE_HIGH>; /* PH4 */
     status = "okay";
-    cs-gpios = <&main_gpio0 15 GPIO_ACTIVE_LOW>;
+};
+```
 
-    flash@0 {
-        compatible = "jedec,spi-nor";
+**خطوة 4 — Debug:**
+
+```bash
+# بعد الـ fix، تشوف إن الـ gpio ظهر
+ls /sys/class/gpio/
+dmesg | grep -i "hpd"
+```
+
+#### الدرس المستفاد
+الـ `#else` branch في `of_gpio.h` موجود بالذات علشان compilers يعدوا — مش علشان الـ feature تشتغل. لو الـ driver بيستخدم `of_get_named_gpio()` لازم `CONFIG_OF_GPIO=y` في الـ defconfig. الفرق بين "يـcompile" و"يشتغل" مهم جداً هنا.
+
+---
+
+### السيناريو الثالث: IoT Sensor على STM32MP1 — الـ `of_get_named_gpio()` بترجع قيمة غلط
+
+#### العنوان
+**الـ SPI chip select GPIO مش صح على STM32MP1 IoT sensor board**
+
+#### السياق
+board صغيرة IoT بتستخدم STM32MP1 مع SPI pressure sensor (LPS22HB). الـ CS line بتتحكم فيها GPIO بدل hardware CS. الـ driver بيستخدم `of_get_named_gpio()`.
+
+#### المشكلة
+الـ driver probe بيحصل، لكن الـ SPI transactions مش بتوصل للـ sensor صح. الـ logic analyzer بيورّي إن الـ CS line مش بتتفعل.
+
+الـ DT:
+```dts
+&spi1 {
+    pressure@0 {
+        compatible = "st,lps22hb";
         reg = <0>;
-        spi-max-frequency = <25000000>;
+        cs-gpios = <&gpioa 4 GPIO_ACTIVE_LOW>,
+                   <&gpiob 1 GPIO_ACTIVE_LOW>; /* هنا في 2 entries */
     };
 };
 ```
 
-الـ driver test snippet:
+الـ كود:
+```c
+/* BUG: always uses index 0, should use index based on configuration */
+gpio = of_get_named_gpio(np, "cs-gpios", 0);
+```
+
+#### التحليل
+الـ `of_get_named_gpio()` بتاخد `index` parameter:
 
 ```c
-/* test probe للـ bring-up المبكر */
-static int spi_cs_test_probe(struct platform_device *pdev)
+extern int of_get_named_gpio(const struct device_node *np,
+                             const char *list_name, int index);
+```
+
+الـ `list_name` هنا `"cs-gpios"` وفيها list من الـ GPIOs. الـ index 0 بيرجع `gpioa 4` — الصح. لكن المشكلة إن الـ developer اتفرد بـ index 0 من غير ما يشيك على الـ board configuration.
+
+بعد review للـ schematic اتضح إن الـ production board الجديدة بتستخدم الـ second GPIO (index 1 = `gpiob 1`)، لكن الكود hardcoded على index 0.
+
+#### الحل
+
+```c
+/* Read which CS line to use from DT property */
+u32 cs_index = 0;
+of_property_read_u32(np, "cs-index", &cs_index); /* optional property */
+
+gpio = of_get_named_gpio(np, "cs-gpios", cs_index);
+if (!gpio_is_valid(gpio)) {
+    dev_err(dev, "invalid cs gpio at index %u\n", cs_index);
+    return -EINVAL;
+}
+```
+
+**DT update:**
+```dts
+pressure@0 {
+    compatible = "st,lps22hb";
+    reg = <0>;
+    cs-gpios = <&gpioa 4 GPIO_ACTIVE_LOW>,
+               <&gpiob 1 GPIO_ACTIVE_LOW>;
+    cs-index = <1>; /* use second CS line on this board */
+};
+```
+
+**Debug:**
+```bash
+# تتأكد من الـ GPIO numbers المحددين
+cat /sys/kernel/debug/gpio | grep -A2 "gpioa\|gpiob"
+
+# تشوف الـ DT property
+fdtget /boot/stm32mp157c-dk2.dtb /soc/spi@4000b000/pressure@0 cs-gpios
+```
+
+#### الدرس المستفاد
+الـ `index` parameter في `of_get_named_gpio()` قوي جداً — بيخليك تعمل multi-device configurations في نفس الـ DT node. لازم تاخد الـ index من الـ DT نفسه ومتـhardcode-هوش في الكود، خصوصاً لو البورد ممكن تتغير بين revisions.
+
+---
+
+### السيناريو الرابع: Automotive ECU على i.MX8 — الـ driver بيطلع error في kernel بدون `CONFIG_OF`
+
+#### العنوان
+**الـ ECU driver يطلع compile error على i.MX8 automotive platform**
+
+#### السياق
+شركة automotive بتعمل ECU (Engine Control Unit) على i.MX8QM. الـ kernel configuration stripped-down جداً لمتطلبات AUTOSAR — وبعض الـ OF support متعملش disable.
+
+#### المشكلة
+الـ driver كود:
+
+```c
+#include <linux/of_gpio.h>
+
+static int ecu_probe(struct platform_device *pdev)
 {
     struct device_node *np = pdev->dev.of_node;
-    int cs_gpio;
-    int ret;
+    int ignition_gpio;
 
-    cs_gpio = of_get_named_gpio(np, "cs-gpios", 0);
+    ignition_gpio = of_get_named_gpio(np, "ignition-detect-gpios", 0);
+    ...
+}
+```
 
-    /* تشخيص مفصَّل */
-    if (cs_gpio == -ENOSYS) {
-        dev_err(&pdev->dev, "CONFIG_OF_GPIO not enabled!\n");
-        return -ENOSYS;
-    }
-    if (cs_gpio == -ENOENT) {
-        dev_err(&pdev->dev, "cs-gpios property missing from DT\n");
-        return -ENOENT;
-    }
-    if (!gpio_is_valid(cs_gpio)) {
-        dev_err(&pdev->dev, "invalid gpio number: %d\n", cs_gpio);
-        return -EINVAL;
-    }
+الـ compile بيطلع:
+```
+error: implicit declaration of function 'of_get_named_gpio'
+```
 
-    ret = gpio_request(cs_gpio, "spi-cs-test");
-    if (ret) {
-        dev_err(&pdev->dev, "gpio_request failed: %d\n", ret);
-        return ret;
-    }
+#### التحليل
+الـ `of_gpio.h` بيوضح المشكلة:
 
-    /* toggle الـ CS لاختبار hardware */
-    gpio_direction_output(cs_gpio, 1);
-    mdelay(10);
-    gpio_set_value(cs_gpio, 0);
-    mdelay(10);
-    gpio_set_value(cs_gpio, 1);
+```c
+#ifdef CONFIG_OF_GPIO
 
-    dev_info(&pdev->dev, "SPI CS GPIO %d works OK\n", cs_gpio);
-    gpio_free(cs_gpio);
-    return 0;
+extern int of_get_named_gpio(const struct device_node *np,
+                             const char *list_name, int index);
+
+#else /* CONFIG_OF_GPIO */
+
+static inline int of_get_named_gpio(...)
+{
+    return -ENOSYS;
+}
+
+#endif /* CONFIG_OF_GPIO */
+```
+
+لو `CONFIG_OF_GPIO` مش موجود، الـ stub الـ `static inline` موجود. لكن المشكلة إن الـ engineer نسي يـinclude الـ header خالص، أو الـ `CONFIG_OF` نفسه disabled مما بيخلي الـ `device_node` struct مش متعرفش.
+
+الـ `of_gpio.h` بيحتاج:
+```c
+#include <linux/of.h>  /* for struct device_node */
+```
+
+والـ `of.h` نفسه guarded بـ:
+```c
+/* من of.h */
+struct device_node { ... };
+```
+
+لو الـ `CONFIG_OF` غير موجود، الـ `device_node` struct مش متعرفش في بعض الـ kernel versions.
+
+#### الحل
+
+**Option 1 — تأكد Kconfig dependencies:**
+
+```kconfig
+# Kconfig للـ ECU driver
+config ECU_DRIVER
+    tristate "Automotive ECU Driver"
+    depends on OF && OF_GPIO
+    help
+      Driver for automotive ECU on i.MX8QM.
+```
+
+**Option 2 — استخدام platform data بديل عن DT للـ automotive:**
+
+```c
+/* ecu_platform.h */
+struct ecu_platform_data {
+    int ignition_gpio;
+    bool ignition_active_low;
+};
+
+/* في probe() */
+#ifdef CONFIG_OF
+if (pdev->dev.of_node) {
+    gpio = of_get_named_gpio(np, "ignition-detect-gpios", 0);
+} else
+#endif
+{
+    struct ecu_platform_data *pdata = dev_get_platdata(&pdev->dev);
+    if (pdata)
+        gpio = pdata->ignition_gpio;
+}
+```
+
+**Debug commands:**
+
+```bash
+# تشوف الـ kernel config
+zcat /proc/config.gz | grep -E "CONFIG_OF|CONFIG_OF_GPIO"
+# Output expected:
+# CONFIG_OF=y
+# CONFIG_OF_GPIO=y
+```
+
+#### الدرس المستفاد
+الـ `of_gpio.h` الـ guard `#ifdef CONFIG_OF_GPIO` بيوفر stub بس مش بيحل مشكلة missing `struct device_node`. في الـ automotive kernels المقلصة، لازم `CONFIG_OF=y` و`CONFIG_OF_GPIO=y` يكونوا enabled مع بعض. الـ `Kconfig` الصريح في الـ driver أهم من أي workaround.
+
+---
+
+### السيناريو الخامس: Custom Board Bring-up على AM62x — تـdebug الـ `of_get_named_gpio()` بيرجع `-ENOENT`
+
+#### العنوان
+**الـ `-ENOENT` من `of_get_named_gpio()` أثناء bring-up بورد AM62x جديدة**
+
+#### السياق
+engineer بيعمل bring-up لبورد AM62x (Texas Instruments) جديدة. الـ board عندها I2C temperature sensor (TMP117) بيحتاج ALERT GPIO. الـ driver complains بـ `-ENOENT` أثناء الـ probe.
+
+#### المشكلة
+الـ driver:
+
+```c
+alert_gpio = of_get_named_gpio(np, "alert-gpios", 0);
+if (alert_gpio == -ENOENT) {
+    dev_info(dev, "no alert gpio defined, polling mode\n");
+    priv->use_polling = true;
+} else if (alert_gpio < 0) {
+    dev_err(dev, "alert gpio error: %d\n", alert_gpio);
+    return alert_gpio;
+}
+```
+
+الـ code بيتعامل مع `-ENOENT` كـ "optional GPIO" ويمشي في polling mode. لكن الـ engineer متأكد إن الـ DT عنده `alert-gpios` property.
+
+#### التحليل
+الـ `of_get_named_gpio()` internally بتستخدم `of_find_property()` على الـ `device_node`. لو الـ property موجودة بس الـ phandle غلط، بترجع `-ENOENT`.
+
+**الأسباب الممكنة:**
+
+1. **Typo في اسم الـ property:**
+```dts
+/* WRONG */
+alert-gpio = <&gpio0 15 GPIO_ACTIVE_LOW>; /* missing 's' */
+
+/* CORRECT */
+alert-gpios = <&gpio0 15 GPIO_ACTIVE_LOW>;
+```
+
+2. **الـ `gpio0` label مش موجود في الـ DT:**
+```dts
+/* WRONG: gpio controller not defined */
+alert-gpios = <&gpio0 15 GPIO_ACTIVE_LOW>;
+
+/* لكن في am62x.dtsi مفيش &gpio0، الصح هو: */
+alert-gpios = <&main_gpio0 15 GPIO_ACTIVE_LOW>;
+```
+
+3. **الـ `device_node` الغلط بيتبعت:**
+```c
+/* WRONG: using parent node instead of device node */
+struct device_node *np = pdev->dev.of_node->parent;
+alert_gpio = of_get_named_gpio(np, "alert-gpios", 0);
+```
+
+#### الحل
+
+**Step 1 — تتأكد من الـ DT property:**
+
+```bash
+# تقرا الـ compiled DTB
+fdtget /boot/k3-am625-sk.dtb /bus@f0000/i2c@20000000/tmp117@48 alert-gpios
+# Output: 0x0000001d 0x0000000f 0x00000001
+# يعني: phandle=0x1d, pin=15, flags=GPIO_ACTIVE_LOW
+
+# تتأكد إن الـ phandle صح
+fdtget /boot/k3-am625-sk.dtb /bus@f0000/i2c@20000000/tmp117@48 --type x alert-gpios
+```
+
+**Step 2 — من الـ live system:**
+
+```bash
+# تشوف كل GPIOs المتاحة
+gpioinfo
+
+# تقرا الـ device node properties
+ls /proc/device-tree/bus@f0000/i2c@20000000/tmp117@48/
+cat /proc/device-tree/bus@f0000/i2c@20000000/tmp117@48/alert-gpios | xxd
+
+# تشوف الـ driver log
+dmesg | grep -i "tmp117\|alert"
+```
+
+**Step 3 — الـ DTS الصح للـ AM62x:**
+
+```dts
+/* k3-am625-custom.dts */
+&main_i2c0 {
+    status = "okay";
+    clock-frequency = <400000>;
+
+    tmp117: temperature@48 {
+        compatible = "ti,tmp117";
+        reg = <0x48>;
+        alert-gpios = <&main_gpio0 15 GPIO_ACTIVE_LOW>; /* main_gpio0 مش gpio0 */
+        #io-channel-cells = <0>;
+    };
+};
+```
+
+**Step 4 — Defensive code في الـ driver:**
+
+```c
+alert_gpio = of_get_named_gpio(np, "alert-gpios", 0);
+if (alert_gpio == -ENOENT || alert_gpio == -ENODATA) {
+    dev_info(dev, "alert-gpios not in DT, using polling\n");
+    priv->use_polling = true;
+} else if (!gpio_is_valid(alert_gpio)) {
+    dev_err(dev, "invalid alert gpio: %d\n", alert_gpio);
+    return -EINVAL;
+} else {
+    /* GPIO valid, use interrupt mode */
+    priv->alert_gpio = alert_gpio;
+    priv->use_polling = false;
 }
 ```
 
 #### الدرس المستفاد
-**الـ** `of_gpio.h` رغم بساطته الشديدة (39 سطراً فقط) يُخفي منطقاً مهماً: تقسيم compile-time بين نسخة حقيقية ونسخة stub. فهم هذا التقسيم يُوجِّه المهندس مباشرة لأول ما يجب فحصه. في bring-up، قراءة الـ header قبل كتابة الكود توفر ساعات من التشخيص العشوائي. كما أن التعامل مع كل قيمة error مُحتملة (`-ENOSYS`، `-ENOENT`، `-EINVAL`) بشكل منفصل يُسرِّع تحديد جذر المشكلة.
+في الـ bring-up، `-ENOENT` من `of_get_named_gpio()` مش دايماً يعني "الـ property مش موجودة" — ممكن يعني "الـ GPIO controller المشار إليه مش موجود أو اسمه غلط". أهم خطوات الـ debug: تتأكد من **اسم الـ GPIO controller** في الـ SoC DTSi الأصلي (زي `main_gpio0` في AM62x)، وتستخدم `fdtget` و`gpioinfo` علشان تتتبع المشكلة للـ source.
 ## Phase 7: مصادر ومراجع
-
----
 
 ### مقدمة
 
-الملف `include/linux/of_gpio.h` هو واجهة برمجية خفيفة تربط بين **Open Firmware / Device Tree** وإطار عمل **GPIOlib** في نواة Linux. يوفر دالة `of_get_named_gpio()` للحصول على رقم GPIO من خاصية Device Tree بالاسم. المراجع أدناه تغطي السياق التاريخي، الواجهة الحديثة البديلة، وتوثيق Device Tree bindings.
+الـ `of_gpio.h` هو header صغير بس مهم — بيربط بين الـ Device Tree والـ GPIO subsystem. المصادر الجاية هتساعدك تفهم السياق الكامل من legacy integer API لحد modern descriptor-based interface.
 
 ---
 
-### مقالات LWN.net
+### LWN.net — المقالات الأساسية
 
-| العنوان | الرابط | الأهمية |
-|---------|--------|---------|
-| **GPIO in the kernel: an introduction** | [lwn.net/Articles/532714](https://lwn.net/Articles/532714/) | مقدمة شاملة لـ GPIO API في النواة، يتناول `of_get_named_gpio` والواجهة التقليدية |
-| **GPIO in the kernel: future directions** | [lwn.net/Articles/533632](https://lwn.net/Articles/533632/) | يشرح التحول من الواجهة القائمة على الأرقام (التي تعتمد عليها `of_get_named_gpio`) إلى descriptor-based API |
-| **New descriptor-based GPIO interface** | [lwn.net/Articles/565662](https://lwn.net/Articles/565662/) | يعرض `gpiod_get()` كبديل حديث لـ `of_get_named_gpio()` |
-| **gpiolib: introduce descriptor-based GPIO interface** | [lwn.net/Articles/528226](https://lwn.net/Articles/528226/) | الـ patch الأصلي الذي أدخل الواجهة الجديدة وجعل الواجهة القديمة مرشّحة للإهمال |
-| **gpio: introduce descriptor-based interface** | [lwn.net/Articles/531848](https://lwn.net/Articles/531848/) | نقاش أعمق حول تصميم descriptor interface وعلاقتها بـ Device Tree |
-| **Device trees II: The harder parts** | [lwn.net/Articles/573409](https://lwn.net/Articles/573409/) | يشرح كيف يُحدَّد GPIO في Device Tree، بما في ذلك `#gpio-cells` وتفسير قيم `gpios = <&gpio1 5 0>` |
-| **Documentation: gpiolib: document new interface** | [lwn.net/Articles/574055](https://lwn.net/Articles/574055/) | توثيق رسمي مُقدَّم كـ patch للنواة يوضح الفرق بين الواجهتين |
-| **gpio: Document GPIO hogging mechanism** | [lwn.net/Articles/641117](https://lwn.net/Articles/641117/) | يتناول آلية **GPIO hog** المرتبطة بـ Device Tree وكيف تعمل مع `gpio-controller` |
+| المقال | الأهمية |
+|--------|---------|
+| [GPIO in the kernel: an introduction](https://lwn.net/Articles/532714/) | مقدمة شاملة للـ GPIO API في الكيرنل، بتشرح الـ legacy integer interface وإزاي الـ device tree بيحدد الـ GPIO |
+| [GPIO in the kernel: future directions](https://lwn.net/Articles/533632/) | بيشرح ليه الـ integer-based API بقت مشكلة وإيه الاتجاه نحو descriptor-based API |
+| [gpiolib: introduce descriptor-based GPIO interface](https://lwn.net/Articles/528226/) | أول patch series قدم الـ `gpiod_*` API كبديل للـ `of_get_named_gpio` |
+| [gpio: introduce descriptor-based interface](https://lwn.net/Articles/531848/) | تفاصيل implementation الـ descriptor interface الجديدة |
+| [New descriptor-based GPIO interface](https://lwn.net/Articles/565662/) | مقال كامل بيوضح الـ new API بأمثلة عملية وإزاي تعمل migration |
+| [Documentation: gpiolib: document new interface](https://lwn.net/Articles/574055/) | توثيق الـ new interface رسميًا في الكيرنل |
+| [gpiolib: Add GPIO name support](https://lwn.net/Articles/651500/) | إضافة دعم الـ GPIO names من الـ device tree — مرتبط مباشرة بالـ `of_get_named_gpio` |
+| [gpio: add GPIO hogging mechanism](https://lwn.net/Articles/626140/) | الـ hogging mechanism بتتفعّل من `of_gpiochip_add()` اللي بيستخدم `of_gpio` |
 
 ---
 
-### توثيق النواة الرسمي
+### التوثيق الرسمي في الكيرنل
+
+**الـ paths دي موجودة في source tree:**
 
 ```
-Documentation/driver-api/gpio/index.rst          ← نقطة البداية لكل وثائق GPIO
-Documentation/driver-api/gpio/board.rst          ← GPIO Mappings عبر Device Tree / ACPI
-Documentation/driver-api/gpio/consumer.rst       ← كيفية استخدام GPIO من driver (gpiod_get)
-Documentation/driver-api/gpio/driver.rst         ← كتابة gpio-controller driver
-Documentation/devicetree/bindings/gpio/gpio.txt  ← Device Tree bindings رسمية لـ GPIO
+Documentation/driver-api/gpio/
+├── intro.rst          # مقدمة للـ GPIO subsystem
+├── board.rst          # إزاي تعمل GPIO mappings من device tree
+├── consumer.rst       # الـ consumer API (gpiod_get, gpiod_set_value, ...)
+├── driver.rst         # إزاي تكتب GPIO controller driver
+└── legacy.rst         # الـ legacy integer-based API (of_get_named_gpio هنا)
+
+Documentation/devicetree/bindings/gpio/
+└── gpio.txt           # الـ DT binding spec للـ GPIO controllers والـ consumers
 ```
 
-الروابط الإلكترونية:
+**روابط online:**
 
-- [GPIO Mappings — kernel.org](https://www.kernel.org/doc/html/latest/driver-api/gpio/board.html)
-- [GPIO Descriptor Consumer Interface — kernel.org](https://docs.kernel.org/driver-api/gpio/consumer.html)
-- [General Purpose Input/Output (GPIO) — kernel.org](https://docs.kernel.org/driver-api/gpio/index.html)
-- [devicetree/bindings/gpio/gpio.txt — kernel.org](https://www.kernel.org/doc/Documentation/devicetree/bindings/gpio/gpio.txt)
+- [GPIO Driver API — kernel.org](https://www.kernel.org/doc/html/latest/driver-api/gpio/index.html)
+- [GPIO Mappings (board.rst)](https://www.kernel.org/doc/html/latest/driver-api/gpio/board.html) — بيشرح `<function>-gpios` property في الـ DT وإزاي `gpiod_get()` بيقراها
+- [GPIO devicetree bindings](https://www.kernel.org/doc/Documentation/devicetree/bindings/gpio/gpio.txt) — الـ spec الرسمي لـ `gpio-controller`, `#gpio-cells`, وتنسيق الـ GPIO specifier
 
 ---
 
-### Commits ذات صلة في kernel git
+### Commits مهمة في تاريخ `of_gpio`
 
-يمكن البحث عن هذه الـ commits عبر [git.kernel.org](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git):
+ابحث عن الـ commits دي في `git log --follow` على `include/linux/of_gpio.h` أو `drivers/gpio/gpiolib-of.c`:
+
+```bash
+# شوف تاريخ التعديلات على الملف
+git log --oneline include/linux/of_gpio.h
+
+# شوف commit اللي أضاف of_get_named_gpio في الأول
+git log --oneline --diff-filter=A -- drivers/of/gpio.c
+```
+
+**Commits تاريخية بارزة:**
 
 | الحدث | الوصف |
 |-------|-------|
-| إدخال `of_get_named_gpio` | Anton Vorontsov, MontaVista Software, 2008 — الـ commit الأصلي لـ `of_gpio.c` |
-| إضافة `CONFIG_OF_GPIO` guard | تقسيم الملف إلى مسارَي compile-time لدعم أنظمة بدون Device Tree |
-| إدخال `gpiod_get()` | Alexandre Courbot — بديل descriptor-based لـ `of_get_named_gpio` |
-| إهمال `of_get_named_gpio` رسمياً | إضافة تعليق `DEPRECATED` في التوثيق (2024) |
+| **v2.6.25** | أول إضافة للـ `gpiolib` في الكيرنل — [kernelnewbies Linux_2_6_25](https://kernelnewbies.org/Linux_2_6_25) |
+| **v3.13** | إدخال الـ descriptor-based interface (`gpiod_*`) كبديل للـ `of_get_named_gpio` |
+| **v5.x+** | وضع `of_get_named_gpio` رسميًا كـ deprecated في favor of `gpiod_get()` |
 
-للبحث المباشر:
-```bash
-git log --oneline --all -- drivers/gpio/gpiolib-of.c
-git log --oneline --all -- include/linux/of_gpio.h
+---
+
+### نقاشات الـ Mailing List
+
+- [GPIO marking individual pins in device tree — linuxppc-dev](https://linuxppc-dev.ozlabs.narkive.com/qp4tnrzh/gpio-marking-individual-pins-not-available-in-device-tree) — نقاش عن تحديد الـ GPIO pins في الـ DT
+- [Using gpio from device tree on platform devices — kernelnewbies list](https://lists.kernelnewbies.org/pipermail/kernelnewbies/2015-August/014911.html) — نقاش عملي عن الفرق بين الـ legacy `of_get_named_gpio` والـ descriptor API الجديدة
+- [devm_gpiod_get usage to get gpio num — kernelnewbies list](http://lists.kernelnewbies.org/pipermail/kernelnewbies/2016-August/016707.html) — إزاي تستخدم `devm_gpiod_get` بدل `of_get_named_gpio`
+
+---
+
+### eLinux.org — مراجع عملية
+
+- [Device Tree Reference — elinux.org](https://elinux.org/Device_Tree_Reference) — مرجع شامل للـ DT، فيه section للـ GPIO و `#gpio-cells`
+- [Device Tree Mysteries — elinux.org](https://elinux.org/Device_Tree_Mysteries) — بيشرح `#gpio-cells` وصيغة الـ GPIO specifier في الـ DT
+- [EBC Device Trees — elinux.org](https://elinux.org/EBC_Device_Trees) — أمثلة عملية على BeagleBone لضبط GPIO في الـ DT
+
+---
+
+### KernelNewbies.org
+
+- [Linux_2_6_21 — أول إضافة GPIO API](https://kernelnewbies.org/Linux_2_6_21) — الكيرنل ده شاف أول GPIO abstraction
+- [Linux_2_6_25 — إضافة gpiolib](https://kernelnewbies.org/Linux_2_6_25) — تم إضافة `gpiolib` directory والـ GPIO expander drivers
+- [Linux_6.2 Changes](https://kernelnewbies.org/Linux_6.2) — تحديثات GPIO في الإصدارات الحديثة
+- [LinuxChanges](https://kernelnewbies.org/LinuxChanges) — تتبع كل التغييرات في كل إصدار كيرنل
+
+---
+
+### كتب مُوصى بيها
+
+#### Linux Device Drivers 3rd Edition (LDD3)
+
+- **الفصل 12: I/O Memory and Ports** — بيشرح الـ hardware access primitives
+- الكتاب متاح مجانًا: [free-electrons.com/doc/books/ldd3.pdf](https://lwn.net/Kernel/LDD3/)
+- ملاحظة: LDD3 قديم (kernel 2.6)، مش بيغطي الـ `gpiod_*` API ولا الـ DT integration الحديث
+
+#### Linux Kernel Development — Robert Love (3rd Edition)
+
+- **الفصل 17: Devices and Modules** — بيشرح الـ driver model وكيف الـ subsystems بتتكامل
+- مهم لفهم الـ `CONFIG_OF_GPIO` guards وطريقة compile-time conditionality
+
+#### Embedded Linux Primer — Christopher Hallinan (2nd Edition)
+
+- **الفصل 15: Embedded Bootloaders** — بيشرح الـ device tree وطريقة تعريف الـ GPIO في الـ DTS files
+- أفضل كتاب للـ embedded context اللي `of_gpio.h` موجود فيه
+
+#### Mastering Embedded Linux Programming — Frank Vasquez & Chris Simmonds (3rd Edition)
+
+- **الفصل 11: Interfacing with Device Drivers** — بيغطي الـ gpiod API الحديث مع أمثلة DT
+
+---
+
+### مصادر إضافية مفيدة
+
+- [Linux GPIO Interface & Device Tree — embedded.com](https://www.embedded.com/linux-device-driver-development-the-gpio-interface-and-device-tree/) — مقال عملي بيربط الـ GPIO API بالـ device tree مع code examples
+- [Stop using /sys/class/gpio — thegoodpenguin.co.uk](https://www.thegoodpenguin.co.uk/blog/stop-using-sys-class-gpio-its-deprecated/) — بيشرح ليه الـ legacy interfaces بقت deprecated
+- [GPIO device tree configuration — STM32MPU wiki](https://wiki.st.com/stm32mpu/wiki/GPIO_device_tree_configuration) — مثال حقيقي لـ vendor بيستخدم `of_gpio` على STM32
+
+---
+
+### Search Terms للبحث عن معلومات أكتر
+
+```
+# بحث عام
+"of_get_named_gpio" site:lore.kernel.org
+"of_gpio" deprecated gpiod_get migration
+linux kernel gpio descriptor migration guide
+
+# في الكود
+git log --oneline drivers/gpio/gpiolib-of.c
 git log --grep="of_get_named_gpio" --oneline
-```
-
----
-
-### نقاشات Mailing List
-
-- **linux-gpio@vger.kernel.org** — القائمة الرسمية لكل مناقشات GPIO في النواة
-- [gpio: legacy: mark old interfaces as deprecated — patchew.org](https://patchew.org/linux/20240104182034.61892-1-brgl@bgdev.pl/) — الـ patch الذي أعلن رسمياً إهمال `of_get_named_gpio` وأخواتها
-- [GPIO marking individual pins not available in device tree — linuxppc-dev](https://linuxppc-dev.ozlabs.narkive.com/qp4tnrzh/gpio-marking-individual-pins-not-available-in-device-tree) — نقاش تقني حول تمييز الـ pins في Device Tree
-
-للاشتراك في الأرشيف:
-```
-https://lore.kernel.org/linux-gpio/
-```
-
----
-
-### kernelnewbies.org
-
-| الرابط | المحتوى |
-|--------|---------|
-| [Using gpio from device tree on platform devices](https://lists.kernelnewbies.org/pipermail/kernelnewbies/2015-August/014911.html) | نقاش عملي حول استخدام GPIO من Device Tree في platform driver، يُوضح متى تُستخدم `of_get_named_gpio` vs `gpiod_get` |
-| [devm_gpiod_get usage to get the gpio num](http://lists.kernelnewbies.org/pipermail/kernelnewbies/2016-August/016707.html) | سؤال وجواب حول `devm_gpiod_get` كبديل managed لـ `of_get_named_gpio` |
-| [Linux_2_6_25 — kernelnewbies.org](https://kernelnewbies.org/Linux_2_6_25) | الإصدار الذي شهد تحسينات مبكرة لـ `gpiolib` |
-
----
-
-### elinux.org
-
-| الرابط | المحتوى |
-|--------|---------|
-| [Device Tree Reference — elinux.org](https://elinux.org/Device_Tree_Reference) | مرجع شامل لبنية Device Tree، يشمل `#gpio-cells` وخصائص `gpios` |
-| [Device Tree Mysteries — elinux.org](https://elinux.org/Device_Tree_Mysteries) | يشرح `#gpio-cells` وكيف تُفسَّر قيم `gpios = <&controller pin flags>` |
-| [EBC Device Trees — elinux.org](https://elinux.org/EBC_Device_Trees) | أمثلة عملية على BeagleBone لتحديد GPIO في Device Tree overlays |
-
----
-
-### كتب مُوصى بها
-
-#### Linux Device Drivers (LDD3)
-- **المؤلفون**: Jonathan Corbet, Alessandro Rubini, Greg Kroah-Hartman
-- **الفصل ذو الصلة**: Chapter 1 (Device Driver Concepts) — الخلفية العامة
-- **ملاحظة**: LDD3 يعود لعصر 2.6.10 ولا يتناول `of_gpio` مباشرةً، لكنه ضروري لفهم البنية العامة لـ drivers
-- [متاح مجاناً على lwn.net/Kernel/LDD3](https://lwn.net/Kernel/LDD3/)
-
-#### Linux Kernel Development — Robert Love
-- **الطبعة الثالثة**، الفصل 17 (Device Model)
-- يبني الأساس لفهم `struct device_node` و Device Model الذي يعتمد عليه `of_gpio`
-
-#### Embedded Linux Primer — Christopher Hallinan
-- **الفصل 15**: Device Tree و Open Firmware
-- يشرح بناء Device Tree nodes وخصائص `gpio-controller` و `#gpio-cells`
-- ضروري لفهم كيف تُقرأ `gpios = <&gpio0 5 GPIO_ACTIVE_LOW>` بواسطة `of_get_named_gpio`
-
-#### Linux Device Driver Development — John Madieu (Packt, 2nd Ed. 2022)
-- **الفصل 15**: GPIO Controller and Consumer Drivers
-- يغطي `of_get_named_gpio` و `gpiod_get` بأمثلة حديثة
-
----
-
-### مصادر إضافية
-
-- [Linux device driver development: GPIO interface and device tree — embedded.com](https://www.embedded.com/linux-device-driver-development-the-gpio-interface-and-device-tree/)
-- [GPIO device tree configuration — STM32MPU wiki](https://wiki.st.com/stm32mpu/wiki/GPIO_device_tree_configuration)
-- [Stop using /sys/class/gpio — The Good Penguin](https://www.thegoodpenguin.co.uk/blog/stop-using-sys-class-gpio-its-deprecated/)
-- [GPIO Programming: Exploring libgpiod — ICS](https://www.ics.com/blog/gpio-programming-exploring-libgpiod-library)
-
----
-
-### مصطلحات البحث
-
-للبحث عن معلومات إضافية، استخدم هذه الـ search terms:
-
-```
-of_get_named_gpio deprecated alternative
-of_gpio.c kernel source
-gpiod_get device tree consumer
-linux gpio descriptor interface
-#gpio-cells device tree binding
-gpios property device tree
-CONFIG_OF_GPIO kernel config
-gpio-controller device tree node
-of_get_gpio_flags kernel
-gpiolib of gpio open firmware
-linux-gpio mailing list vger
-```
-
-```bash
-# البحث في مصدر النواة
 grep -r "of_get_named_gpio" drivers/ --include="*.c" | head -20
-grep -r "gpiod_get" drivers/ --include="*.c" | head -20
+
+# في الـ documentation
+grep -r "of_get_named_gpio" Documentation/
 ```
+
+---
+
+### ملخص سريع للـ Migration Path
+
+```
+Legacy (ما تزالش شغالة):               Modern (المُوصى بيها):
+─────────────────────────────────      ──────────────────────────────────
+of_get_named_gpio()           ──►      gpiod_get() / devm_gpiod_get()
+gpio_request() + gpio_direction_*  ──► gpiod_direction_input/output()
+gpio_get_value()              ──►      gpiod_get_value()
+gpio_set_value()              ──►      gpiod_set_value()
+```
+
+**الـ `of_get_named_gpio`** لسه شغال بس officially deprecated — أي كود جديد لازم يستخدم الـ descriptor API.
 ## Phase 8: Writing simple module
 
-### الهدف
+### الفكرة
 
-**الـ** `of_get_named_gpio` هي الدالة الوحيدة المُصدَّرة في `of_gpio.h`، وهي المدخل الرئيسي لأي driver يريد الحصول على رقم GPIO من Device Tree. سنضع عليها **kprobe** لنطبع اسم الـ node ومعامل `list_name` في كل مرة يُستدعى فيها.
+الـ function الأكتر إثارة في `of_gpio.h` هي `of_get_named_gpio()` — بتجيب رقم GPIO من device tree بناءً على اسم property وindex. هنحط عليها **kprobe** عشان نشوف كل مرة بيطلبها driver: اسم الـ node، اسم الـ property، والـ index.
 
 ---
 
 ### الكود الكامل
 
 ```c
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * kprobe_of_gpio.c
- * Hook of_get_named_gpio() to trace DT GPIO lookups.
+ *
+ * Hooks of_get_named_gpio() and logs every call:
+ *   - device_node full_name
+ *   - GPIO property name (list_name)
+ *   - index requested
  */
 
-#include <linux/kernel.h>   /* pr_info, pr_err */
-#include <linux/module.h>   /* MODULE_* macros, module_init/exit */
-#include <linux/kprobes.h>  /* kprobe, register_kprobe, ... */
-#include <linux/of.h>       /* struct device_node, of_node_full_name() */
+/* ---- includes ---- */
+#include <linux/module.h>       /* module_init/exit, MODULE_* macros */
+#include <linux/kprobes.h>      /* struct kprobe, register_kprobe */
+#include <linux/of.h>           /* struct device_node */
+#include <linux/printk.h>       /* pr_info */
 
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Kernel Student");
-MODULE_DESCRIPTION("Trace of_get_named_gpio() calls via kprobe");
+MODULE_AUTHOR("Kernel Doc Project");
+MODULE_DESCRIPTION("kprobe on of_get_named_gpio to trace GPIO DT lookups");
 
-/* ---------------------------------------------------------------
- * kprobe entry handler — fires BEFORE of_get_named_gpio executes
- * Prototype:
- *   int of_get_named_gpio(const struct device_node *np,
- *                         const char *list_name, int index);
- * ---------------------------------------------------------------*/
+/* ---- pre-handler: runs just before of_get_named_gpio executes ---- */
 static int handler_pre(struct kprobe *p, struct pt_regs *regs)
 {
     /*
-     * Argument passing follows the platform ABI:
-     *   arg0 (regs->di on x86-64 / regs->regs[0] on arm64) = np
-     *   arg1                                                  = list_name
-     *   arg2                                                  = index
+     * of_get_named_gpio signature:
+     *   int of_get_named_gpio(const struct device_node *np,
+     *                         const char *list_name, int index)
      *
-     * kprobes provides the helper regs_get_kernel_argument()
-     * which is portable across architectures.
+     * On x86-64: rdi=np, rsi=list_name, rdx=index
+     * On ARM64 : x0=np,  x1=list_name,  x2=index
      */
-    const struct device_node *np =
-        (const struct device_node *)regs_get_kernel_argument(regs, 0);
-    const char *list_name =
-        (const char *)regs_get_kernel_argument(regs, 1);
-    int index = (int)(long)regs_get_kernel_argument(regs, 2);
 
-    /* of_node_full_name() returns the full DT path — safe even if np is NULL */
-    pr_info("[kprobe_of_gpio] node=%-32s  prop=%-24s  idx=%d\n",
-            np ? of_node_full_name(np) : "<null>",
-            list_name ? list_name : "<null>",
-            index);
+#if defined(CONFIG_X86_64)
+    const struct device_node *np   = (void *)regs->di;
+    const char               *name = (void *)regs->si;
+    int                       idx  = (int)   regs->dx;
+#elif defined(CONFIG_ARM64)
+    const struct device_node *np   = (void *)regs->regs[0];
+    const char               *name = (void *)regs->regs[1];
+    int                       idx  = (int)   regs->regs[2];
+#else
+    /* fallback: just report that the probe fired */
+    pr_info("of_gpio_probe: of_get_named_gpio called (arch not decoded)\n");
+    return 0;
+#endif
+
+    /* guard against NULL pointers before dereferencing */
+    pr_info("of_gpio_probe: node=\"%s\"  prop=\"%s\"  index=%d\n",
+            (np && np->full_name) ? np->full_name : "(null)",
+            name ? name : "(null)",
+            idx);
 
     return 0; /* 0 = continue normal execution */
 }
 
-/* ---------------------------------------------------------------
- * kprobe descriptor — one per hooked symbol
- * ---------------------------------------------------------------*/
+/* ---- kprobe struct ---- */
 static struct kprobe kp = {
-    .symbol_name = "of_get_named_gpio", /* kernel symbol to hook */
-    .pre_handler  = handler_pre,        /* called before the function */
+    .symbol_name = "of_get_named_gpio",  /* function to hook by name */
+    .pre_handler = handler_pre,           /* called before the function */
 };
 
-/* ---------------------------------------------------------------
- * module_init — register the kprobe
- * ---------------------------------------------------------------*/
-static int __init kprobe_of_gpio_init(void)
+/* ---- module_init ---- */
+static int __init of_gpio_probe_init(void)
 {
     int ret;
 
     ret = register_kprobe(&kp);
     if (ret < 0) {
-        pr_err("[kprobe_of_gpio] register_kprobe failed: %d\n", ret);
+        pr_err("of_gpio_probe: register_kprobe failed: %d\n", ret);
         return ret;
     }
 
-    pr_info("[kprobe_of_gpio] planted at %pS\n", kp.addr);
+    pr_info("of_gpio_probe: kprobe planted on %s @ %p\n",
+            kp.symbol_name, kp.addr);
     return 0;
 }
 
-/* ---------------------------------------------------------------
- * module_exit — unregister the kprobe
- * ---------------------------------------------------------------*/
-static void __exit kprobe_of_gpio_exit(void)
+/* ---- module_exit ---- */
+static void __exit of_gpio_probe_exit(void)
 {
     unregister_kprobe(&kp);
-    pr_info("[kprobe_of_gpio] removed\n");
+    pr_info("of_gpio_probe: kprobe removed\n");
 }
 
-module_init(kprobe_of_gpio_init);
-module_exit(kprobe_of_gpio_exit);
+module_init(of_gpio_probe_init);
+module_exit(of_gpio_probe_exit);
 ```
 
 ---
 
-### شرح كل قسم
-
-#### الـ includes
-
-| Header | السبب |
-|---|---|
-| `<linux/kprobes.h>` | يحتوي `struct kprobe`، `register_kprobe`، `regs_get_kernel_argument` |
-| `<linux/of.h>` | يعرّف `struct device_node` ودالة `of_node_full_name()` |
-| `<linux/module.h>` | ماكروهات `MODULE_LICENSE` و`module_init`/`module_exit` |
-| `<linux/kernel.h>` | `pr_info` / `pr_err` |
-
-#### الـ `handler_pre`
-
-**الـ** `pre_handler` يُستدعى قبل تنفيذ الدالة المُستهدفة مباشرةً، فتكون معاملاتها لا تزال سليمة في السجلات. نستخدم `regs_get_kernel_argument()` بدلاً من الوصول المباشر لـ`regs->di` لأنه portable بين x86-64 وARM64 وغيرها.
-
-نطبع:
-- المسار الكامل لـ device node (`of_node_full_name`) — يُظهر مكان الـ node في شجرة DT.
-- اسم الـ property (`list_name`) — مثلاً `"led-gpios"` أو `"reset-gpios"`.
-- الـ`index` — لأن property واحدة قد تحتوي أكثر من GPIO.
-
-#### الـ `struct kprobe`
-
-**الـ** `symbol_name` يُحدد الدالة المُستهدفة باسمها في جدول رموز الكيرنل (`/proc/kallsyms`). الكيرنل يحوّل الاسم إلى عنوان أثناء `register_kprobe`.
-
-#### الـ `module_init`
-
-`register_kprobe` تضع نقطة اختراق (breakpoint) على أول تعليمة في `of_get_named_gpio`. إذا فشلت (مثلاً لأن الرمز غير موجود أو محمي)، نُعيد الخطأ ولا يُحمَّل الموديول.
-
-#### الـ `module_exit`
-
-`unregister_kprobe` تُزيل الـ breakpoint وتنتظر انتهاء أي استدعاء جارٍ قبل الإزالة — ضروري لتجنب الـ use-after-free لو كانت الدالة تُستدعى أثناء إلغاء التسجيل.
-
----
-
-### Makefile بسيط
+### Makefile
 
 ```makefile
 obj-m += kprobe_of_gpio.o
@@ -2434,30 +2338,66 @@ clean:
 
 ---
 
-### تشغيل وملاحظة المخرجات
+### شرح كل جزء
+
+#### الـ includes
+
+| Header | ليه موجود |
+|--------|-----------|
+| `linux/module.h` | ماكروهات `module_init/exit` و `MODULE_LICENSE` |
+| `linux/kprobes.h` | تعريف `struct kprobe` ودوال `register/unregister_kprobe` |
+| `linux/of.h` | تعريف `struct device_node` عشان نـaccess الـ `full_name` |
+| `linux/printk.h` | `pr_info / pr_err` |
+
+---
+
+#### الـ `handler_pre`
+
+**الـ pre-handler** بيتشغل فور ما الـ CPU يوصل لأول instruction في `of_get_named_gpio` قبل ما تتنفذ أي حاجة منها.
+بنقرأ الـ arguments من الـ registers مباشرةً لأن الـ kprobe بيشتغل على مستوى machine code، مش على مستوى C function call — فالـ ABI بيحدد إن الـ args الأولى بتتمرر في `rdi/rsi/rdx` على x86-64 وفي `x0/x1/x2` على ARM64.
+
+---
+
+#### الـ `struct kprobe`
+
+الـ `symbol_name` بيخلي الـ kernel يبحث عن العنوان تلقائياً من الـ kallsyms وقت الـ `register_kprobe` — مش محتاجين نحدد عنوان hardcoded.
+الـ `pre_handler` هو الـ callback اللي هيتشغل قبل كل call للدالة.
+
+---
+
+#### الـ `module_init`
+
+بيسجّل الـ kprobe ويطبع عنوانه الفعلي بعد التسجيل — لو فشل (مثلاً الدالة مش exported أو الـ CONFIG_KPROBES مش مفعّل) بيرجع الـ error ويخلي الـ insmod يفشل بدل ما يظل silent.
+
+---
+
+#### الـ `module_exit`
+
+**لازم** نـunregister الـ kprobe في الـ exit عشان نزيل الـ int3 breakpoint اللي زرعه الـ kernel في كود `of_get_named_gpio` — لو فضلناه من غير module يـcrash الـ system فور ما يتصل بيها أي driver.
+
+---
+
+### تجربة عملية
 
 ```bash
-# بناء الموديول
+# بناء وتحميل الـ module
 make
-
-# تحميله
 sudo insmod kprobe_of_gpio.ko
 
-# مشاهدة السجل في الوقت الفعلي
-sudo dmesg -w | grep kprobe_of_gpio
+# شاهد الـ output في real-time
+sudo dmesg -w | grep of_gpio_probe
 
-# مثال على مخرجات حقيقية أثناء تشغيل GPIO driver:
-# [kprobe_of_gpio] node=/soc/gpio@fe200000          prop=led-gpios           idx=0
-# [kprobe_of_gpio] node=/soc/gpio@fe200000          prop=reset-gpios         idx=0
+# مثال على output لما driver بيطلب GPIO
+# of_gpio_probe: node="/soc/gpio@ff780000"  prop="reset-gpios"  index=0
+# of_gpio_probe: node="/soc/i2c@ff110000/sensor@48"  prop="irq-gpios"  index=0
 
-# إزالة الموديول
+# إزالة الـ module
 sudo rmmod kprobe_of_gpio
 ```
 
 ---
 
-### لماذا `of_get_named_gpio` تحديداً؟
+### ملاحظات أمان
 
-- هي **نقطة الدخول الوحيدة** في `of_gpio.h`، كل driver يحتاج GPIO من DT يمر بها.
-- آمنة للـ kprobe لأنها ليست داخل مسار الـ kprobe نفسه (لا recursion).
-- تعطي معلومات حقيقية وذات قيمة: من يطلب GPIO؟ وأي property؟
+- الكود بيتحقق من `NULL` قبل ما يـdereference `np->full_name` أو `name` عشان callback بيشتغل في kernel context وأي page fault هيـoops الـ system.
+- الـ `return 0` من الـ `pre_handler` ضروري — أي قيمة تانية بتبوس الـ execution path وممكن تـskip الدالة الأصلية.

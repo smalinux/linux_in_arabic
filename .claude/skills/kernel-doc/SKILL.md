@@ -73,7 +73,7 @@ After all agents confirm done:
        <KDOC_TMP>/phase-N.md \
        > <output-path>
    ```
-3. Output path: mirror the input path with `.md` appended.
+3. **MUST**: Output path: mirror the input path with `.md` appended.
    - `drivers/clk/clk.c` → `drivers/clk/clk.c.md`
 4. Clean up: `rm -rf <KDOC_TMP>`
 

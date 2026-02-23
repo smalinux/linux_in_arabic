@@ -113,6 +113,26 @@ K:	devm_gpiod_unhinge
 ```
 ```
 
+- [ ] [[gpio.h]]
+- [ ] [of_gpio.h](include/linux/of_gpio.h.md)
+- [ ] [aspeed.h](include/linux/aspeed.h.md)
+- [ ] [consumer.h](old/pinctrl/consumer.h.md)
+- [ ] [driver.h](include/linux/driver.h.md)
+- [ ] [machine.h](old/pinctrl/machine.h.md)
+- [ ] 
+aspeed.h
+consumer.h
+driver.h
+forwarder.h
+generic.h
+gpio-nomadik.h
+gpio-reg.h
+machine.h
+property.h
+regmap.h
+
+
+
 
 ## `I2C SUBSYSTEM`
 
