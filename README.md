@@ -12,31 +12,6 @@ $ claude --dangerously-skip-permissions
 ```
 
 
-## clk framework
-
-- [ ] [clk.h](include/linux/clk.h.md)
-- [ ] [clk-provider.h](include/linux/clk-provider.h.md)
-- [ ] ----
-- [ ] [of_clk.h](include/linux/of_clk.h.md)
-- [ ] [sh_clk.h](include/linux/sh_clk.h.md)
-- [ ] [clkdev.h](include/linux/clkdev.h.md) - [clkdev.c](drivers/clk/clkdev.c.md)
-
-
-لطيف جداً فى الكيرنال والـ clk framework انك تشوف multi layer of abstractions بيتعمل من الـ functions كتير علشان تستخدم الحاجات دى كيوزر من غير ما تبقى عارف اى تفاصيل عن الهاردوير. بعدين لما تتبع ops توصل فى الآخر انها مجرد function بتعمل write & read لـ bit معين فى register !
-لكن كـ OS هو لازم يعمل multi layer of abstraction
-
-#### ايه لزمه الـ clk framework؟
-ء
-#### ازاى بتعمل test عموماً للـ clk framework؟ وازاى انا عملت test لما عملت port لـ Amlogic؟
-ء
-
-- [ ] [syscon.h](include/linux/mfd/syscon.h.md)
-- [ ] [auxiliary_bus.h](include/linux/auxiliary_bus.h.md) - [auxiliary.c](drivers/base/auxiliary.c.md)
-- [ ] [platform_device.h](include/linux/platform_device.h.md)
-- [ ] platform_profile.h ?
-
-
-
 ## of - open firmware
 ```
 OPEN FIRMWARE AND FLATTENED DEVICE TREE
@@ -116,17 +91,28 @@ K:	devm_gpiod_unhinge
 
 - [ ] [gpio.h](include/linux/gpio.h.md)
 - [ ] [of_gpio.h](include/linux/of_gpio.h.md)
+
 - [ ] [aspeed.h](include/linux/aspeed.h.md)
-- [ ] [consumer.h](old/pinctrl/consumer.h.md)
+- [ ] [consumer.h](include/linux/consumer.h.md)
 - [ ] [driver.h](include/linux/driver.h.md)
-- [ ] [machine.h](old/pinctrl/machine.h.md)
-- [ ] [consumer.h](old/pinctrl/consumer.h.md)
+- [ ] [machine.h](include/linux/pintrl/machine.h.md)
 - [ ] [forwarder.h](include/linux/forwarder.h.md)
 - [ ] [generic.h](include/linux/generic.h.md)
 - [ ] [gpio-nomadik.h](include/linux/gpio-nomadik.h.md)
 - [ ] [gpio-reg.h](include/linux/gpio-reg.h.md)
 - [ ] [property.h](include/linux/property.h.md)
 - [ ] [regmap.h](include/linux/regmap.h.md)
+
+- [ ] drivers/gpio/gpiolib.c
+- [ ] drivers/gpio/gpiolib-cdev.h
+- [ ] drivers/gpio/gpiolib.h
+- [ ] drivers/gpio/gpiolib-of.h
+- [ ] drivers/gpio/gpiolib-shared.h
+- [ ] drivers/gpio/gpiolib-sysfs.h
+- [ ] drivers/gpio/gpio-regmap.c
+- [ ] drivers/gpio/gpio-generic.c
+- [ ] drivers/gpio/gpio-mmio.c
+
 
 ## `I2C SUBSYSTEM`
 
@@ -286,6 +272,8 @@ F:	include/dt-bindings/pinctrl/
 F:	include/linux/pinctrl/
 ```
 
+- [ ] Documentation/driver-api/pin-control.rst
+
 - [ ] [devinfo.h](include/linux/pintrl/devinfo.h.md)
 - [ ] [machine.h](include/linux/pintrl/machine.h.md)
 - [ ] [pinconf-generic.h](include/linux/pinctrl/pinconf-generic.h.md)
@@ -294,6 +282,19 @@ F:	include/linux/pinctrl/
 - [ ] [pinctrl-state.h](include/linux/pinctrl/pinctrl-state.h.md)
 - [ ] [pinmux.h](include/linux/pinctrl/pinmux.h.md)
 - [ ] [pin-control.rst](Documentation/driver-api/pin-control.rst.md)
+
+- [ ] drivers/pinctrl/core.h
+- [ ] drivers/pinctrl/core.c
+- [ ] drivers/pinctrl/pinctrl-utils.c
+- [ ] drivers/pinctrl/pinctrl-utils.h
+- [ ] drivers/pinctrl/pinmux.c
+- [ ] drivers/pinctrl/pinmux.h
+- [ ] drivers/pinctrl/pinconf.c
+- [ ] drivers/pinctrl/pinconf.h
+- [ ] drivers/pinctrl/pinconf-generic.c
+- [ ] drivers/pinctrl/pinconf-generic.h
+- [ ] drivers/pinctrl/devicetree.c
+- [ ] drivers/pinctrl/devicetree.h
 
 
 ## `MEMORY MANAGEMENT - CORE`
@@ -415,6 +416,42 @@ F:	rust/helpers/clk.c
 F:	rust/kernel/clk.rs
 X:	drivers/clk/clkdev.c
 ```
+
+- [ ] drivers/clk/clk-devres.c
+- [ ] drivers/clk/clk-bulk.c
+- [ ] drivers/clk/clkdev.c
+- [ ] [clkdev.h](include/linux/clkdev.h.md) - [clkdev.c](drivers/clk/clkdev.c.md)
+
+- [ ] drivers/clk/clk-divider.c
+- [ ] drivers/clk/clk-fixed-factor.c
+- [ ] drivers/clk/clk-fixed-rate.c
+- [ ] drivers/clk/clk-gate.c
+- [ ] drivers/clk/clk-multiplier.c
+- [ ] drivers/clk/clk-mux.c
+- [ ] drivers/clk/clk-composite.c
+- [ ] drivers/clk/clk-gpio.c
+- [ ] drivers/clk/clk-conf.c
+
+- [ ] [clk.h](include/linux/clk.h.md)
+- [ ] [clk-provider.h](include/linux/clk-provider.h.md)
+- [ ] ----
+- [ ] [of_clk.h](include/linux/of_clk.h.md)
+- [ ] [sh_clk.h](include/linux/sh_clk.h.md)
+
+
+
+لطيف جداً فى الكيرنال والـ clk framework انك تشوف multi layer of abstractions بيتعمل من الـ functions كتير علشان تستخدم الحاجات دى كيوزر من غير ما تبقى عارف اى تفاصيل عن الهاردوير. بعدين لما تتبع ops توصل فى الآخر انها مجرد function بتعمل write & read لـ bit معين فى register !
+لكن كـ OS هو لازم يعمل multi layer of abstraction
+
+#### ايه لزمه الـ clk framework؟
+ء
+#### ازاى بتعمل test عموماً للـ clk framework؟ وازاى انا عملت test لما عملت port لـ Amlogic؟
+ء
+
+- [ ] [syscon.h](include/linux/mfd/syscon.h.md)
+- [ ] [auxiliary_bus.h](include/linux/auxiliary_bus.h.md) - [auxiliary.c](drivers/base/auxiliary.c.md)
+- [ ] [platform_device.h](include/linux/platform_device.h.md)
+- [ ] [platform_profile.h](include/linux/platform_profile.h.md)
 
 
 ## `VOLTAGE AND CURRENT REGULATOR FRAMEWORK`
@@ -659,6 +696,8 @@ K:	\b(?:devm_|of_)?reset_control(?:ler_[a-z]+|_[a-z_]+)?\b
 - [ ] [sunxi.h](include/linux/reset/sunxi.h.md)
 
 - [ ] [core.c](drivers/reset/core.c.md)
+
+- [ ] [reset-gpio.c](drivers/reset/reset-gpio.c.md)
 
 ## `GENERIC PHY FRAMEWORK`
 

@@ -194,6 +194,7 @@
   },
   "active": "87d8bfb909d07b5c",
   "lastOpenFiles": [
+    "drivers/reset/reset-gpio.c.md",
     "drivers/reset/core.c.md",
     "drivers/reset",
     "Documentation/spi/index.rst.md",
@@ -232,7 +233,6 @@
     "Pasted image 20260223223716.png",
     "Pasted image 20260223223642.png",
     "include/linux/i2c-smbus.h.md",
-    "include/linux/i2c-dev.h.md",
     "external/linux/Documentation/dev-tools/kunit/kunit_suitememorydiagram.svg",
     "external/linux/Documentation/arch/x86/suspend.svg",
     "external/linux/Documentation/arch/x86/resume.svg",
