@@ -191,6 +191,10 @@ F:	include/uapi/linux/spi/
 F:	tools/spi/
 ```
 
+- [ ] Documentation/spi/butterfly.rst
+- [ ] Documentation/spi/index.rst
+- [ ] Documentation/spi/spidev.rst
+- [ ] Documentation/spi/spi-summary.rst
 - [ ] [ad7877.h](include/linux/spi/ad7877.h.md)
 - [ ] [eeprom.h](include/linux/spi/eeprom.h.md)
 - [ ] [flash.h](include/linux/spi/flash.h.md)
@@ -198,6 +202,8 @@ F:	tools/spi/
 - [ ] [spi_gpio.h](include/linux/spi/spi_gpio.h.md)
 - [ ] [spi.h](include/linux/spi/spi.h.md)
 - [ ] [spi-mem.h](include/linux/spi/spi-mem.h.md)
+- [ ] include/uapi/linux/spi/spi.h
+- [ ] include/uapi/linux/spi/spidev.h
 
 ## `IRQ SUBSYSTEM`
 
@@ -278,6 +284,16 @@ F:	drivers/pinctrl/
 F:	include/dt-bindings/pinctrl/
 F:	include/linux/pinctrl/
 ```
+
+- [ ] include/linux/pintrl/consumer.h
+- [ ] include/linux/pintrl/devinfo.h
+- [ ] include/linux/pintrl/machine.h
+- [ ] include/linux/pintrl/pinconf-generic.h
+- [ ] include/linux/pintrl/pinconf.h
+- [ ] include/linux/pintrl/pinctrl.h
+- [ ] include/linux/pintrl/pinctrl-state.h
+- [ ] include/linux/pintrl/pinmux.h
+- [ ] Documentation/driver-api/pin-control.rst
 
 
 ## `MEMORY MANAGEMENT - CORE`

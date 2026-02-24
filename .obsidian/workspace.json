@@ -13,12 +13,26 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "books.md",
+                "file": "README.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "books"
+              "title": "README"
+            }
+          },
+          {
+            "id": "e46a156c7a1a9cef",
+            "type": "leaf",
+            "state": {
+              "type": "markdown",
+              "state": {
+                "file": "include/linux/i2c.h.md",
+                "mode": "source",
+                "source": false
+              },
+              "icon": "lucide-file",
+              "title": "i2c.h"
             }
           }
         ]
@@ -94,7 +108,7 @@
             "state": {
               "type": "backlink",
               "state": {
-                "file": "books.md",
+                "file": "README.md",
                 "collapseAll": true,
                 "extraContext": false,
                 "sortOrder": "alphabetical",
@@ -104,7 +118,7 @@
                 "unlinkedCollapsed": true
               },
               "icon": "links-coming-in",
-              "title": "Backlinks for books"
+              "title": "Backlinks for README"
             }
           },
           {
@@ -180,17 +194,38 @@
   },
   "active": "87d8bfb909d07b5c",
   "lastOpenFiles": [
+    "Documentation/spi/spidev.rst.md",
+    "Documentation/spi/butterfly.rst.md",
+    "Documentation/spi",
+    "include/uapi/linux/spi/spidev.h.md",
+    "include/uapi/linux/spi/spi.h.md",
+    "include/uapi/linux/spi",
+    "include/uapi/linux",
+    "include/uapi",
+    "Documentation/driver-api/pin-control.rst.md",
+    "Documentation/driver-api",
+    "Documentation",
+    "include/linux/pinctrl/pinmux.h.md",
+    "include/linux/pintrl/pinctrl.h.md",
+    "include/linux/pinctrl/pinctrl-state.h.md",
+    "include/linux/pinctrl/pinconf-generic.h.md",
+    "include/linux/pinctrl",
+    "include/linux/pintrl/pinconf.h.md",
+    "include/linux/i2c.h.md",
+    "include/linux/pintrl/machine.h.md",
+    "include/linux/pintrl/devinfo.h.md",
+    "include/linux/pintrl",
+    "external/linux/include/linux/pintrl/consumer.h.md",
+    "external/linux/include/linux/pintrl",
+    "README.md",
+    "books.md",
     "assets/Pasted image 20260223223812.png",
     "Pasted image 20260223223716.png",
     "assets",
     "Pasted image 20260223223642.png",
-    "README.md",
-    "books.md",
     "include/linux/i2c-smbus.h.md",
     "include/linux/i2c-dev.h.md",
     "include/dt-bindings/i2c/i2c.h.md",
-    "include/dt-bindings/i2c",
-    "include/dt-bindings",
     "include/linux/spi/ad7877.h.md",
     "include/linux/spi/spi.h.md",
     "include/linux/spi/spi_gpio.h.md",
@@ -198,33 +233,12 @@
     "include/linux/spi/mmc_spi.h.md",
     "include/linux/spi/flash.h.md",
     "include/linux/spi/eeprom.h.md",
-    "include/linux/spi",
-    "ggggg.md",
-    "include/linux/consumer.h.md",
-    "include/linux/gpio-nomadik.h.md",
-    "include/linux/generic.h.md",
-    "include/linux/forwarder.h.md",
-    "include/linux/gpio.h.md",
-    "include/linux/property.h.md",
-    "include/linux/regmap.h.md",
-    "include/linux/machine.h.md",
-    "include/linux/gpio-reg.h.md",
-    "include/linux/of_gpio.h.md",
-    "include/linux/driver.h.md",
-    "include/linux/aspeed.h.md",
-    "drivers/base",
-    "include/linux/mfd",
-    "drivers/tty/serial",
-    "drivers/tty",
-    "include/linux/bitmap.h.md.tmp.531031.1771607440678",
-    "include/linux/clk-provider.h.md.tmp.416533.1771562490382",
     "external/linux/Documentation/dev-tools/kunit/kunit_suitememorydiagram.svg",
     "external/linux/Documentation/arch/x86/suspend.svg",
     "external/linux/Documentation/arch/x86/resume.svg",
     "external/linux/Documentation/admin-guide/blockdev/drbd/DRBD-data-packets.svg",
     "external/linux/Documentation/admin-guide/blockdev/drbd/DRBD-8.3-data-packets.svg",
     "external/linux/Documentation/admin-guide/media/ipu6_isys_graph.svg",
-    "external/linux/Documentation/admin-guide/media/ipu3_rcb.svg",
-    "external/linux/Documentation/RCU/Design/Memory-Ordering/rcu_node-lock.svg"
+    "external/linux/Documentation/admin-guide/media/ipu3_rcb.svg"
   ]
 }
