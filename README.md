@@ -191,10 +191,11 @@ F:	include/uapi/linux/spi/
 F:	tools/spi/
 ```
 
-- [ ] Documentation/spi/butterfly.rst
-- [ ] Documentation/spi/index.rst
-- [ ] Documentation/spi/spidev.rst
-- [ ] Documentation/spi/spi-summary.rst
+- [ ] [index.rst](Documentation/spi/index.rst.md)
+- [ ] [butterfly.rst](Documentation/spi/butterfly.rst.md)
+- [ ] [spidev.rst](Documentation/spi/spidev.rst.md)
+- [ ] [spi-summary.rst](Documentation/spi/spi-summary.rst.md)
+
 - [ ] [ad7877.h](include/linux/spi/ad7877.h.md)
 - [ ] [eeprom.h](include/linux/spi/eeprom.h.md)
 - [ ] [flash.h](include/linux/spi/flash.h.md)
@@ -202,8 +203,8 @@ F:	tools/spi/
 - [ ] [spi_gpio.h](include/linux/spi/spi_gpio.h.md)
 - [ ] [spi.h](include/linux/spi/spi.h.md)
 - [ ] [spi-mem.h](include/linux/spi/spi-mem.h.md)
-- [ ] include/uapi/linux/spi/spi.h
-- [ ] include/uapi/linux/spi/spidev.h
+- [ ] [spi.h](include/uapi/linux/spi/spi.h.md)
+- [ ] [spidev.h](include/uapi/linux/spi/spidev.h.md)
 
 ## `IRQ SUBSYSTEM`
 
@@ -285,15 +286,14 @@ F:	include/dt-bindings/pinctrl/
 F:	include/linux/pinctrl/
 ```
 
-- [ ] include/linux/pintrl/consumer.h
-- [ ] include/linux/pintrl/devinfo.h
-- [ ] include/linux/pintrl/machine.h
-- [ ] include/linux/pintrl/pinconf-generic.h
-- [ ] include/linux/pintrl/pinconf.h
-- [ ] include/linux/pintrl/pinctrl.h
-- [ ] include/linux/pintrl/pinctrl-state.h
-- [ ] include/linux/pintrl/pinmux.h
-- [ ] Documentation/driver-api/pin-control.rst
+- [ ] [devinfo.h](include/linux/pintrl/devinfo.h.md)
+- [ ] [machine.h](include/linux/pintrl/machine.h.md)
+- [ ] [pinconf-generic.h](include/linux/pinctrl/pinconf-generic.h.md)
+- [ ] [pinconf.h](include/linux/pintrl/pinconf.h.md)
+- [ ] [pinctrl.h](include/linux/pintrl/pinctrl.h.md)
+- [ ] [pinctrl-state.h](include/linux/pinctrl/pinctrl-state.h.md)
+- [ ] [pinmux.h](include/linux/pinctrl/pinmux.h.md)
+- [ ] [pin-control.rst](Documentation/driver-api/pin-control.rst.md)
 
 
 ## `MEMORY MANAGEMENT - CORE`
@@ -651,6 +651,14 @@ F:	include/linux/reset/
 K:	\b(?:devm_|of_)?reset_control(?:ler_[a-z]+|_[a-z_]+)?\b
 ```
 
+- [ ] [reset.rst](Documentation/driver-api/reset.rst.md)
+
+- [ ] [reset-controller.h](include/linux/reset-controller.h.md)
+- [ ] [reset.h](include/linux/reset.h.md)
+- [ ] [reset-simple.h](include/linux/reset/reset-simple.h.md)
+- [ ] [sunxi.h](include/linux/reset/sunxi.h.md)
+
+- [ ] [core.c](drivers/reset/core.c.md)
 
 ## `GENERIC PHY FRAMEWORK`
 
@@ -789,6 +797,8 @@ F:	drivers/pwm/*.rs
 ```
 ```
 ```
+
+
 
 ## `FPGA MANAGER FRAMEWORK`
 
