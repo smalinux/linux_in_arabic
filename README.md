@@ -103,7 +103,7 @@ K:	devm_gpiod_unhinge
 - [ ] [property.h](include/linux/property.h.md)
 - [ ] [regmap.h](include/linux/regmap.h.md)
 
-- [ ] drivers/gpio/gpiolib.c
+- [ ] [gpiolib.c](drivers/gpio/gpiolib.c.md)
 - [ ] drivers/gpio/gpiolib-cdev.h
 - [ ] drivers/gpio/gpiolib.h
 - [ ] drivers/gpio/gpiolib-of.h
