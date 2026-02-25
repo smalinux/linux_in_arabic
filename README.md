@@ -828,8 +828,6 @@ PWM SUBSYSTEM DRIVERS [RUST]
 R:	Michal Wilczynski <m.wilczynski@samsung.com>
 F:	drivers/pwm/*.rs
 ```
-```
-```
 
 
 
