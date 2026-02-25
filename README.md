@@ -272,7 +272,7 @@ F:	include/dt-bindings/pinctrl/
 F:	include/linux/pinctrl/
 ```
 
-- [ ] Documentation/driver-api/pin-control.rst
+- [ ] [pin-control.rst](Documentation/driver-api/pin-control.rst.md)
 
 - [ ] [devinfo.h](include/linux/pintrl/devinfo.h.md)
 - [ ] [machine.h](include/linux/pintrl/machine.h.md)
@@ -283,17 +283,12 @@ F:	include/linux/pinctrl/
 - [ ] [pinmux.h](include/linux/pinctrl/pinmux.h.md)
 - [ ] [pin-control.rst](Documentation/driver-api/pin-control.rst.md)
 
-- [ ] drivers/pinctrl/core.h
-- [ ] drivers/pinctrl/core.c
+- [ ] [core.h](drivers/pinctrl/core.h.md) -- [core.c](drivers/pinctrl/core.c.md)
 - [ ] [pinctrl-utils.c](drivers/pinctrl/pinctrl-utils.c.md)
-- [ ] drivers/pinctrl/pinmux.c
-- [ ] drivers/pinctrl/pinmux.h
-- [ ] drivers/pinctrl/pinconf.c
-- [ ] drivers/pinctrl/pinconf.h
-- [ ] drivers/pinctrl/pinconf-generic.c
-- [ ] drivers/pinctrl/pinconf-generic.h
-- [ ] drivers/pinctrl/devicetree.c
-- [ ] drivers/pinctrl/devicetree.h
+- [ ] [pinmux.h](drivers/pinctrl/pinmux.h.md) -- [pinmux.c](drivers/pinctrl/pinmux.c.md)
+- [ ] [pinconf.c](drivers/pinctrl/pinconf.c.md)
+- [ ] [pinconf-generic.c](drivers/pinctrl/pinconf-generic.c.md)
+- [ ] [devicetree.c](drivers/pinctrl/devicetree.c.md)
 
 
 ## `MEMORY MANAGEMENT - CORE`
@@ -433,7 +428,7 @@ X:	drivers/clk/clkdev.c
 
 - [ ] [clk.h](include/linux/clk.h.md)
 - [ ] [clk-provider.h](include/linux/clk-provider.h.md)
-- [ ] ----
+
 - [ ] [of_clk.h](include/linux/of_clk.h.md)
 - [ ] [sh_clk.h](include/linux/sh_clk.h.md)
 
@@ -678,7 +673,7 @@ M:	Philipp Zabel <p.zabel@pengutronix.de>
 S:	Maintained
 T:	git https://git.pengutronix.de/git/pza/linux.git
 F:	Documentation/devicetree/bindings/reset/
-F:	Documentation/driver-api/reset.rst
+F:	
 F:	drivers/reset/
 F:	include/dt-bindings/reset/
 F:	include/linux/reset-controller.h
@@ -686,7 +681,7 @@ F:	include/linux/reset.h
 F:	include/linux/reset/
 K:	\b(?:devm_|of_)?reset_control(?:ler_[a-z]+|_[a-z_]+)?\b
 ```
-
+- [ ] Documentation/driver-api/reset.rst
 - [ ] [reset.rst](Documentation/driver-api/reset.rst.md)
 
 - [ ] [reset-controller.h](include/linux/reset-controller.h.md)

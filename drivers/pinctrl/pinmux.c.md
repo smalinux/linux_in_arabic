@@ -1,1438 +1,1322 @@
 ## Phase 1: الصورة الكبيرة ببساطة
 
-### ما هو الـ Pin Muxing؟
+### الـ Subsystem اللي بيتكلم عنه الملف
 
-تخيل عندك لوحة إلكترونية — مثلاً Raspberry Pi أو أي SoC (System on Chip) — فيها مئات الـ **pins** (أرجل المعالج). كل pin ده عبارة عن سلك صغير بيخرج من الشريحة. المشكلة إن الشريحة فيها وظائف كتير جداً: UART، SPI، I2C، PWM، GPIO، I2S وغيرها — لكن الأرجل (pins) محدودة العدد.
-
-فإيه الحل؟ كل pin ممكن يشتغل بأكتر من وظيفة واحدة، بس في وقت واحد بس يقدر يشتغل بوظيفة واحدة. ده اللي بيتسمى **Pin Multiplexing** أو اختصاراً **Pinmux**.
-
-### القصة: المنفذ المشترك
-
-تخيل إن عندك باب واحد في الشقة — ممكن يدخل منه ناس الأكل (UART)، أو ناس الإنترنت (SPI)، أو صاحبك (GPIO) — بس في وقت واحد بس نوع واحد. لازم حد "يحجز" الباب ده لغرض معين، وما يجيش تاني حد يستخدمه في نفس الوقت. لو اتنين اتشاجروا على نفس الباب، الـ kernel بيقول "لأ" لواحد منهم.
-
-ده بالظبط اللي بيعمله ملف `pinmux.c`: بيدير مين بيستخدم أنهي pin، وبيمنع التعارضات.
+الملفان `pinmux.c` و `pinmux.h` جزء من **PIN CONTROLLER subsystem** في Linux kernel، المسؤول عنه Linus Walleij وبيتتبعه على قائمة البريد `linux-gpio@vger.kernel.org`. الـ subsystem ده بيشمل كل حاجة في `drivers/pinctrl/` و `include/linux/pinctrl/`.
 
 ---
 
-### الـ Subsystem اللي ينتمي ليه
+### المشكلة اللي بيحلها الملف ده — الـ Big Picture
 
-الملفين دول جزء من **PIN CONTROL SUBSYSTEM** — المسجل في `MAINTAINERS` تحت:
+#### تخيل معايا: الـ SoC زي لوحة مفاتيح مشتركة
 
-```
-PIN CONTROL SUBSYSTEM
-M:  Linus Walleij <linusw@kernel.org>
-L:  linux-gpio@vger.kernel.org
-F:  drivers/pinctrl/
-F:  include/linux/pinctrl/
-F:  Documentation/driver-api/pin-control.rst
-```
+تخيل عندك **لوحة مفاتيح فيها 100 مفتاح** (ده الـ SoC — System on Chip).
 
----
+كل مفتاح (= **pin**) ممكن يشتغل بأكتر من طريقة:
+- يشتغل كـ **GPIO** (وصلة رقمية عادية input/output)
+- يشتغل كـ **UART TX** (إرسال serial)
+- يشتغل كـ **I2C SDA** (data line للـ I2C bus)
+- يشتغل كـ **SPI MOSI** (data line للـ SPI bus)
+- يشتغل كـ **PWM** (إشارة نبضية)
 
-### الهدف من `pinmux.c` و `pinmux.h`
+المشكلة: **مفتاح واحد بس** — ما تقدرش تستخدمه لأكتر من وظيفة في نفس الوقت.
 
-الـ **pinctrl subsystem** فيه ثلاث طبقات:
+لو الـ UART driver أخد المفتاح ده وحوّله لـ TX، والـ GPIO driver جه يحاول يستخدمه كـ GPIO، هيحصل **تعارض** وكل حاجة هتتعطل.
 
-| الطبقة | الملف | المسؤولية |
-|--------|-------|-----------|
-| **Core** | `core.c` | تسجيل الـ pins وإدارة الـ states |
-| **Pinmux** | `pinmux.c` | تحديد وظيفة كل pin (UART? GPIO? SPI?) |
-| **Pinconf** | `pinconf.c` | إعداد خصائص الـ pin (pull-up، drive strength...) |
-
-الـ `pinmux.c` تحديداً مسؤول عن:
-
-1. **حجز الـ pins**: قبل ما أي وظيفة تشتغل، لازم "تطلب" الـ pins اللي هي محتاجاها
-2. **ضبط الـ mux**: إخبار الـ hardware بالفعل "حول الـ pin ده لوظيفة UART"
-3. **منع التعارض**: لو pin اتحجز لـ SPI، ما يتحجزش تاني لـ I2C
-4. **دعم GPIO**: حالة خاصة لما الـ pin يشتغل كـ GPIO عادي
+هنا بيجي دور **pinmux** — ده هو **حارس المرور** اللي بيقرر مين يستخدم أنهي pin وبأي وظيفة.
 
 ---
 
-### الـ Functions والـ Groups: القاموس الأساسي
+### القصة الكاملة بالتفصيل
 
-قبل ما تفهم الكود، لازم تعرف:
+#### المشهد الأول: الـ SoC Hardware
 
-- **Function**: وظيفة يقدر يعملها الـ pin controller — مثلاً `"uart0"`, `"spi1"`, `"i2c2"`. كل function ليها اسم.
-- **Group**: مجموعة pins بتعمل الوظيفة دي مع بعض — مثلاً وظيفة `"uart0"` محتاجة pin رقم 10 (TX) وpin رقم 11 (RX) مع بعض.
-- **Selector**: رقم (index) بيمثل الـ function أو الـ group — لأن الـ kernel بيشتغل بالأرقام داخلياً أسرع من الـ strings.
+في أي SoC (Raspberry Pi، Qualcomm Snapdragon، STM32، إلخ)، جوا الـ chip في **registers** بتحدد كل pin هيشتغل إزاي. مثلاً:
 
 ```
-Function "uart0"  →  Group "uart0-grp"  →  Pins [10, 11]
-Function "spi1"   →  Group "spi1-grp"  →  Pins [20, 21, 22, 23]
-Function "gpio"   →  Group "gpio10"    →  Pins [10]
+Register 0x4000_0010:
+  bits [1:0] = 00 → GPIO
+  bits [1:0] = 01 → UART_TX
+  bits [1:0] = 10 → I2C_SDA
+  bits [1:0] = 11 → SPI_MOSI
 ```
 
----
+الـ pin controller driver (اللي بيكتبه مصنع الـ chip) بيعرف إزاي يكتب في الـ registers دي.
 
-### القصة الكاملة: رحلة الـ UART من البداية للنهاية
+#### المشهد التاني: الـ Kernel بيبدأ
 
-**السيناريو:** عندك UART driver عايز يشتغل على Pin 10 و Pin 11.
+لما الـ kernel بيبدأ (boot)، بيقرأ الـ device tree أو ACPI tables وبيعرف:
+- "الـ UART device محتاج pin 42 يشتغل كـ UART_TX"
+- "الـ I2C device محتاج pin 15 يشتغل كـ I2C_SDA"
+- "الـ GPIO driver محتاج يقدر يوصل لـ pins 0-31"
+
+#### المشهد التالت: دور pinmux.c
+
+لما أي driver بيطلب يستخدم pin، الكود في `pinmux.c` بيعمل الآتي:
 
 ```
-Device Tree
-    │
-    ▼
-pinctrl_map  (machine.h)
-  dev="uart0", state="default", function="uart0", group="uart0-grp"
-    │
-    ▼
-pinmux_map_to_setting()          ← يحول الاسم "uart0" لـ selector رقم
-    │   pinmux_func_name_to_selector()
-    │
-    ▼
-pinmux_enable_setting()          ← يحجز الـ pins ويفعّل الـ mux
-    │   pin_request(pin=10, owner="uart0")
-    │   pin_request(pin=11, owner="uart0")
-    │   ops->set_mux(func_selector, group_selector)
-    │                    │
-    │                    ▼
-    │            Hardware Register
-    │            GPIO_MUX[10] = UART_TX
-    │            GPIO_MUX[11] = UART_RX
-    ▼
-UART driver يشتغل بشكل طبيعي
-```
-
-لما الـ UART بيتوقف:
-```
-pinmux_disable_setting()  →  pin_free(10)  →  pin_free(11)
+1. تأكد إن الـ pin مش مستخدم حد تاني (pin_request)
+2. سجّل مين صاحبه (mux_owner أو gpio_owner)
+3. قول للـ hardware driver "وليها الـ function ده على الـ group ده" (set_mux)
+4. لما خلص، حرّر الـ pin (pin_free)
 ```
 
 ---
 
-### الـ strict mode: الحارس الصارم
+### المفاهيم الأساسية
 
-الـ **strict mode** هو إعداد في `struct pinmux_ops` — لما يتفعّل، بيمنع أي pin من الاشتراك بين GPIO وأي function تاني في نفس الوقت. بدونه، بعض الـ hardware يسمح بالاشتراك (مثلاً لو function هي نفسها GPIO).
+| المفهوم | المعنى | مثال حقيقي |
+|---------|--------|-----------|
+| **pin** | وصلة فيزيائية واحدة على الـ SoC | رجل واحد من الـ chip |
+| **function** | وظيفة ممكن الـ pin يعملها | UART، I2C، GPIO، SPI |
+| **group** | مجموعة pins بتشتغل مع بعض لتحقيق function | UART محتاج TX + RX = group من pinين |
+| **mux** | اختصار multiplexer — المفتاح اللي بيحدد الـ function | زي الـ switch في الـ circuit |
+| **pinctrl_map** | جدول بيقول "الـ device X محتاج الـ function Y على الـ group Z" | خريطة الـ wiring |
+| **pinctrl_setting** | الـ map بعد ما اتترجمت لـ selector numbers | الأوامر الجاهزة للتنفيذ |
+
+---
+
+### الـ strict mode — قصة مهمة
+
+في بعض الـ controllers، الـ pin ممكن يشتغل كـ GPIO وفي نفس الوقت مضبوط على function تاني (زي إنه configured كـ UART لكن مش متصل بـ UART driver لسه).
+
+الـ `strict` mode بيقول "**لا** — لو الـ pin مستخدم كـ mux function، ما ينفعش يتاخد كـ GPIO، والعكس":
 
 ```c
-/* strict=true: يرفض طلب GPIO لو الـ pin محجوز لـ mux function */
+/* من pinmux.c */
 if (ops->strict && desc->mux_usecount && !func_is_gpio)
-    return false;
+    return false;  /* مش هينفع يتستخدم كـ GPIO */
 ```
 
 ---
 
-### الـ Generic Functions: مكتبة الـ Lazy Drivers
+### المكونات الداخلية للكود
 
-الجزء التاني في الملف (`CONFIG_GENERIC_PINMUX_FUNCTIONS`) هو "مكتبة جاهزة" لصانعي الـ drivers — بدل ما كل driver يكتب نفس الكود لإدارة قائمة الـ functions، الـ kernel بيوفر:
+#### `pinmux.c` — الـ implementation
+
+| الـ Function | الدور |
+|-------------|-------|
+| `pinmux_check_ops()` | يتأكد إن الـ driver نفّذ الـ operations المطلوبة (get_functions_count، set_mux، إلخ) |
+| `pin_request()` | يحجز pin لمستخدم معين — يفحص التعارضات أولاً |
+| `pin_free()` | يحرر الـ pin ويرجع اسم المالك القديم |
+| `pinmux_request_gpio()` | يطلب pin عشان يشتغل كـ GPIO |
+| `pinmux_free_gpio()` | يحرر الـ GPIO pin |
+| `pinmux_gpio_direction()` | يحدد اتجاه الـ GPIO (input/output) |
+| `pinmux_map_to_setting()` | يحوّل الـ map (function name كـ string) لـ setting (selector كـ رقم) |
+| `pinmux_enable_setting()` | يفعّل الـ mux setting — يحجز كل الـ pins في الـ group ويبعت set_mux للـ hardware |
+| `pinmux_disable_setting()` | يعطّل الـ mux setting ويحرر الـ pins |
+
+#### الـ Generic Functions (للـ drivers اللي مش عايزة تكتب boilerplate)
 
 ```c
-pinmux_generic_add_function()     // أضف function جديدة
-pinmux_generic_get_function_name() // اسأل عن اسمها
-pinmux_generic_remove_function()  // احذفها
+/* بدل ما كل driver يكتب نفس الكود، الـ generic layer بيوفّر: */
+pinmux_generic_add_function()      /* أضف function جديدة */
+pinmux_generic_get_function_name() /* اجلب اسم function بالـ selector */
+pinmux_generic_get_function_groups() /* اجلب الـ groups المرتبطة بـ function */
+pinmux_generic_remove_function()   /* امسح function */
+pinmux_generic_free_functions()    /* امسح كل الـ functions */
 ```
 
-البيانات اتخزن في `radix_tree` (شجرة بحث سريعة) داخل الـ `pinctrl_dev`.
+الـ functions دي بتستخدم **radix tree** (`pin_function_tree`) لتخزين واسترجاع الـ functions بكفاءة.
 
 ---
 
-### مين بيستدعي مين؟ خريطة التفاعلات
+### رحلة الـ pin من الطلب للتفعيل
 
 ```
-┌──────────────────────────────────────────────┐
-│              Consumer (UART, SPI, ...)        │
-│   pinctrl_get() / pinctrl_select_state()      │
-└────────────────────┬─────────────────────────┘
-                     │
-                     ▼
-┌──────────────────────────────────────────────┐
-│              core.c (pinctrl core)            │
-│   يفسر الـ states ويستدعي pinmux + pinconf   │
-└──────┬─────────────────────────┬─────────────┘
-       │                         │
-       ▼                         ▼
-┌─────────────┐         ┌──────────────────┐
-│  pinmux.c   │         │    pinconf.c      │
-│ (الوظيفة)   │         │ (الخصائص)         │
-└──────┬──────┘         └──────────────────┘
-       │
-       ▼
-┌─────────────────────────────────────────────┐
-│         Hardware Driver (مثلاً imx.c)        │
-│   struct pinmux_ops { .set_mux = imx_mux }  │
-└─────────────────────────────────────────────┘
-```
-
----
-
-### الـ GPIO كحالة خاصة
-
-الـ GPIO ليست مجرد function عادية — الـ kernel بيتعامل معها بشكل مختلف:
-
-```c
-// لما GPIO driver يطلب pin
-pinmux_request_gpio()
-    └── pin_request(pctldev, pin, owner, gpio_range)
-            // لاحظ: gpio_range != NULL = GPIO mode
-            └── ops->gpio_request_enable()  // يفعّل GPIO mode في الـ hardware
-
-// الـ mux_owner vs gpio_owner: تتبعان بشكل منفصل في pin_desc
-desc->mux_owner   // "uart0" لو مضبوط لـ mux
-desc->gpio_owner  // "gpiochip0:10" لو مضبوط لـ GPIO
+Device Driver
+    │
+    ▼
+pinctrl_select_state()          ← في core.c
+    │
+    ▼
+pinmux_enable_setting()         ← في pinmux.c
+    │
+    ├── get_group_pins()         ← جلب الـ pins اللي في الـ group
+    │
+    ├── pin_request() × N       ← حجز كل pin واحد واحد
+    │       │
+    │       ├── فحص mux_owner   ← هل الـ pin محجوز؟
+    │       ├── فحص gpio_owner  ← هل محجوز كـ GPIO؟
+    │       └── gpio_request_enable() أو request()  ← إبلاغ الـ hardware driver
+    │
+    ├── تسجيل mux_setting على كل pin descriptor
+    │
+    └── ops->set_mux()          ← الأمر الفعلي للـ hardware: "وليها!"
+            │
+            ▼
+        Hardware Register       ← اتغيرت القيمة في الـ SoC
 ```
 
 ---
 
-### الـ debugfs: نافذة التشخيص
+### الـ debugfs interface
 
-الـ `pinmux.c` يضيف ثلاث ملفات في `/sys/kernel/debug/pinctrl/<controller>/`:
+لو فعّلت `CONFIG_DEBUG_FS`، بتلاقي ملفات في `/sys/kernel/debug/pinctrl/<device>/`:
 
 | الملف | المحتوى |
 |-------|---------|
-| `pinmux-functions` | قائمة كل الـ functions والـ groups |
-| `pinmux-pins` | حالة كل pin: مين حاجزه؟ |
-| `pinmux-select` | (write-only) تفعيل mux يدوياً للاختبار |
-
-مثال على output:
-```
-pin 10 (PA10): device uart0 function uart0 group uart0-grp
-pin 20 (PA20): GPIO gpiochip0:20
-pin 30 (PA30): UNCLAIMED
-```
+| `pinmux-functions` | كل الـ functions المتاحة والـ groups المرتبطة بيها |
+| `pinmux-pins` | حالة كل pin (مين مالكه، أيه الـ function) |
+| `pinmux-select` | تقدر تكتب فيه "group_name function_name" لتغيير الـ mux يدوياً |
 
 ---
 
-### الملفات الأساسية في الـ Subsystem
+### ملفات لازم تعرفها
 
-#### Core (اللب)
+#### الـ Core Files (القلب)
+
 | الملف | الدور |
 |-------|-------|
-| `drivers/pinctrl/core.c` | المحرك الرئيسي: تسجيل الـ controllers والـ states |
-| `drivers/pinctrl/core.h` | التعريفات الداخلية (struct pin_desc, ...) |
-| `drivers/pinctrl/pinmux.c` | **ملفنا**: إدارة الـ mux والـ function switching |
-| `drivers/pinctrl/pinmux.h` | واجهة داخلية بين core.c وpinmux.c |
-| `drivers/pinctrl/pinconf.c` | إدارة خصائص الـ pins (pull, drive strength) |
-| `drivers/pinctrl/devicetree.c` | تحليل الـ Device Tree وبناء الـ pinctrl_map |
+| `drivers/pinctrl/core.c` | الـ core الرئيسي للـ subsystem — تسجيل الـ controllers، إدارة الـ states |
+| `drivers/pinctrl/core.h` | الـ internal structures: `pin_desc`، `pinctrl_dev`، إلخ |
+| `drivers/pinctrl/pinmux.c` | **(الملف ده)** — منطق الـ muxing والـ ownership |
+| `drivers/pinctrl/pinmux.h` | الـ internal interface بين core وـ pinmux |
+| `drivers/pinctrl/pinconf.c` | إدارة الـ pin configuration (pull-up، drive strength، إلخ) |
+| `drivers/pinctrl/devicetree.c` | قراءة الـ pinctrl settings من الـ device tree |
 
-#### Headers (الواجهات العامة)
+#### الـ Public Headers (الـ API)
+
 | الملف | الدور |
 |-------|-------|
-| `include/linux/pinctrl/pinmux.h` | تعريف `struct pinmux_ops` (الـ driver interface) |
-| `include/linux/pinctrl/pinctrl.h` | تعريف `struct pinctrl_desc`, `pingroup`, `pinfunction` |
-| `include/linux/pinctrl/machine.h` | تعريف `struct pinctrl_map` (ربط devices بالـ pins) |
-| `include/linux/pinctrl/consumer.h` | واجهة المستخدمين (UART, SPI, ...) |
-| `include/linux/pinctrl/pinconf.h` | واجهة الـ pin configuration |
+| `include/linux/pinctrl/pinmux.h` | الـ `pinmux_ops` struct — الـ interface اللي الـ drivers بتنفذه |
+| `include/linux/pinctrl/pinctrl.h` | الـ `pinctrl_desc`، `pinfunction`، الـ pins registration |
+| `include/linux/pinctrl/consumer.h` | الـ API اللي الـ device drivers بتستخدمه (pinctrl_get، pinctrl_select_state) |
+| `include/linux/pinctrl/machine.h` | الـ `pinctrl_map` — ربط الـ devices بالـ functions |
+| `include/linux/pinctrl/pinctrl-state.h` | أسماء الـ states المعيارية: "default"، "sleep"، "idle" |
 
-#### Hardware Drivers (أمثلة)
-| الملف | الـ Hardware |
-|-------|-------------|
-| `drivers/pinctrl/freescale/pinctrl-imx.c` | NXP i.MX SoCs |
-| `drivers/pinctrl/intel/pinctrl-intel.c` | Intel SoCs |
-| `drivers/pinctrl/bcm/pinctrl-bcm2835.c` | Raspberry Pi |
-| `drivers/pinctrl/meson/` | Amlogic SoCs |
+#### مثال Hardware Driver
 
----
-
-### ملخص سريع
-
-**الـ `pinmux.c`** هو "شرطي المرور" للـ pins — بيحدد مين يستخدم أنهي pin، ويمنع التعارضات، ويوصل الأوامر للـ hardware الفعلي. الـ `pinmux.h` هو "التذكرة الداخلية" اللي بتربط الـ core بالـ pinmux بدون ما أي حد برا يشوف التفاصيل.
-## Phase 2: شرح الـ Pinmux Framework
-
-### المشكلة اللي بيحلها الـ Pinmux
-
-أي SoC حديث — خد مثلاً الـ STM32H7 أو Raspberry Pi CM4 — فيه مئات الـ pins على الـ package، بس الـ IP cores الداخلية (UART، SPI، I2C، PWM، ADC) أكتر بكتير من عدد الـ pins. الحل الهاردوير الكلاسيكي هو الـ **pin multiplexing**: كل pin واحد ممكن يشتغل بأكتر من وظيفة، وبيتحدد ده بـ register في الـ SoC.
-
-المشكلة من غير framework:
-- كل driver ييجي يكتب مباشرة في الـ IOMUX registers → conflict بين drivers.
-- UART driver بياخد pin بدون ما يسأل GPIO driver → short circuit منطقي.
-- الـ board support code بتتكرر في كل driver.
-- مفيش أي طريقة تعرف مين شايل الـ pin ده في runtime.
-
-**الـ pinmux subsystem** بيحل ده بإنه يكون الـ single owner اللي بيخلّي أي pin لـ function واحدة بس في اللحظة الواحدة، وبيعمل locking صريح.
+| الملف | الدور |
+|-------|-------|
+| `drivers/pinctrl/pinctrl-bcm2835.c` | الـ driver الخاص بـ Raspberry Pi — بينفذ `pinmux_ops` |
+| `drivers/pinctrl/intel/pinctrl-intel.c` | الـ driver الخاص بـ Intel platforms |
+| `drivers/pinctrl/qcom/pinctrl-msm.c` | الـ driver الخاص بـ Qualcomm SoCs |
 
 ---
 
-### الحل — المدخل اللي الكيرنل اتبعه
+### الـ pinmux_ops — العقد بين pinmux.c والـ Hardware Driver
 
-الكيرنل قسّم الموضوع لثلاث مفاهيم:
-
-| المفهوم | المعنى |
-|---------|--------|
-| **Pin** | رقم فريد عالمي للـ pad الفيزيائي |
-| **Group** | مجموعة pins بتشتغل مع بعض كوحدة واحدة (مثلاً 4 pins لـ SPI0) |
-| **Function** | الوظيفة اللي ممكن تتفعّل على group (مثلاً "spi0"، "uart1"، "gpio") |
-
-الـ framework بيقدم:
-1. **Ownership tracking**: كل pin عنده `mux_owner` و `gpio_owner`.
-2. **Ops table delegation**: الـ driver بيعمل implement لـ `struct pinmux_ops`، والـ core بيستدعيها.
-3. **Map table**: الـ board/DT بيعرّف "الـ device ده محتاج الـ function دي على الـ group ده".
-4. **State machine**: الـ consumer driver بياخد pinctrl state (default، sleep، ...) والـ core بيطبّقه.
-
----
-
-### التشبيه الواقعي — مكتبة فيها أدوات مشتركة
-
-تخيل مكتبة هندسية (= الـ SoC) فيها أدوات (= pins). كل أداة ممكن تتستخدم لأغراض مختلفة:
-- مسطرة → قياس أو رسم.
-- قلم → كتابة أو تحديد.
-
-**الـ librarian** (= pinctrl core) هو اللي بيقرر مين بياخد الأداة.
-- لو حد طلب الأداة للرسم (= UART) والأداة متاحة → بيديهاله ويكتب اسمه في السجل (`mux_owner`).
-- لو حد تاني طلبها لنفس الوقت → الـ librarian بيرفض ويقول "متاخدة من X".
-- لو الأداة اتاخدت كـ "pen" وحد حاول ياخدها كـ "pencil" في نفس الوقت في الـ strict mode → رفض صريح.
-
-الماب (= `pinctrl_map`) هو قائمة الحجوزات المسبقة. كل device بيقول "أنا هحتاج الأداة دي في حالة التشغيل العادية".
-
-كل جزء في التشبيه له مقابل حقيقي:
-
-| التشبيه | الكيرنل |
-|---------|---------|
-| الأداة الفيزيائية | `pin` رقم في global space |
-| نوع الاستخدام | `function` (uart، spi، gpio...) |
-| مجموعة الأدوات | `group` (مثلاً uart0_grp = [PA9, PA10]) |
-| سجل الحجوزات | `pin_desc->mux_owner` / `gpio_owner` |
-| الـ librarian | pinmux core (`pinmux.c`) |
-| قائمة الحجوزات | `pinctrl_map[]` في board code |
-| مندوب الـ librarian في الـ shelf | `pinmux_ops` في driver |
-
----
-
-### الصورة الكبيرة — Architecture
-
-```
-  ┌─────────────────────────────────────────────────────────────┐
-  │                      Consumer Drivers                        │
-  │   UART driver    SPI driver    I2C driver    GPIO subsystem  │
-  └──────┬───────────────┬────────────┬──────────────┬──────────┘
-         │               │            │              │
-         │  pinctrl_get() / pinctrl_select_state()   │
-         ▼               ▼            ▼              ▼
-  ┌─────────────────────────────────────────────────────────────┐
-  │                    pinctrl core  (core.c)                    │
-  │   - يحتفظ بـ pinctrl_map table                              │
-  │   - يحوّل state names → settings                            │
-  │   - يستدعي pinmux layer لتفعيل الـ mux                      │
-  └──────────────────────────┬──────────────────────────────────┘
-                             │
-                    ┌────────┴────────┐
-                    │  pinmux core    │  ← (pinmux.c — هذا الملف)
-                    │                 │
-                    │ pin_request()   │  ← يتحقق من الملكية
-                    │ pin_free()      │  ← يحرر الـ pin
-                    │ pinmux_enable_setting()  ← يفعّل الـ mux
-                    └────────┬────────┘
-                             │  استدعاء pinmux_ops callbacks
-                             ▼
-  ┌─────────────────────────────────────────────────────────────┐
-  │              Pin Controller Driver (مثلاً pinctrl-stm32.c)   │
-  │                                                             │
-  │  .set_mux()              → يكتب في IOMUX registers          │
-  │  .request() / .free()    → حجز/تحرير هاردوير               │
-  │  .gpio_request_enable()  → يحوّل pin لـ GPIO mode           │
-  │  .gpio_set_direction()   → input/output                     │
-  └──────────────────────────┬──────────────────────────────────┘
-                             │
-                    ┌────────┴────────┐
-                    │  SoC Hardware   │
-                    │  IOMUX / Mux    │
-                    │  Registers      │
-                    └─────────────────┘
-
-  Data flow لـ Map Table:
-  ┌─────────────────────────────────────────────────────────────┐
-  │  Board/DTS → pinctrl_map[] → pinctrl_setting → pin_desc     │
-  │                                                             │
-  │  مثال: "uart0" device في state "default":                   │
-  │    function = "uart0"  →  selector = 3                      │
-  │    group    = "uart0_grp" → pins = [42, 43]                 │
-  │    يستدعي: set_mux(pctldev, func=3, group=5)                │
-  └─────────────────────────────────────────────────────────────┘
-```
-
----
-
-### الـ Core Abstraction — الفكرة المحورية
-
-الـ pinmux subsystem بيقدم abstraction واحدة أساسية:
-
-> **"Pin ownership with function-group binding"**
->
-> أي pin في أي لحظة مملوك لـ entity واحدة بس (أو مش مملوك خالص)،
-> والملكية دي مربوطة بـ function محددة على group محدد.
-
-ده بيتجسّد في `struct pin_desc` (معرّفة في `core.h`):
+الـ hardware driver لازم ينفذ الـ struct ده:
 
 ```c
-struct pin_desc {
-    struct pinctrl_dev *pctldev;   /* الـ controller المسؤول */
-    const char         *name;      /* اسم الـ pin */
+/* من include/linux/pinctrl/pinmux.h */
+struct pinmux_ops {
+    /* اختياري: هل الـ pin متاح للـ mux؟ */
+    int (*request)(struct pinctrl_dev *pctldev, unsigned int offset);
+    int (*free)(struct pinctrl_dev *pctldev, unsigned int offset);
 
-    /* Mux ownership */
-    unsigned int        mux_usecount; /* كام function طالبة الـ pin ده */
-    const char         *mux_owner;   /* اسم الـ device صاحب الـ mux */
-    const struct pinctrl_setting_mux *mux_setting; /* الـ func+group المفعّلين */
+    /* إجباري: كام function عندك؟ وإيه اسم الـ function رقم N؟ */
+    int (*get_functions_count)(struct pinctrl_dev *pctldev);
+    const char *(*get_function_name)(struct pinctrl_dev *pctldev,
+                                     unsigned int selector);
 
-    /* GPIO ownership (منفصل!) */
-    const char         *gpio_owner;  /* اسم الـ GPIO consumer */
+    /* إجباري: الـ function دي بتشتغل على أنهي groups؟ */
+    int (*get_function_groups)(struct pinctrl_dev *pctldev,
+                               unsigned int selector,
+                               const char * const **groups,
+                               unsigned int *num_groups);
 
-    struct mutex        mux_lock;    /* حماية concurrent access */
+    /* إجباري: فعّل الـ function دي على الـ group ده في الـ hardware */
+    int (*set_mux)(struct pinctrl_dev *pctldev,
+                   unsigned int func_selector,
+                   unsigned int group_selector);
+
+    /* اختياري: للـ GPIO المتسارع */
+    int (*gpio_request_enable)(...);
+    void (*gpio_disable_free)(...);
+    int (*gpio_set_direction)(...);
+    bool (*function_is_gpio)(...);
+
+    bool strict; /* لا تسمح بالمشاركة بين GPIO وـ mux */
 };
 ```
 
-النقطة الدقيقة: فيه **مالكَين محتملَين** لكل pin:
-- `mux_owner`: لما pin اتاخد لـ function معينة (UART، SPI، ...)
-- `gpio_owner`: لما GPIO subsystem طلب الـ pin
+---
 
-الـ `strict` flag في `pinmux_ops` بيتحكم في إزاي الـ core يتعامل مع الحالة دي:
-- `strict = false` (default): ممكن يكون فيه mux_owner وgpio_owner في نفس الوقت (بعض الـ controllers بتدعم ده).
-- `strict = true`: ممنوع تماماً — إما ده أو ده.
+### الخلاصة بجملة واحدة
 
+**الـ pinmux** هو "مأمور السجل" اللي بيسجّل مين مالك أنهي pin، بيمنع التعارضات، وبيأمر الـ hardware driver يغيّر الـ register المناسب عشان الـ pin يشتغل بالوظيفة المطلوبة.
+## Phase 2: شرح الـ Pinmux Framework
+
+### المشكلة — ليه الـ Pinmux موجود؟
+
+أي SoC حديث — خد مثلاً Allwinner H3 أو STM32F4 — فيه مئات الـ pins جسدياً على الشريحة، لكن الـ peripherals المتاحة (UART, SPI, I2C, PWM, I2S, Ethernet…) أكتر بكتير من عدد الـ pins. الحل؟ كل pin ممكن يشتغل بأكتر من وظيفة — **مثلاً PA2 ممكن تكون UART2_TX أو TIM2_CH3 أو GPIO عادي**.
+
+الـ hardware بيتحكم في ده عن طريق **مux register** — بتكتب فيه value محددة فيختار الـ pin يشتغل إزاي.
+
+**المشكلة الحقيقية** إن من غير subsystem مركزي:
+- كل driver بيكتب على نفس الـ registers من ورا ضهر بعضهم
+- ما فيش حاجة تمنع UART driver من سرقة pin اللي SPI driver شغال عليه
+- كل board يكتب الـ pin configuration بطريقة مختلفة
+
+---
+
+### الحل — الـ Pinmux Subsystem
+
+الـ kernel بيحل الموضوع بـ **subsystem مركزي** يتحكم في كل عمليات الـ mux. الـ subsystem بيوفر:
+
+1. **تسجيل وظائف الـ pins** — كل وظيفة (function) اسمها إيه وبتشتغل على أي مجموعة pins (group)
+2. **نظام ownership** — كل pin بيتسجل باسم من طلبه، ما ينفعش اتنين يستخدموا نفس الـ pin في نفس الوقت
+3. **فصل السياسة عن التنفيذ** — الـ core بيقرر "مين له حق"، الـ driver بيعمل فعلاً الـ hardware write
+
+---
+
+### التشبيه الواقعي — صالة الاجتماعات في شركة
+
+تخيل شركة فيها **10 غرف اجتماعات** بس فيه **50 فريق** يحتاجوا يجتمعوا. كل غرفة ممكن تتحول لـ: studio تصوير، مكتب عمل، أو غرفة اجتماع.
+
+| عنصر الشركة | المقابل في الـ Pinmux |
+|---|---|
+| الغرفة الجسدية | الـ **pin** الجسدي |
+| وظيفة الغرفة (مكتب/studio) | الـ **function** (UART/SPI/GPIO) |
+| الفريق اللي بيستخدم الغرفة | الـ **mux_owner** |
+| مدير الجدول اللي بيحجز | الـ **pinmux core** |
+| كل فريق بيحجز من خلال المدير | كل driver بيطلب عبر `pinmux_enable_setting()` |
+| المدير بيرفض حجزين في نفس الوقت | الـ `pin_request()` بيرفض لو `mux_usecount != 0` |
+| مجموعة غرف للحفلات | الـ **pin group** |
+| نوع الحفلة (زفاف/مؤتمر) | الـ **function** اللي بتتطبق على الـ group |
+| الموظف اللي بيعمل الـ setup الجسدي | الـ **pin controller driver** اللي بيكتب الـ registers |
+| الموظف بيسأل المدير الأول | الـ `ops->request()` callback |
+
+الدقة في التشبيه: المدير (الـ core) ما بيعرفش إزاي يضبط الأوضة جسدياً — ده شغل الموظف (الـ driver). المدير بس بيضمن ما فيش تعارض في الحجزات.
+
+---
+
+### Big Picture Architecture
+
+```
+  ┌─────────────────────────────────────────────────────────────────┐
+  │                     Consumer Side                               │
+  │   ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────┐  │
+  │   │  UART    │  │  SPI     │  │  I2C     │  │  GPIO        │  │
+  │   │  driver  │  │  driver  │  │  driver  │  │  subsystem   │  │
+  └───┴────┬─────┴──┴────┬─────┴──┴────┬─────┴──┴──────┬───────┘──┘
+           │              │              │               │
+           │ pinctrl_get()│              │               │ pinctrl_gpio_request()
+           │ + select_state│             │               │
+           ▼              ▼              ▼               ▼
+  ┌─────────────────────────────────────────────────────────────────┐
+  │                   pinctrl core  (core.c)                        │
+  │   ┌─────────────────────────────────────────────────────────┐   │
+  │   │               pinmux core  (pinmux.c)                   │   │
+  │   │  pinmux_enable_setting()  pinmux_request_gpio()         │   │
+  │   │  pinmux_disable_setting() pinmux_free_gpio()            │   │
+  │   │  pinmux_map_to_setting()  pinmux_gpio_direction()       │   │
+  │   │  pin_request()  [ownership tracking]                    │   │
+  │   └───────────────────────────┬─────────────────────────────┘   │
+  └───────────────────────────────┼─────────────────────────────────┘
+                                  │  calls pmxops callbacks
+                                  ▼
+  ┌─────────────────────────────────────────────────────────────────┐
+  │              Pin Controller Driver  (e.g. pinctrl-stm32.c)      │
+  │                                                                  │
+  │   struct pinmux_ops {                                            │
+  │       .request            → check/reserve hardware resource      │
+  │       .free               → release hardware resource            │
+  │       .get_functions_count → how many mux functions exist?       │
+  │       .get_function_name  → name of function[N]                  │
+  │       .get_function_groups→ which pin groups support function[N] │
+  │       .set_mux            → write to hardware mux registers      │
+  │       .gpio_request_enable→ fast path: mux single pin to GPIO    │
+  │       .gpio_disable_free  → fast path: release GPIO mux          │
+  │       .gpio_set_direction → configure input/output in hardware   │
+  │       .function_is_gpio   → is this function the GPIO function?  │
+  │       .strict             → enforce exclusive ownership?         │
+  │   }                                                              │
+  └───────────────────────────┬─────────────────────────────────────┘
+                               │
+                               ▼
+  ┌─────────────────────────────────────────────────────────────────┐
+  │                    Hardware Registers                            │
+  │   GPIOA_MODER[1:0] = 0b10  → Alternate Function mode           │
+  │   GPIOA_AFRL[7:4]  = 0x07  → AF7 = UART1                      │
+  └─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### الـ Core Abstraction — Functions, Groups, Settings
+
+الـ pinmux subsystem بيبني نموذجه على **3 concepts أساسية**:
+
+#### 1. الـ Pin Group
+مجموعة pins جسدية بتشتغل مع بعضها كوحدة. مثلاً SPI1 بتتطلب 4 pins دايماً (CLK, MOSI, MISO, CS). الـ group بيقول "الـ pins دي بتتحرك مع بعض."
+
+#### 2. الـ Function
+الـ peripheral أو الوظيفة اللي ممكن تتحط على مجموعة pins. مثلاً `"spi1"` أو `"uart2"` أو `"gpio"`. function واحدة ممكن تتدعم على أكتر من group (لو الـ SoC بيسمح بـ SPI1 على أكتر من مجموعة pins بديلة).
+
+#### 3. الـ Setting (pinctrl_setting_mux)
 ```c
-/* من pinmux.c — قلب الـ ownership check */
-if ((!gpio_range || ops->strict) && !gpio_ok &&
-    desc->mux_usecount && strcmp(desc->mux_owner, owner)) {
-    dev_err(..., "pin %s already requested by %s; cannot claim for %s\n", ...);
-    goto out;
+struct pinctrl_setting_mux {
+    unsigned int group;   /* selector للـ group المختار */
+    unsigned int func;    /* selector للـ function المختارة */
+};
+```
+ده **الاختيار الفعلي** — "استخدم function رقم 3 على group رقم 7". الـ setting بيتخزن في `pin_desc->mux_setting` لكل pin في الـ group.
+
+---
+
+### مخطط العلاقات بين الـ Structs
+
+```
+struct pinctrl_dev
+├── desc → struct pinctrl_desc
+│          ├── pmxops → struct pinmux_ops  (driver callbacks)
+│          ├── pctlops → struct pinctrl_ops
+│          └── pins[] / npins
+│
+├── pin_desc_tree (radix tree, indexed by pin number)
+│   └── struct pin_desc
+│       ├── name
+│       ├── mux_usecount       ← عدد من طلبوا الـ pin
+│       ├── mux_owner          ← "stm32-uart.1" مثلاً
+│       ├── mux_setting ──────────────────────────────┐
+│       ├── gpio_owner         ← "gpiochip0:5" مثلاً  │
+│       └── mux_lock (mutex)                          │
+│                                                     │
+├── pin_function_tree (radix tree, indexed by selector)
+│   └── struct function_desc  (CONFIG_GENERIC_PINMUX_FUNCTIONS)
+│       ├── func → struct pinfunction
+│       │          ├── name    ← "uart1"
+│       │          ├── groups[] ← ["uart1-default", "uart1-alt"]
+│       │          └── ngroups
+│       └── data  ← driver-specific
+│
+└── pin_group_tree (radix tree, indexed by selector)
+    └── struct group_desc
+        ├── grp → struct pingroup
+        │         ├── name   ← "uart1-default"
+        │         ├── pins[] ← [10, 11]
+        │         └── npins
+        └── data
+
+الـ pinctrl_setting_mux (referenced by mux_setting above):
+struct pinctrl_setting_mux {
+    unsigned int group;  ──→ index into pin_group_tree
+    unsigned int func;   ──→ index into pin_function_tree
 }
 ```
 
 ---
 
-### الـ Structs وعلاقتها ببعض
+### الـ Ownership System — إزاي الـ pin_request() بيشتغل
 
-```
-  pinctrl_desc
-  ┌──────────────────────────────┐
-  │ name                         │
-  │ pins[]   → pinctrl_pin_desc  │──────┐
-  │ npins                        │      │
-  │ pctlops  → pinctrl_ops       │      │  pin فيزيائي: رقم + اسم
-  │ pmxops   → pinmux_ops ◄──────┼──────┼──── هنا مكمن الـ pinmux
-  │ confops  → pinconf_ops       │      │
-  └──────────────────────────────┘      ▼
-                                   pinctrl_pin_desc
-                                   ┌──────────────┐
-                                   │ number       │
-                                   │ name         │
-                                   │ drv_data     │
-                                   └──────────────┘
-
-  pinmux_ops (vtable — الـ driver بيملأه)
-  ┌────────────────────────────────────────────┐
-  │ request()              ← اطلب pin للـ mux  │
-  │ free()                 ← حرره              │
-  │ get_functions_count()  ← كام function؟     │
-  │ get_function_name()    ← اسم function[i]  │
-  │ get_function_groups()  ← groups بتاعتها   │
-  │ function_is_gpio()     ← GPIO function?   │
-  │ set_mux()              ← فعّل الـ mux ◄── MANDATORY │
-  │ gpio_request_enable()  ← GPIO fast path   │
-  │ gpio_disable_free()    ← GPIO fast path   │
-  │ gpio_set_direction()   ← input/output     │
-  │ strict                 ← bool flag        │
-  └────────────────────────────────────────────┘
-
-  pinctrl_map (board/DTS level)
-  ┌─────────────────────────────┐
-  │ dev_name    "spi0"          │  ← مين اللي بيطلب
-  │ name        "default"       │  ← state اسمه
-  │ type        MUX_GROUP       │
-  │ ctrl_dev_name "pinctrl0"    │  ← مين الـ controller
-  │ data.mux:                   │
-  │   .group    "spi0_grp"      │  ← الـ group
-  │   .function "spi0"          │  ← الـ function
-  └─────────────────────────────┘
-          │
-          ▼  pinmux_map_to_setting()
-  pinctrl_setting
-  ┌─────────────────────────────┐
-  │ pctldev                     │  ← pointer للـ controller
-  │ data.mux:                   │
-  │   .func   = 3  (selector)   │  ← رقم الـ function
-  │   .group  = 5  (selector)   │  ← رقم الـ group
-  └─────────────────────────────┘
-          │
-          ▼  pinmux_enable_setting()
-  يستدعي:
-    1. get_group_pins(group=5) → pins=[42,43]
-    2. pin_request(42) + pin_request(43)
-    3. desc[42].mux_setting = &setting.data.mux
-    4. set_mux(pctldev, func=3, group=5)
-```
-
----
-
-### Generic Pinmux Functions — الـ Helper Layer
-
-الـ Kconfig option `CONFIG_GENERIC_PINMUX_FUNCTIONS` بيوفر implementation جاهزة للـ functions الأساسية. الـ driver بدل ما يكتب `get_functions_count` و`get_function_name` من الصفر، بيستخدم:
+ده القلب الحقيقي للـ pinmux core. كل pin فيه في `pin_desc` الخاصة بيه:
 
 ```c
-/* الـ driver بيضيف function بسطر واحد */
-pinmux_generic_add_function(pctldev, "uart0", uart0_groups, ARRAY_SIZE(uart0_groups), NULL);
-
-/* والـ core بيخزنها في radix tree */
-// pin_function_tree: index → function_desc
+unsigned int mux_usecount; /* reference count للـ mux users */
+const char  *mux_owner;    /* اسم الـ device اللي claim الـ pin للـ function */
+const char  *gpio_owner;   /* اسم الـ GPIO لو اتطلب كـ GPIO */
 ```
 
-الـ `struct function_desc` هي الـ wrapper:
+**السيناريوهات:**
+
+```
+السيناريو 1: pin طلبه function (مثلاً UART)
+─────────────────────────────────────────
+  pin_request(pctldev, pin=10, owner="stm32-uart.1", gpio_range=NULL)
+  → mux_usecount++ (يبقى 1)
+  → mux_owner = "stm32-uart.1"
+  → بيستدعي ops->request(pctldev, 10) لو موجودة
+
+السيناريو 2: نفس الـ device طلب نفس الـ pin تاني مرة
+──────────────────────────────────────────────────
+  pin_request(pctldev, pin=10, owner="stm32-uart.1", gpio_range=NULL)
+  → مقارنة mux_owner == owner → true
+  → mux_usecount++ (يبقى 2)
+  → return 0  (بدون استدعاء ops->request)
+
+السيناريو 3: device تاني يحاول يأخذ الـ pin
+────────────────────────────────────────────
+  pin_request(pctldev, pin=10, owner="stm32-spi.0", gpio_range=NULL)
+  → mux_usecount != 0 && mux_owner != owner
+  → return -EBUSY  + error log
+
+السيناريو 4: طلب GPIO على pin مش له function
+──────────────────────────────────────────────
+  pinmux_request_gpio(pctldev, range, pin=10, gpio=5)
+  → owner = kasprintf("gpiochip0:5")
+  → pin_request(..., gpio_range=range)
+  → gpio_owner = "gpiochip0:5"
+  → بيستدعي ops->gpio_request_enable()
+```
+
+---
+
+### الـ strict Mode
+
+لما `ops->strict = true`، الـ controller بيفرض قاعدة صارمة:
+**pin مش ممكن يكون له `mux_owner` و`gpio_owner` في نفس الوقت، حتى لو الـ function هو GPIO**.
+
+بيُستخدم في controllers زي STM32 اللي عندها مفهوم واضح: pin إما في mode الـ alternate function أو في mode الـ GPIO — مش الاتنين.
+
+لما `strict = false` (الـ default)، ممكن pin يكون له mux function وفي نفس الوقت يتطلب كـ GPIO — بعض الـ SoCs القديمة بتسمح بكده.
 
 ```c
-struct function_desc {
-    const struct pinfunction *func;  /* الاسم والـ groups */
-    void *data;                      /* driver-specific data */
-};
+/* من pinmux_can_be_used_for_gpio() */
+if (ops->strict && desc->mux_usecount && !func_is_gpio)
+    return false;  /* strict mode: pin مشغول بـ non-GPIO function */
 
-struct pinfunction {
-    const char        *name;
-    const char *const *groups;   /* ["uart0_grp_a", "uart0_grp_b"] */
-    size_t             ngroups;
-    unsigned long      flags;    /* PINFUNCTION_FLAG_GPIO لو GPIO */
-};
-```
-
-الـ radix tree بيخلّي الـ lookup بـ O(log n) بدل linear scan.
-
----
-
-### Flow كامل — من Driver Probe لـ set_mux
-
-```
-  1. Board/DTS يعرّف:
-     PIN_MAP_MUX_GROUP_DEFAULT("uart0", "pinctrl0", "uart0_grp", "uart0")
-                │
-                ▼
-  2. pinctrl_register_mappings() يضيف الـ map للـ global list
-
-  3. uart0 driver يعمل:
-     devm_pinctrl_get(dev)           → pinctrl handle
-     pinctrl_lookup_state(p, "default") → pinctrl_state
-     pinctrl_select_state(p, state)  → triggers:
-
-  4. pinctrl core → pinmux_map_to_setting()
-     - pinmux_func_name_to_selector("uart0") → func_selector=3
-     - get_function_groups(3) → ["uart0_grp"]
-     - pinctrl_get_group_selector("uart0_grp") → group_selector=5
-
-  5. pinmux_enable_setting()
-     - get_group_pins(5) → pins=[42, 43]
-     - pin_request(42, "uart0", NULL):
-         desc[42].mux_usecount++
-         desc[42].mux_owner = "uart0"
-         ops->request(pctldev, 42)       ← driver hook
-     - pin_request(43, ...) → نفس العملية
-     - desc[42].mux_setting = &setting.data.mux
-     - ops->set_mux(pctldev, 3, 5)      ← يكتب في IOMUX registers
-
-  6. لو فيه error في أي خطوة:
-     - rollback: pin_free() لكل pin اتاخد
-     - desc->mux_setting = NULL
+return !(ops->strict && !!desc->gpio_owner);
+/* strict mode: pin مشغول بـ GPIO → مش متاح للـ mux */
 ```
 
 ---
 
-### ما بيملكه الـ Pinmux Core مقابل ما بيفوّضه للـ Driver
+### الـ Map-to-Setting Pipeline
 
-| المسؤولية | المالك |
-|-----------|--------|
-| تتبع `mux_owner` و `gpio_owner` | **pinmux core** |
-| الـ locking على الـ `pin_desc` | **pinmux core** (mutex per pin) |
-| التحقق من conflicts | **pinmux core** |
-| ترجمة function name → selector | **pinmux core** |
-| ترجمة group name → selector | **pinctrl core** |
-| الكتابة في الـ IOMUX registers | **driver** عبر `set_mux()` |
-| تحديد الـ groups المرتبطة بكل function | **driver** عبر `get_function_groups()` |
-| التحقق من أن الـ pin متاح هاردوير | **driver** عبر `request()` |
-| GPIO fast path (direction، enable) | **driver** عبر `gpio_*` callbacks |
-| تعريف الـ pins والـ groups نفسها | **driver** + **board/DTS** |
+لما device بيطلب activate state معين (مثلاً "default")، الـ flow بيكون:
+
+```
+Device Tree / board file
+      │
+      ▼
+struct pinctrl_map {
+    .dev_name  = "stm32-uart.1",
+    .name      = "default",
+    .type      = PIN_MAP_TYPE_MUX_GROUP,
+    .data.mux = {
+        .function = "uart1",
+        .group    = "uart1-default",   /* optional */
+    }
+}
+      │
+      ▼  pinmux_validate_map()
+      │  → يتأكد إن .function موجودة
+
+      ▼  pinmux_map_to_setting()
+      │  → pinmux_func_name_to_selector() يحول "uart1" → func=3
+      │  → pmxops->get_function_groups()  يجيب groups المتاحة
+      │  → لو .group محدد: match_string() يتحقق إنها valid
+      │  → pinctrl_get_group_selector() يحول "uart1-default" → group=7
+      │  → setting->data.mux = { .func=3, .group=7 }
+
+      ▼  pinmux_enable_setting()
+      │  → pctlops->get_group_pins() يجيب pins[] = [10, 11]
+      │  → pin_request() على كل pin
+      │  → desc->mux_setting = &setting->data.mux  لكل pin
+      │  → ops->set_mux(pctldev, func=3, group=7)
+      │       ← هنا الـ driver بيكتب فعلاً على الـ hardware registers
+      ▼
+    Hardware configured!
+```
 
 ---
 
-### ملاحظة على الـ GPIO Path
+### الـ Generic Pinmux Functions (CONFIG_GENERIC_PINMUX_FUNCTIONS)
 
-الـ GPIO subsystem (راجع `gpiolib.c` — هو المسؤول عن إدارة GPIO lines وتوجيه الطلبات للـ pin controller) بيستدعي:
+بدل ما كل driver يكتب `get_functions_count` / `get_function_name` / `get_function_groups` من الصفر، الـ kernel بيوفر **generic implementation** بتستخدم **radix tree** (`pin_function_tree` في `pinctrl_dev`).
 
 ```c
-pinmux_request_gpio(pctldev, range, pin, gpio)
+/* الـ driver بس بيعمل كده وبخلص */
+pinmux_generic_add_function(pctldev,
+    "uart1",                          /* اسم الـ function */
+    uart1_groups, ARRAY_SIZE(uart1_groups),  /* الـ groups */
+    &uart1_data                       /* driver-specific data */
+);
+
+/* الـ core تلقائياً بيعمل: */
+struct function_desc *function = devm_kzalloc(...);
+function->func = { .name="uart1", .groups=uart1_groups, .ngroups=N };
+radix_tree_insert(&pctldev->pin_function_tree, selector, function);
+pctldev->num_functions++;
 ```
 
-ده بيعمل `pin_request()` بـ `gpio_range != NULL`، فبيسلك مسار مختلف:
-- بيضع `gpio_owner` بدل `mux_owner`
-- بيستدعي `gpio_request_enable()` بدل `request()` لو موجودة
-- الـ `strict` flag بيقرر لو ممكن GPIO ومux في نفس الوقت أو لأ
-
-ده بيخلّي GPIO subsystem وpinmux subsystem مترابطين بـ pinctrl layer كوسيط، مش مباشرةً مع الـ hardware registers.
+الـ radix tree بتعطي O(log n) lookup بـ selector number — مهم جداً لـ SoCs اللي عندها مئات الـ functions.
 
 ---
 
-### debugfs — رؤية الحالة في Runtime
+### الـ GPIO Fast Path
 
-الـ pinmux بيوفر ثلاث ملفات في `/sys/kernel/debug/pinctrl/<controller>/`:
+الـ GPIO subsystem بيتعامل مع الـ pins بشكل مختلف — مش عن طريق states وmaps، ولكن عن طريق `pinctrl_gpio_request()` مباشرة. الـ pinmux core بيوفر fast path مخصوص لده:
 
-```bash
-# كل الـ functions المتاحة وlـ groups بتاعتها
-cat /sys/kernel/debug/pinctrl/pinctrl0/pinmux-functions
-# function 0: gpio, groups = [ gpio0 gpio1 ... ]
-# function 1: uart0, groups = [ uart0_grp ]
-
-# حالة كل pin
-cat /sys/kernel/debug/pinctrl/pinctrl0/pinmux-pins
-# pin 42 (PA10): uart0 (GPIO UNCLAIMED) function uart0 group uart0_grp
-# pin 43 (PA11): uart0 (GPIO UNCLAIMED) function uart0 group uart0_grp
-# pin 44 (PA12): (MUX UNCLAIMED) (GPIO UNCLAIMED)
-
-# تفعيل mux يدوياً للـ debugging
-echo "uart0_grp uart0" > /sys/kernel/debug/pinctrl/pinctrl0/pinmux-select
 ```
+GPIO subsystem                   pinmux core              Driver
+     │                               │                      │
+     │  pinmux_request_gpio()        │                      │
+     │ ─────────────────────────────►│                      │
+     │                               │  pin_request()       │
+     │                               │  (gpio_range != NULL)│
+     │                               │                      │
+     │                               │  ops->gpio_request_enable()
+     │                               │ ────────────────────►│
+     │                               │                      │ write HW
+     │  pinmux_gpio_direction()      │                      │
+     │ ─────────────────────────────►│                      │
+     │                               │  ops->gpio_set_direction()
+     │                               │ ────────────────────►│
+     │                               │                      │ write HW
+```
+
+**ليه fast path؟** لأن الـ GPIO بتطلب تحريك pin واحد بس، مش group كامل. الـ `gpio_request_enable` callback بتأخذ `pinctrl_gpio_range` وـ offset — مش function selector وgroup selector.
+
+---
+
+### إيه اللي الـ Core بيمتلكه vs. إيه اللي بيفوّضه للـ Driver
+
+| المسؤولية | الـ Core (pinmux.c) | الـ Driver (pmxops) |
+|---|---|---|
+| تتبع الـ ownership | نعم — `mux_owner`, `mux_usecount`, `gpio_owner` | لأ |
+| منع التعارض بين drivers | نعم — `pin_request()` checks | لأ |
+| ربط الـ map بـ selector numbers | نعم — `pinmux_map_to_setting()` | لأ |
+| الكتابة على الـ hardware registers | لأ | نعم — `set_mux()` |
+| تحديد قائمة الـ functions | لأ | نعم — `get_functions_count`, `get_function_name` |
+| تحديد قائمة الـ groups لكل function | لأ | نعم — `get_function_groups` |
+| التحقق من إمكانية استخدام pin | نعم — بيسأل الـ driver أولاً | نعم — `request()` callback |
+| الـ reference counting للـ module | نعم — `try_module_get` / `module_put` | لأ |
+| الـ debugfs | نعم — `pinmux_init_device_debugfs()` | جزئياً — بيقرأ من الـ ops |
+
+---
+
+### ملاحظة على الـ Subsystems المرتبطة
+
+- **الـ pinctrl core** (عكس الـ pinmux): بيتكلم عن pin groups وpin configs (pull-up, drive strength) — مش الـ mux function. الـ pinmux بيكمل الـ pinctrl مش بيستبدله.
+- **الـ GPIO subsystem**: بيستخدم `pinmux_request_gpio()` / `pinmux_free_gpio()` / `pinmux_gpio_direction()` لما يحتاج يعمل mux على pin. علاقة اتجاهية: GPIO يطلب من pinmux.
+- **الـ device tree / machine mapping**: الـ `pinctrl_map` بيتيجي من DT parsing أو board file — ده خارج الـ pinmux نفسه، موجود في `pinctrl/devicetree.c` و`pinctrl/machine.c`.
 ## Phase 3: التفاصيل العميقة — الـ Structs والعلاقات
 
 ---
 
 ### الـ Flags والـ Enums والـ Config Options
 
-#### الـ `PINFUNCTION_FLAG_GPIO`
+#### `enum pinctrl_map_type` — نوع الـ mapping entry
 
-| Flag | القيمة | المعنى |
-|------|--------|--------|
-| `PINFUNCTION_FLAG_GPIO` | `BIT(0)` | الـ function دي بتاعة GPIO — بيستخدمها `function_is_gpio` callback عشان يعرف يفرق بين GPIO وأي function تانية |
+| القيمة | المعنى |
+|---|---|
+| `PIN_MAP_TYPE_INVALID` | قيمة غير صالحة، sentinel |
+| `PIN_MAP_TYPE_DUMMY_STATE` | state وهمية بدون أي إعداد فعلي للـ hardware |
+| `PIN_MAP_TYPE_MUX_GROUP` | إعداد mux لمجموعة pins |
+| `PIN_MAP_TYPE_CONFIGS_PIN` | إعداد config (pull/drive) لـ pin واحد |
+| `PIN_MAP_TYPE_CONFIGS_GROUP` | إعداد config لمجموعة pins كاملة |
 
-#### الـ `pinctrl_map_type` (من `linux/pinctrl/machine.h`)
+#### `PINFUNCTION_FLAG_GPIO` — flag على الـ `pinfunction`
 
-| النوع | المعنى |
-|-------|--------|
-| `PIN_MAP_TYPE_INVALID` | غير صالح |
-| `PIN_MAP_TYPE_DUMMY_STATE` | state وهمية، مفيش hardware |
-| `PIN_MAP_TYPE_MUX_GROUP` | ضبط mux لـ group من الـ pins |
-| `PIN_MAP_TYPE_CONFIGS_GROUP` | ضبط config لـ group |
-| `PIN_MAP_TYPE_CONFIGS_PIN` | ضبط config لـ pin واحد |
+| الـ Flag | القيمة | المعنى |
+|---|---|---|
+| `PINFUNCTION_FLAG_GPIO` | `BIT(0)` | الـ function دي هي GPIO mode — بتُستخدم مع `strict` mode عشان الـ core يعرف إن الـ pin مش occupied بـ function تانية |
 
-#### الـ `CONFIG_*` Options المؤثرة على الـ pinmux
+#### الـ Config Options المهمة
 
-| Option | الأثر |
-|--------|-------|
-| `CONFIG_PINMUX` | يفعّل كل كود الـ pinmux، بدونه كل الـ functions بتبقى stubs |
-| `CONFIG_GENERIC_PINMUX_FUNCTIONS` | يفعّل الـ generic API: `pinmux_generic_*` + الـ `function_desc` struct + الـ `pin_function_tree` في `pinctrl_dev` |
-| `CONFIG_GENERIC_PINCTRL_GROUPS` | يفعّل الـ generic group management: `pin_group_tree` في `pinctrl_dev` |
-| `CONFIG_DEBUG_FS` | يضيف `/sys/kernel/debug/pinctrl/<dev>/pinmux-functions` و `pinmux-pins` و `pinmux-select` |
+| الـ Kconfig | الأثر |
+|---|---|
+| `CONFIG_PINMUX` | بيفعّل كل subsystem الـ pinmux — لو معطل، كل الفنكشنز بتتحول لـ stubs بترجع 0 |
+| `CONFIG_GENERIC_PINMUX_FUNCTIONS` | بيفعّل الـ generic radix-tree backend للـ functions — الـ driver مش محتاج يعمل إدارة functions يدوية |
+| `CONFIG_GENERIC_PINCTRL_GROUPS` | نفس الفكرة للـ groups |
+| `CONFIG_DEBUG_FS` | بيضيف `/sys/kernel/debug/pinctrl/<dev>/pinmux-{functions,pins,select}` |
 
-#### الـ `strict` flag في `pinmux_ops`
+#### الـ Strict Mode
 
-| الوضع | السلوك |
-|-------|--------|
-| `strict = false` | ممكن pin واحد يكون عنده `mux_owner` وفي نفس الوقت `gpio_owner` |
-| `strict = true` | ممنوع تماماً — لو الـ pin عنده أي owner، أي طلب جديد هيتـreject |
-
----
-
-### كل الـ Structs المهمة
+| الحالة | `strict = false` | `strict = true` |
+|---|---|---|
+| pin مأخوذ بـ mux | ممكن GPIO يطلبه بشرط نفس الـ owner | ممنوع تمامًا |
+| pin مأخوذ بـ GPIO | ممكن mux يطلبه | ممنوع تمامًا |
+| الاستخدام الشائع | controllers قديمة | controllers حديثة precise |
 
 ---
 
-#### `struct pinmux_ops`
-**الغرض:** الـ vtable اللي الـ driver بيملّيها — كل الـ hardware-specific operations للـ muxing.
+### الـ Structs المهمة
 
-| Field | النوع | الوصف |
-|-------|-------|-------|
-| `request` | `int (*)(pctldev, offset)` | اطلب pin معين قبل أي mux — الـ driver يقرر هيقبل ولا لأ |
-| `free` | `int (*)(pctldev, offset)` | حرر الـ pin بعد الاستخدام |
-| `get_functions_count` | `int (*)(pctldev)` | كام function موجود في الـ controller |
-| `get_function_name` | `const char *(*)(pctldev, selector)` | اسم الـ function رقم `selector` |
-| `get_function_groups` | `int (*)(pctldev, selector, **groups, *ngroups)` | الـ groups اللي بتدعم الـ function ده |
-| `function_is_gpio` | `bool (*)(pctldev, selector)` | هل الـ function دي GPIO؟ (اختياري) |
-| `set_mux` | `int (*)(pctldev, func_selector, group_selector)` | **المهمة الأساسية** — اكتب على الـ hardware register |
-| `gpio_request_enable` | `int (*)(pctldev, range, offset)` | اطلب وفعّل GPIO على pin معين |
-| `gpio_disable_free` | `void (*)(pctldev, range, offset)` | عكس `gpio_request_enable` |
-| `gpio_set_direction` | `int (*)(pctldev, range, offset, input)` | حدد input/output للـ GPIO |
-| `strict` | `bool` | منع استخدام الـ pin لـ GPIO ومقصد آخر في نفس الوقت |
+#### 1. `struct pinmux_ops` — vtable الـ driver
 
-الـ callbacks **الإلزامية**: `get_functions_count` + `get_function_name` + `get_function_groups` + `set_mux` — كلهم بيتتحقق منهم في `pinmux_check_ops()`.
+**الغرض:** الـ interface الرئيسي اللي كل driver لازم يطبّقه عشان يدعم الـ pinmux. الـ core بيتعامل مع الـ hardware من خلاله بس.
 
----
-
-#### `struct pinfunction`
-**الغرض:** وصف function واحدة — الاسم والـ groups اللي بتدعمها.
-
-| Field | النوع | الوصف |
-|-------|-------|-------|
-| `name` | `const char *` | اسم الـ function مثلاً `"uart0"`, `"spi1"` |
-| `groups` | `const char * const *` | array بأسماء الـ groups اللي الـ function دي تشتغل عليهم |
-| `ngroups` | `size_t` | عدد الـ groups |
-| `flags` | `unsigned long` | حالياً فيه بس `PINFUNCTION_FLAG_GPIO` |
-
-**Macros للتعريف:**
 ```c
-/* function عادية */
-PINCTRL_PINFUNCTION("uart0", uart0_groups, ARRAY_SIZE(uart0_groups))
+struct pinmux_ops {
+    /* اختياري: هل ممكن نطلب الـ pin ده؟ */
+    int (*request)(struct pinctrl_dev *pctldev, unsigned int offset);
 
-/* function من نوع GPIO */
-PINCTRL_GPIO_PINFUNCTION("gpio", gpio_groups, ARRAY_SIZE(gpio_groups))
+    /* اختياري: عكس request */
+    int (*free)(struct pinctrl_dev *pctldev, unsigned int offset);
+
+    /* إجباري: كام function عندك؟ */
+    int (*get_functions_count)(struct pinctrl_dev *pctldev);
+
+    /* إجباري: اسم الـ function رقم selector */
+    const char *(*get_function_name)(struct pinctrl_dev *pctldev,
+                                      unsigned int selector);
+
+    /* إجباري: الـ groups المرتبطة بالـ function */
+    int (*get_function_groups)(struct pinctrl_dev *pctldev,
+                               unsigned int selector,
+                               const char * const **groups,
+                               unsigned int *num_groups);
+
+    /* اختياري: هل الـ function دي هي GPIO؟ */
+    bool (*function_is_gpio)(struct pinctrl_dev *pctldev,
+                              unsigned int selector);
+
+    /* إجباري: فعّل الـ mux على الـ hardware */
+    int (*set_mux)(struct pinctrl_dev *pctldev,
+                   unsigned int func_selector,
+                   unsigned int group_selector);
+
+    /* اختياري: طلب GPIO على pin بعينه */
+    int (*gpio_request_enable)(struct pinctrl_dev *pctldev,
+                                struct pinctrl_gpio_range *range,
+                                unsigned int offset);
+
+    /* اختياري: تحرير GPIO */
+    void (*gpio_disable_free)(struct pinctrl_dev *pctldev,
+                               struct pinctrl_gpio_range *range,
+                               unsigned int offset);
+
+    /* اختياري: تحديد اتجاه الـ GPIO */
+    int (*gpio_set_direction)(struct pinctrl_dev *pctldev,
+                               struct pinctrl_gpio_range *range,
+                               unsigned int offset,
+                               bool input);
+
+    /* لو true: لا يسمح بمشاركة pin بين GPIO وmux */
+    bool strict;
+};
+```
+
+**الـ callbacks الإجبارية لـ `pinmux_check_ops()`:**
+- `get_functions_count`
+- `get_function_name`
+- `get_function_groups`
+- `set_mux`
+
+---
+
+#### 2. `struct pinctrl_dev` — الـ pin controller device
+
+**الغرض:** التمثيل الداخلي لأي pin controller مسجّل في الـ kernel. بيجمع كل المعلومات: الـ descriptor، الـ pins، الـ functions، الـ groups، والـ GPIO ranges.
+
+| الحقل | النوع | المعنى |
+|---|---|---|
+| `node` | `list_head` | ربطه في قائمة الـ controllers العالمية |
+| `desc` | `const struct pinctrl_desc *` | الـ descriptor الي جه من الـ driver |
+| `pin_desc_tree` | `radix_tree_root` | شجرة تحتوي كل الـ `pin_desc` مفهرسة برقم الـ pin |
+| `pin_function_tree` | `radix_tree_root` | شجرة الـ functions (لو `CONFIG_GENERIC_PINMUX_FUNCTIONS`) |
+| `pin_group_tree` | `radix_tree_root` | شجرة الـ groups (لو `CONFIG_GENERIC_PINCTRL_GROUPS`) |
+| `num_functions` | `unsigned int` | عداد الـ functions المسجّلة |
+| `gpio_ranges` | `list_head` | قائمة الـ GPIO ranges المرتبطة |
+| `dev` | `struct device *` | الـ device المقابل |
+| `owner` | `struct module *` | الـ module — بيُحسب `refcount` عليه لكل pin مطلوب |
+| `p` | `struct pinctrl *` | الـ pinctrl handle الخاص بالـ controller نفسه (للـ hog) |
+| `hog_default` / `hog_sleep` | `struct pinctrl_state *` | الـ states المحجوزة لنفس الـ controller |
+| `mutex` | `struct mutex` | بيحمي عمليات الـ controller كلها |
+| `device_root` | `struct dentry *` | جذر الـ debugfs لهذا الـ controller |
+
+---
+
+#### 3. `struct pinctrl_desc` — الـ descriptor الي بيقدمه الـ driver
+
+**الغرض:** الـ static description اللي الـ driver بيسجّله عند الـ `pinctrl_register_and_init()`.
+
+| الحقل | المعنى |
+|---|---|
+| `name` | اسم الـ controller |
+| `pins` | مصفوفة `pinctrl_pin_desc` بكل الـ pins |
+| `npins` | عدد الـ pins |
+| `pctlops` | vtable عمليات الـ groups |
+| `pmxops` | **vtable الـ pinmux** — القلب بتاع ملفنا |
+| `confops` | vtable الـ pin config |
+| `owner` | الـ module |
+| `link_consumers` | لو `true`: بيعمل device link بين الـ controller والـ consumers |
+
+---
+
+#### 4. `struct pin_desc` — descriptor الـ pin الواحد
+
+**الغرض:** الحالة الداخلية لكل pin فيزيائي — من يملكه وإيه الـ mux setting المفعّلة عليه.
+
+```c
+struct pin_desc {
+    struct pinctrl_dev     *pctldev;     /* الـ controller المالك */
+    const char             *name;        /* اسم الـ pin */
+    bool                    dynamic_name;/* الاسم اتعمل بـ kasprintf */
+    void                   *drv_data;   /* بيانات خاصة بالـ driver */
+
+    /* الحقول دي بس لو CONFIG_PINMUX مفعّل */
+    unsigned int            mux_usecount; /* عدد مرات الطلب بـ mux */
+    const char             *mux_owner;   /* اسم الـ device الطالب */
+    const struct pinctrl_setting_mux *mux_setting; /* الـ setting الفعلي */
+    const char             *gpio_owner;  /* اسم الـ GPIO الطالب */
+    struct mutex            mux_lock;    /* يحمي الحقول السابقة */
+};
+```
+
+**نقطة مهمة:** `mux_usecount` مش boolean — نفس الـ device ممكن يطلب نفس الـ group أكتر من مرة لو فيه entries متعددة في mapping table بتشاور على نفس الـ group.
+
+---
+
+#### 5. `struct pinctrl_setting` — الـ setting المُفعَّل
+
+**الغرض:** تمثيل وحدة الإعداد الواحدة — إما mux أو config — داخل الـ state.
+
+```c
+struct pinctrl_setting {
+    struct list_head          node;      /* رابط في قائمة الـ state */
+    enum pinctrl_map_type     type;      /* MUX_GROUP أو CONFIGS_* */
+    struct pinctrl_dev       *pctldev;  /* الـ controller المسؤول */
+    const char               *dev_name; /* اسم الـ device المالك */
+    union {
+        struct pinctrl_setting_mux     mux;     /* func + group selectors */
+        struct pinctrl_setting_configs configs; /* config values */
+    } data;
+};
 ```
 
 ---
 
-#### `struct function_desc`
-**الغرض:** الـ wrapper اللي بيحط `pinfunction` جوا الـ generic infrastructure — بيتخزن في `pin_function_tree`.
+#### 6. `struct pinctrl_setting_mux` — بيانات الـ mux setting
 
-| Field | النوع | الوصف |
-|-------|-------|-------|
-| `func` | `const struct pinfunction *` | بوينتر للـ function descriptor الحقيقي |
-| `data` | `void *` | بيانات خاصة بالـ driver — الـ core مبيلمسهاش |
+**الغرض:** بيخزّن الـ selectors الرقمية للـ function والـ group اللي اتحوّلت من أسماء نصية عبر `pinmux_map_to_setting()`.
 
----
-
-#### `struct pin_desc`
-**الغرض:** descriptor لكل pin فيزيائي — بيتخزن في `pin_desc_tree` بالـ radix tree.
-
-| Field | النوع | الوصف |
-|-------|-------|-------|
-| `pctldev` | `struct pinctrl_dev *` | الـ controller اللي بيملك الـ pin ده |
-| `name` | `const char *` | اسم الـ pin مثلاً `"PA0"` |
-| `dynamic_name` | `bool` | الاسم اتعمله `kstrdup` ولازم يتحرر |
-| `drv_data` | `void *` | بيانات خاصة بالـ driver |
-| `mux_usecount` | `unsigned int` | كام client بيستخدم الـ pin ده كـ mux — لما يبقى صفر، الـ pin free |
-| `mux_owner` | `const char *` | اسم الـ device اللي عمل `pinctrl_get()` |
-| `mux_setting` | `const struct pinctrl_setting_mux *` | آخر mux setting اتطبق على الـ pin ده |
-| `gpio_owner` | `const char *` | لو `pinctrl_gpio_request()` اتعمل، اسم الـ GPIO owner |
-| `mux_lock` | `struct mutex` | بيحمي الـ fields دي ضد الـ race conditions |
-
----
-
-#### `struct pinctrl_setting_mux`
-**الغرض:** بيانات الـ mux setting — اللي function مع أي group.
-
-| Field | النوع | الوصف |
-|-------|-------|-------|
-| `group` | `unsigned int` | selector رقم الـ group |
-| `func` | `unsigned int` | selector رقم الـ function |
-
----
-
-#### `struct pinctrl_setting`
-**الغرض:** setting واحد (mux أو config) مرتبط بـ state معين.
-
-| Field | النوع | الوصف |
-|-------|-------|-------|
-| `node` | `struct list_head` | عقدة في قائمة الـ `pinctrl_state->settings` |
-| `type` | `enum pinctrl_map_type` | نوع الـ setting |
-| `pctldev` | `struct pinctrl_dev *` | الـ controller المسؤول |
-| `dev_name` | `const char *` | اسم الـ device اللي طلب الـ setting ده |
-| `data.mux` | `struct pinctrl_setting_mux` | لو النوع `MUX_GROUP` |
-| `data.configs` | `struct pinctrl_setting_configs` | لو النوع `CONFIGS_*` |
-
----
-
-#### `struct pinctrl_dev`
-**الغرض:** الـ runtime instance للـ pin controller — بيتسجل لما الـ driver يعمل `pinctrl_register_and_init()`.
-
-| Field | النوع | الوصف |
-|-------|-------|-------|
-| `node` | `struct list_head` | عقدة في القائمة العامة للـ controllers |
-| `desc` | `const struct pinctrl_desc *` | الـ descriptor اللي الـ driver سجّله |
-| `pin_desc_tree` | `struct radix_tree_root` | كل الـ `pin_desc` مفهرسة بالـ pin number |
-| `pin_group_tree` | `struct radix_tree_root` | الـ groups (لو `GENERIC_PINCTRL_GROUPS`) |
-| `num_groups` | `unsigned int` | عدد الـ groups |
-| `pin_function_tree` | `struct radix_tree_root` | الـ functions كـ `function_desc` (لو `GENERIC_PINMUX_FUNCTIONS`) |
-| `num_functions` | `unsigned int` | عدد الـ functions |
-| `gpio_ranges` | `struct list_head` | قائمة الـ `pinctrl_gpio_range` المضافة |
-| `dev` | `struct device *` | الـ device الحقيقي |
-| `owner` | `struct module *` | للـ refcounting |
-| `driver_data` | `void *` | بيانات الـ driver |
-| `p` | `struct pinctrl *` | للـ "hogging" — الـ pins اللي الـ controller نفسه بيحجزها |
-| `hog_default` | `struct pinctrl_state *` | الـ state الافتراضية للـ hogged pins |
-| `hog_sleep` | `struct pinctrl_state *` | الـ sleep state للـ hogged pins |
-| `mutex` | `struct mutex` | بيحمي كل operations على الـ controller ده |
-| `device_root` | `struct dentry *` | root الـ debugfs لو `CONFIG_DEBUG_FS` |
-
----
-
-#### `struct pinctrl_desc`
-**الغرض:** الـ static descriptor اللي الـ driver بيملّيه وبيسجله — بيبقى `const`.
-
-| Field | النوع | الوصف |
-|-------|-------|-------|
-| `name` | `const char *` | اسم الـ controller |
-| `pins` | `const struct pinctrl_pin_desc *` | array بكل الـ pins |
-| `npins` | `unsigned int` | عدد الـ pins |
-| `pctlops` | `const struct pinctrl_ops *` | vtable الـ group management |
-| `pmxops` | `const struct pinmux_ops *` | vtable الـ mux operations |
-| `confops` | `const struct pinconf_ops *` | vtable الـ pin configuration |
-| `owner` | `struct module *` | الـ module المالك |
-| `link_consumers` | `bool` | عمل device link مع الـ consumers للـ suspend/resume ordering |
-
----
-
-#### `struct pinctrl_gpio_range`
-**الغرض:** بيربط range من الـ GPIO numbers بـ pins معينة في الـ controller.
-
-| Field | النوع | الوصف |
-|-------|-------|-------|
-| `node` | `struct list_head` | في قائمة `pinctrl_dev->gpio_ranges` |
-| `name` | `const char *` | اسم الـ GPIO chip |
-| `id` | `unsigned int` | ID الـ chip |
-| `base` | `unsigned int` | أول GPIO number في الـ range |
-| `pin_base` | `unsigned int` | أول pin number مقابل الـ base GPIO |
-| `npins` | `unsigned int` | عدد الـ pins في الـ range |
-| `pins` | `const unsigned int *` | array اختياري بأرقام الـ pins (لو مش متتالية) |
-| `gc` | `struct gpio_chip *` | الـ GPIO chip اللي بيملك الـ range |
-
----
-
-### علاقات الـ Structs — ASCII Diagram
-
-```
-  ┌─────────────────────────────────────────────────────────────┐
-  │                     pinctrl_desc (const)                    │
-  │  name, pins[], npins                                        │
-  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐     │
-  │  │ pinctrl_ops  │  │ pinmux_ops   │  │ pinconf_ops  │     │
-  │  │ (pctlops)    │  │ (pmxops)     │  │ (confops)    │     │
-  │  └──────────────┘  └──────────────┘  └──────────────┘     │
-  └──────────────────────────┬──────────────────────────────────┘
-                             │ desc →
-                             ▼
-  ┌──────────────────────────────────────────────────────────────┐
-  │                     pinctrl_dev (runtime)                    │
-  │  mutex, dev, owner, driver_data                             │
-  │                                                             │
-  │  pin_desc_tree (radix)                                      │
-  │    ├── pin#0 → pin_desc { mux_usecount, mux_owner,         │
-  │    │                      mux_setting*, gpio_owner,         │
-  │    │                      mux_lock }                        │
-  │    ├── pin#1 → pin_desc                                     │
-  │    └── ...                                                  │
-  │                                                             │
-  │  pin_function_tree (radix)  [GENERIC_PINMUX_FUNCTIONS]      │
-  │    ├── 0 → function_desc { func → pinfunction, data }      │
-  │    ├── 1 → function_desc                                    │
-  │    └── ...                                                  │
-  │                                                             │
-  │  pin_group_tree (radix)     [GENERIC_PINCTRL_GROUPS]        │
-  │    ├── 0 → group_desc { grp → pingroup { pins[] }, data }  │
-  │    └── ...                                                  │
-  │                                                             │
-  │  gpio_ranges (list)                                         │
-  │    └── pinctrl_gpio_range { base, pin_base, gc* }          │
-  │                                                             │
-  │  p → pinctrl (for hogging)                                  │
-  │        └── states (list)                                    │
-  │              └── pinctrl_state                              │
-  │                    └── settings (list)                      │
-  │                          └── pinctrl_setting                │
-  │                                └── data.mux → setting_mux  │
-  │                                      { func, group }        │
-  └──────────────────────────────────────────────────────────────┘
-
-  pin_desc->mux_setting ─────────────────────────────────┐
-                                                         ▼
-                                              pinctrl_setting_mux
-                                              { func, group }
+```c
+struct pinctrl_setting_mux {
+    unsigned int group; /* رقم الـ group selector */
+    unsigned int func;  /* رقم الـ function selector */
+};
 ```
 
 ---
 
-### Lifecycle Diagram — الـ Function Registration
+#### 7. `struct pinctrl_map` — جدول الـ mapping الخام
 
-```
-Driver Probe
-    │
-    ▼
-pinctrl_register_and_init(desc, dev, drv_data, &pctldev)
-    │  يخلق pinctrl_dev، يملي pin_desc_tree
-    │
-    ▼
-pinmux_check_ops(pctldev)
-    │  يتحقق: get_functions_count, get_function_name,
-    │          get_function_groups, set_mux كلهم موجودين
-    │  لو ناقص حاجة → -EINVAL
-    │
-    ▼
-[GENERIC_PINMUX_FUNCTIONS]
-pinmux_generic_add_pinfunction(pctldev, func, data)
-    │  يخلق function_desc بـ devm_kzalloc
-    │  يعمل radix_tree_insert في pin_function_tree
-    │  يزود num_functions++
-    │
-    ▼
-pinctrl_enable(pctldev)
-    │  يضيف الـ controller للقائمة العامة
-    │  يعمل hog للـ pins اللي عليها default-state
-    │
-    ▼
-[Controller Ready — ينتظر طلبات الـ consumers]
+**الغرض:** الـ static table اللي البورد أو الـ DT بيوفره — بيربط device باسم state بـ function وgroup.
 
-
-Driver Remove
-    │
-    ▼
-pinmux_generic_free_functions(pctldev)   [أو pinmux_generic_remove_function]
-    │  يمسح كل الـ entries من pin_function_tree
-    │  devm_kfree تتولى تحرير الذاكرة
-    │
-    ▼
-pinctrl_unregister(pctldev)
-    │  يشيل الـ controller من القائمة العامة
-    │
-    ▼
-[Done]
+```c
+struct pinctrl_map {
+    const char *dev_name;      /* اسم الـ device المستخدم */
+    const char *name;          /* اسم الـ state ("default", "sleep") */
+    enum pinctrl_map_type type;
+    const char *ctrl_dev_name; /* اسم الـ pin controller */
+    union {
+        struct pinctrl_map_mux     mux;     /* group + function (نصي) */
+        struct pinctrl_map_configs configs;
+    } data;
+};
 ```
 
 ---
 
-### Lifecycle Diagram — الـ Mux Setting (Consumer Device)
+#### 8. `struct function_desc` — الـ generic function descriptor
 
-```
-Consumer device (مثلاً UART driver) يطلب pin state
-    │
-    ▼
-pinctrl_get(dev)   →  يخلق struct pinctrl
-    │
-    ▼
-pinctrl_lookup_state(p, "default")  →  pinctrl_state
-    │
-    ▼
-pinctrl_select_state(p, state)
-    │
-    │  for each setting in state->settings:
-    ▼
-pinmux_enable_setting(setting)
-    │
-    ├─ pctlops->get_group_pins(group) ──→ pins[]
-    │
-    ├─ for each pin:
-    │    pin_request(pctldev, pin, dev_name, NULL)
-    │       ├─ pin_desc_get() ──→ desc
-    │       ├─ lock(desc->mux_lock)
-    │       ├─ تحقق من mux_usecount / mux_owner / gpio_owner
-    │       ├─ desc->mux_usecount++
-    │       ├─ desc->mux_owner = dev_name
-    │       ├─ unlock(desc->mux_lock)
-    │       ├─ try_module_get(pctldev->owner)
-    │       └─ ops->request(pctldev, pin)   [اختياري]
-    │
-    ├─ for each pin:
-    │    lock(desc->mux_lock)
-    │    desc->mux_setting = &setting->data.mux
-    │    unlock(desc->mux_lock)
-    │
-    └─ ops->set_mux(pctldev, func, group)  ──→ يكتب على الـ HW register
-           │
-           ▼
-       [Pins now muxed to the requested function]
+**الغرض:** wrapper بيستخدمه `CONFIG_GENERIC_PINMUX_FUNCTIONS` لتخزين الـ functions في الـ radix tree.
 
-
-Consumer device يتحرر
-    │
-    ▼
-pinmux_disable_setting(setting)
-    │
-    ├─ pctlops->get_group_pins(group) ──→ pins[]
-    │
-    └─ for each pin:
-         lock(desc->mux_lock)
-         is_equal = (desc->mux_setting == &setting->data.mux)
-         unlock(desc->mux_lock)
-         if is_equal:
-           pin_free(pctldev, pin, NULL)
-             ├─ desc->mux_usecount--
-             ├─ لو وصل لصفر: desc->mux_owner = NULL, mux_setting = NULL
-             ├─ ops->free(pctldev, pin)   [اختياري]
-             └─ module_put(pctldev->owner)
+```c
+struct function_desc {
+    const struct pinfunction *func; /* الـ function الفعلية (name + groups) */
+    void *data;                     /* بيانات خاصة بالـ driver */
+};
 ```
 
 ---
 
-### Lifecycle Diagram — GPIO Pin Request
+#### 9. `struct pinfunction` — وصف الـ function
+
+```c
+struct pinfunction {
+    const char *name;              /* اسم الـ function مثلاً "uart0" */
+    const char * const *groups;   /* الـ groups اللي تقدر تشتغل عليها */
+    size_t ngroups;
+    unsigned long flags;           /* PINFUNCTION_FLAG_GPIO أو 0 */
+};
+```
+
+---
+
+#### 10. `struct pinctrl_gpio_range` — نطاق الـ GPIO
+
+**الغرض:** بيحدد نطاق من أرقام الـ GPIO المقابلة لأرقام الـ pins في الـ controller.
+
+| الحقل | المعنى |
+|---|---|
+| `name` | اسم الـ GPIO chip |
+| `base` | أول رقم GPIO في النطاق |
+| `pin_base` | أول رقم pin مقابل |
+| `npins` | عدد الـ pins في النطاق |
+| `pins` | مصفوفة صريحة لأرقام الـ pins (أو NULL) |
+| `gc` | مؤشر اختياري للـ `gpio_chip` |
+
+---
+
+### مخطط علاقات الـ Structs (ASCII)
 
 ```
-GPIO consumer يطلب gpio#42
+   ┌─────────────────────────────────────────────────────────┐
+   │                    Board / DT                           │
+   │  pinctrl_map[]                                          │
+   │  { dev_name, state_name, type, ctrl_dev_name,          │
+   │    data.mux = { group="grp0", function="uart0" } }      │
+   └────────────────────┬────────────────────────────────────┘
+                        │ pinctrl_register_mappings()
+                        ▼
+   ┌──────────────────────────────┐
+   │      pinctrl_maps (list)     │◄── global list
+   │  pinctrl_map[] + num_maps    │
+   └──────────────────────────────┘
+                        │ pinmux_map_to_setting()
+                        ▼
+   ┌──────────────────────────────────────────────────────────┐
+   │                  pinctrl_dev                             │
+   │  ┌────────────────────────────────────────────────────┐  │
+   │  │ desc ──► pinctrl_desc                             │  │
+   │  │          ├── pmxops ──► pinmux_ops (vtable)       │  │
+   │  │          ├── pctlops ──► pinctrl_ops               │  │
+   │  │          └── pins[]  ──► pinctrl_pin_desc[]        │  │
+   │  ├── pin_desc_tree (radix) ──► pin_desc × N           │  │
+   │  ├── pin_function_tree (radix) ──► function_desc × M  │  │
+   │  ├── pin_group_tree (radix) ──► group_desc × K        │  │
+   │  ├── gpio_ranges (list) ──► pinctrl_gpio_range × R    │  │
+   │  ├── p ──► pinctrl (self-hog handle)                  │  │
+   │  └── mutex                                             │  │
+   │  └────────────────────────────────────────────────────┘  │
+   └──────────────────────────────────────────────────────────┘
+          │                              │
+          │ pin_desc_get()               │ radix_tree_lookup()
+          ▼                              ▼
+   ┌──────────────┐           ┌─────────────────────┐
+   │   pin_desc   │           │   function_desc      │
+   │  ├─ name     │           │  ├─ func ──► pinfunction
+   │  ├─ mux_usecount         │  └─ data (driver)    │
+   │  ├─ mux_owner            └─────────────────────┘
+   │  ├─ mux_setting ──► pinctrl_setting_mux
+   │  ├─ gpio_owner            ┌─────────────────────┐
+   │  └─ mux_lock              │  pinfunction         │
+   └──────────────┘            │  ├─ name "uart0"    │
+                               │  ├─ groups[]        │
+                               │  ├─ ngroups         │
+                               │  └─ flags (GPIO?)   │
+                               └─────────────────────┘
+
+   ┌──────────────────────────────────────────────────────────┐
+   │                    pinctrl (per consumer device)         │
+   │  ├─ dev ──► struct device                               │
+   │  ├─ states (list) ──┐                                   │
+   │  ├─ state ──────────┤► pinctrl_state                    │
+   │  └─ users (kref)    │   ├─ name "default"               │
+   │                     │   └─ settings (list)              │
+   │                     │        ▼                          │
+   │                     │   pinctrl_setting                 │
+   │                     │   ├─ type = MUX_GROUP             │
+   │                     │   ├─ pctldev ──► pinctrl_dev      │
+   │                     │   ├─ dev_name                     │
+   │                     │   └─ data.mux                     │
+   │                     │       ├─ func = 3 (selector)      │
+   │                     │       └─ group = 1 (selector)     │
+   └──────────────────────────────────────────────────────────┘
+```
+
+---
+
+### دورة حياة الـ Pin Controller (Lifecycle)
+
+```
+  [Driver Probe]
+       │
+       ▼
+  pinctrl_register_and_init(desc, dev, data, &pctldev)
+       │
+       ├─► alloc pinctrl_dev
+       ├─► copy desc pointer
+       ├─► init radix trees (pin_desc, function, group)
+       ├─► pinmux_check_ops()          ← يتحقق من الـ vtable
+       ├─► register all pins ──► pin_desc per pin in radix tree
+       │
+       ▼
+  pinctrl_enable(pctldev)
+       │
+       ├─► hog pins (self-mapping entries)
+       └─► add to global pinctrl_dev list
+
+  [Runtime: Consumer Driver]
+       │
+       ▼
+  devm_pinctrl_get(dev)  ──► struct pinctrl *p
+       │
+       ▼
+  pinctrl_lookup_state(p, "default")  ──► struct pinctrl_state *s
+       │
+       ▼
+  pinctrl_select_state(p, s)
+       │
+       ├─ for each pinctrl_setting in state->settings:
+       │     pinmux_enable_setting(setting)
+       │         ├─ get_group_pins() ──► pins[]
+       │         ├─ pin_request() × num_pins
+       │         │     ├─ mux_usecount++
+       │         │     ├─ try_module_get()
+       │         │     └─ ops->request() or gpio_request_enable()
+       │         ├─ desc->mux_setting = &setting->data.mux
+       │         └─ ops->set_mux(func, group) ──► HARDWARE REGISTER
+
+  [Suspend / Driver Remove]
+       │
+       ▼
+  pinctrl_select_state(p, sleep_state)  أو  pinctrl_put(p)
+       │
+       ▼
+  pinmux_disable_setting(setting)
+       │
+       ├─ for each pin: check mux_setting matches
+       └─ pin_free()
+             ├─ mux_usecount--
+             ├─ ops->free() or gpio_disable_free()
+             └─ module_put()
+
+  [Controller Remove]
+       │
+       ▼
+  pinctrl_unregister(pctldev)
+       │
+       ├─ pinmux_generic_free_functions()
+       ├─ free all pin_descs from radix tree
+       └─ remove from global list
+```
+
+---
+
+### مخطط تدفق الـ GPIO Request
+
+```
+gpio_request(gpio_num)                    [GPIO subsystem]
     │
     ▼
-gpiochip API  →  pinctrl_gpio_request(gpio=42)
+pinctrl_gpio_request(pin)                 [pinctrl core]
     │
     ▼
 pinmux_request_gpio(pctldev, range, pin, gpio)
     │
-    ├─ kasprintf("%s:%d", range->name, gpio)  →  owner = "gpiochip0:42"
-    │
-    └─ pin_request(pctldev, pin, owner, range)
-           ├─ pin_desc_get()
-           ├─ lock(desc->mux_lock)
-           ├─ لو strict وفيه mux_owner أو لو الـ pin مشغول → error
-           ├─ desc->gpio_owner = owner
-           ├─ unlock(desc->mux_lock)
-           ├─ try_module_get(pctldev->owner)
-           └─ ops->gpio_request_enable(pctldev, range, pin)
-
-
-GPIO consumer بيحرر gpio#42
+    ├─ kasprintf("%s:%d", range->name, gpio)  ← owner string
     │
     ▼
-pinctrl_gpio_free(gpio=42)
+pin_request(pctldev, pin, owner, range)
+    │
+    ├─ pin_desc_get() ──► desc
+    ├─ [lock desc->mux_lock]
+    │   ├─ check mux_usecount (strict? GPIO conflicts mux?)
+    │   ├─ check gpio_owner (already GPIO-owned?)
+    │   └─ desc->gpio_owner = owner
+    ├─ [unlock]
+    ├─ try_module_get(pctldev->owner)
+    └─ ops->gpio_request_enable(pctldev, range, pin)
+           │
+           ▼
+       HARDWARE: switch pin to GPIO mode
+
+gpio_direction_input(gpio_num)
+    │
+    ▼
+pinmux_gpio_direction(pctldev, range, pin, input=true)
+    │
+    └─ ops->gpio_set_direction(pctldev, range, pin, true)
+           │
+           ▼
+       HARDWARE: set direction register
+
+gpio_free(gpio_num)
     │
     ▼
 pinmux_free_gpio(pctldev, pin, range)
     │
-    └─ pin_free(pctldev, pin, range)
-           ├─ lock(desc->mux_lock)
-           ├─ owner = desc->gpio_owner
-           ├─ desc->gpio_owner = NULL
-           ├─ unlock(desc->mux_lock)
-           ├─ ops->gpio_disable_free(pctldev, range, pin)
-           ├─ module_put(pctldev->owner)
-           └─ returns owner string
+    ▼
+pin_free(pctldev, pin, range)
     │
-    └─ kfree(owner)   [الـ string اتعملت kasprintf]
+    ├─ [lock mux_lock]
+    │   ├─ owner = desc->gpio_owner
+    │   └─ desc->gpio_owner = NULL
+    ├─ [unlock]
+    ├─ ops->gpio_disable_free(pctldev, range, pin)
+    ├─ module_put()
+    └─ kfree(owner)
 ```
 
 ---
 
-### Call Flow Diagrams
-
-#### تفعيل الـ Mux
+### مخطط تدفق الـ Mux Setting (pinmux_enable_setting)
 
 ```
-pinmux_enable_setting(setting)
-  │
-  ├─→ pctldev->desc->pctlops->get_group_pins(pctldev, group, &pins, &num_pins)
-  │       └─ [HW driver returns pin numbers for this group]
-  │
-  ├─→ pin_request(pctldev, pins[i], dev_name, NULL)   [for each pin]
-  │       ├─→ pin_desc_get(pctldev, pin)
-  │       │       └─ radix_tree_lookup(&pctldev->pin_desc_tree, pin)
-  │       │
-  │       ├─→ [check ownership under mux_lock]
-  │       │       if mux_usecount && mux_owner != requester → EBUSY
-  │       │
-  │       ├─→ try_module_get(pctldev->owner)
-  │       │
-  │       └─→ pctldev->desc->pmxops->request(pctldev, pin)   [optional]
-  │               └─ [driver validates pin availability]
-  │
-  ├─→ [store mux_setting in each pin_desc under mux_lock]
-  │
-  └─→ pctldev->desc->pmxops->set_mux(pctldev, func, group)
-          └─ [driver writes hardware MUX register]
-                  └─ [Pin now routes to requested peripheral]
+pinctrl_select_state(p, state)
+    │
+    └─► for each setting WHERE type == PIN_MAP_TYPE_MUX_GROUP:
+            │
+            ▼
+        pinmux_enable_setting(setting)
+            │
+            ├─ pctlops->get_group_pins(group_selector)
+            │       ──► pins[], num_pins
+            │
+            ├─ [Loop i = 0..num_pins-1]
+            │   pin_request(pctldev, pins[i], dev_name, NULL)
+            │       ├─ desc = pin_desc_get(pins[i])
+            │       ├─ [lock mux_lock]
+            │       │   ├─ check conflicts
+            │       │   ├─ mux_usecount++
+            │       │   └─ mux_owner = dev_name
+            │       ├─ [unlock]
+            │       ├─ try_module_get()
+            │       └─ ops->request(pctldev, pin)   [optional]
+            │
+            ├─ [Loop i = 0..num_pins-1]
+            │   [lock mux_lock]
+            │   desc->mux_setting = &setting->data.mux
+            │   [unlock]
+            │
+            └─ ops->set_mux(pctldev, func_selector, group_selector)
+                    │
+                    ▼
+                HARDWARE REGISTERS
+                (بيكتب قيمة في register الـ mux على الـ SoC)
+
+    [On error at set_mux:]
+        for each pin already requested:
+            [lock mux_lock]  desc->mux_setting = NULL  [unlock]
+        while --i >= 0:
+            pin_free(pctldev, pins[i], NULL)
 ```
 
-#### الـ Generic Function Lookup
+---
+
+### مخطط تدفق `pinmux_map_to_setting` — التحويل من نص لـ selectors
 
 ```
-pinmux_func_name_to_selector(pctldev, "uart0")
-  │
-  ├─→ pmxops->get_functions_count(pctldev)
-  │       [GENERIC: return pctldev->num_functions]
-  │
-  └─→ loop: pmxops->get_function_name(pctldev, selector)
-              [GENERIC: radix_tree_lookup(&pin_function_tree, selector)]
-                          └─ function_desc->func->name
-              if match → return selector
+pinmux_map_to_setting(map, setting)
+    │
+    ├─ map->data.mux.function = "uart0"   (نص)
+    │
+    ├─ pinmux_func_name_to_selector(pctldev, "uart0")
+    │       └─ loop: ops->get_function_name(pctldev, selector)
+    │               حتى يلاقي "uart0" ──► returns selector N
+    │
+    ├─ setting->data.mux.func = N
+    │
+    ├─ pmxops->get_function_groups(pctldev, N, &groups, &num_groups)
+    │       ──► groups = ["grp0", "grp1"], num_groups = 2
+    │
+    ├─ لو map->data.mux.group محدد:
+    │       match_string(groups, num_groups, group) ──► index
+    │   لو مش محدد:
+    │       group = groups[0]  (الأول افتراضيًا)
+    │
+    ├─ pinctrl_get_group_selector(pctldev, group)
+    │       ──► returns group_selector M
+    │
+    └─ setting->data.mux.group = M
 ```
 
-#### إضافة Function جديدة (GENERIC path)
+---
+
+### مخطط تدفق `pinmux_generic_add_pinfunction` — تسجيل function
 
 ```
-pinmux_generic_add_pinfunction(pctldev, func, data)
-  │
-  ├─→ pinmux_func_name_to_selector()   [تحقق مكرر؟ → return existing]
-  │
-  ├─→ selector = pctldev->num_functions
-  │
-  ├─→ devm_kzalloc(pctldev->dev, sizeof(function_desc))
-  │
-  ├─→ devm_kmemdup_const(pctldev->dev, func, sizeof(*func))
-  │       └─ copies pinfunction struct safely
-  │
-  ├─→ function->data = data
-  │
-  └─→ radix_tree_insert(&pctldev->pin_function_tree, selector, function)
-          pctldev->num_functions++
-          return selector
+driver calls pinmux_generic_add_function(pctldev, "uart0", groups, ngroups, data)
+    │
+    ├─ PINCTRL_PINFUNCTION("uart0", groups, ngroups) ──► struct pinfunction
+    │
+    └─ pinmux_generic_add_pinfunction(pctldev, &func, data)
+            │
+            ├─ pinmux_func_name_to_selector() ──► لو موجود return selector مباشرة
+            │
+            ├─ selector = pctldev->num_functions  (index جديد)
+            │
+            ├─ devm_kzalloc() ──► function_desc
+            │
+            ├─ devm_kmemdup_const() ──► copy of pinfunction
+            │
+            ├─ function->data = data
+            │
+            ├─ radix_tree_insert(&pctldev->pin_function_tree, selector, function)
+            │
+            ├─ pctldev->num_functions++
+            │
+            └─ return selector
 ```
 
 ---
 
 ### استراتيجية الـ Locking
 
-#### الـ Locks الموجودة وما بتحميه
+الـ pinmux بيستخدم **مستويين من الـ locks**:
 
-| الـ Lock | النوع | الموجود في | بيحمي إيه |
-|---------|-------|-----------|-----------|
-| `pinctrl_dev->mutex` | `struct mutex` | `pinctrl_dev` | كل العمليات على الـ controller: قراءة/كتابة الـ functions/groups، debugfs، الـ gpio_ranges list |
-| `pin_desc->mux_lock` | `struct mutex` | كل `pin_desc` | الـ fields الخاصة بالـ ownership: `mux_usecount`, `mux_owner`, `mux_setting`, `gpio_owner` |
-| `pinctrl_maps_mutex` | `struct mutex` | global | قائمة `pinctrl_maps` العامة |
+#### المستوى الأول: `pctldev->mutex`
 
-#### ترتيب الـ Locks (Lock Ordering)
-
-```
-pinctrl_dev->mutex     (خارجي — يتاخد أول)
-    └── pin_desc->mux_lock   (داخلي — يتاخد جوا الـ pinctrl_dev->mutex)
-```
-
-**مهم:** كود الـ debugfs بياخد `pctldev->mutex` قبل ما يلوب على الـ pins ويعمل `scoped_guard(mutex, &desc->mux_lock)` — ده بيضمن الترتيب الصح ومفيش deadlock.
-
-#### استخدام `scoped_guard` و `guard`
-
-الكود بيستخدم الـ `guard(mutex)` و `scoped_guard(mutex, ...)` من `<linux/cleanup.h>` — ده automatic mutex unlock عند الخروج من الـ scope (حتى لو رجع بـ error). مثال:
+| يحمي | من أي context |
+|---|---|
+| عمليات الـ controller ككل | process context فقط |
+| قراءة/كتابة الـ debugfs (`pinmux_functions_show`, `pinmux_pins_show`) | يُمسك طول العملية |
+| الـ `pinmux_select_write` (debugfs write) | لا يُمسك صراحة — بيستخدم functions داخلية |
 
 ```c
-/* يعمل lock وبعدين unlock تلقائي عند نهاية الـ scope */
+// مثال: debugfs
+mutex_lock(&pctldev->mutex);
+nfuncs = pmxops->get_functions_count(pctldev);
+// ... loop ...
+mutex_unlock(&pctldev->mutex);
+```
+
+#### المستوى الثاني: `pin_desc->mux_lock`
+
+| يحمي | من أي context |
+|---|---|
+| `mux_usecount` | process context |
+| `mux_owner` | process context |
+| `mux_setting` | process context |
+| `gpio_owner` | process context |
+
+الـ kernel بيستخدم `scoped_guard(mutex, &desc->mux_lock)` أو `guard(mutex)` من cleanup.h للـ automatic unlock.
+
+```c
 scoped_guard(mutex, &desc->mux_lock) {
     desc->mux_usecount++;
     desc->mux_owner = owner;
 }
-/* هنا الـ lock اتحرر تلقائي */
+// automatically unlocked here
 ```
 
-#### تفاصيل الـ `mux_usecount`
+#### ترتيب الـ Locking (Lock Ordering)
 
-- الـ `mux_usecount` مش boolean — ممكن يكون أكبر من 1 لو multiple clients طلبوا نفس الـ group.
-- أول طلب بيزود الـ count ويعمل `ops->request()`.
-- الطلبات التانية بتزود الـ count وبترجع مباشرة بدون ما تعمل `request()` تاني.
-- التحرير بينقص الـ count — بس لما يوصل صفر، بيتم `ops->free()` وتصفية الـ ownership.
+```
+pctldev->mutex          (الأعلى — outer lock)
+    └─► pin_desc->mux_lock   (الأدنى — inner lock)
+```
+
+**مهم جدًا:** أي كود يمسك الاتنين لازم يمسك `pctldev->mutex` الأول عشان يتجنب الـ deadlock.
+
+#### الـ Radix Tree والـ Locking
+
+الـ `pin_function_tree` و`pin_desc_tree` بيتحموا بـ `pctldev->mutex` — الـ generic functions زي `pinmux_generic_remove_function()` بتشير صراحةً إن الـ caller هو المسؤول عن أخد الـ lock:
 
 ```c
-/* pin_request: من أول طلب بعد ده */
-desc->mux_usecount++;
-if (desc->mux_usecount > 1)
-    return 0;  /* already owned, just increment */
-
-desc->mux_owner = owner;
-/* then call ops->request() */
+/*
+ * Note that the caller must take care of locking.
+ */
+int pinmux_generic_remove_function(struct pinctrl_dev *pctldev, ...)
 ```
+
+#### جدول ملخص الـ Locks
+
+| الـ Lock | يحمي | من يمسكه |
+|---|---|---|
+| `pctldev->mutex` | الـ function/group trees، الـ gpio_ranges list، الـ debugfs reads | الـ core وبعض الـ callers |
+| `pin_desc->mux_lock` | `mux_usecount`, `mux_owner`, `mux_setting`, `gpio_owner` | `pin_request()`, `pin_free()`, `pinmux_enable_setting()`, `pinmux_can_be_used_for_gpio()` |
+| `pinctrl_maps_mutex` | قائمة الـ `pinctrl_maps` العالمية | `pinctrl_register_mappings()` والـ core |
 ## Phase 4: شرح الـ Functions
 
 ---
 
-### ملخص الـ Functions — Cheatsheet
+### ملخص — Cheatsheet للـ Functions
 
-#### Group 1: Validation & Initialization
+#### مجموعة: Validation & Initialization
 
-| Function | Signature (موجز) | الغرض |
+| Function | Location | الغرض |
 |---|---|---|
-| `pinmux_check_ops` | `int (pctldev)` | يتحقق إن الـ driver نفّذ الـ ops الإلزامية |
-| `pinmux_validate_map` | `int (map, i)` | يتحقق إن الـ map entry فيها function name |
+| `pinmux_check_ops()` | pinmux.c | التحقق من اكتمال الـ `pinmux_ops` callbacks |
+| `pinmux_validate_map()` | pinmux.c | التحقق من صحة مدخل `pinctrl_map` للـ mux |
 
-#### Group 2: GPIO Mux Interface
+#### مجموعة: GPIO ↔ Pinmux Bridge
 
-| Function | Signature (موجز) | الغرض |
+| Function | Location | الغرض |
 |---|---|---|
-| `pinmux_can_be_used_for_gpio` | `bool (pctldev, pin)` | يسأل: هل الـ pin ممكن يتحول لـ GPIO؟ |
-| `pinmux_request_gpio` | `int (pctldev, range, pin, gpio)` | يحجز pin لـ GPIO |
-| `pinmux_free_gpio` | `void (pctldev, pin, range)` | يحرر pin من الـ GPIO mode |
-| `pinmux_gpio_direction` | `int (pctldev, range, pin, input)` | يضبط اتجاه الـ GPIO (input/output) |
+| `pinmux_can_be_used_for_gpio()` | pinmux.c | فحص هل الـ pin متاح للـ GPIO |
+| `pinmux_request_gpio()` | pinmux.c | حجز pin لاستخدامه كـ GPIO |
+| `pinmux_free_gpio()` | pinmux.c | تحرير pin من الـ GPIO |
+| `pinmux_gpio_direction()` | pinmux.c | ضبط اتجاه الـ GPIO (input/output) |
 
-#### Group 3: Setting Lifecycle (Core Internal)
+#### مجموعة: Setting Lifecycle
 
-| Function | Signature (موجز) | الغرض |
+| Function | Location | الغرض |
 |---|---|---|
-| `pinmux_map_to_setting` | `int (map, setting)` | يحوّل الـ map entry لـ setting قابل للتنفيذ |
-| `pinmux_free_setting` | `void (setting)` | placeholder — لا تعمل حالياً |
-| `pinmux_enable_setting` | `int (setting)` | يطبّق الـ mux setting على الـ hardware |
-| `pinmux_disable_setting` | `void (setting)` | يلغي الـ mux setting ويحرر الـ pins |
+| `pinmux_map_to_setting()` | pinmux.c | تحويل `pinctrl_map` لـ `pinctrl_setting` |
+| `pinmux_free_setting()` | pinmux.c | تحرير الـ setting (stub حالياً) |
+| `pinmux_enable_setting()` | pinmux.c | تفعيل mux setting على الـ hardware |
+| `pinmux_disable_setting()` | pinmux.c | تعطيل mux setting وتحرير الـ pins |
 
-#### Group 4: Low-level Pin Ownership (Static — Internal)
+#### مجموعة: Internal Helpers
 
-| Function | Signature (موجز) | الغرض |
+| Function | Location | الغرض |
 |---|---|---|
-| `pin_request` | `int (pctldev, pin, owner, gpio_range)` | يحجز pin واحد ويسجل owner |
-| `pin_free` | `const char *(pctldev, pin, gpio_range)` | يحرر pin واحد ويرجع اسم الـ owner |
-| `pinmux_func_name_to_selector` | `int (pctldev, function)` | يبحث عن selector بناءً على اسم الـ function |
+| `pin_request()` | pinmux.c (static) | حجز pin منفرد — العملية الأساسية |
+| `pin_free()` | pinmux.c (static) | تحرير pin منفرد |
+| `pinmux_func_name_to_selector()` | pinmux.c (static) | بحث عن selector بالاسم |
 
-#### Group 5: Generic Functions API (CONFIG_GENERIC_PINMUX_FUNCTIONS)
+#### مجموعة: Generic Functions (CONFIG_GENERIC_PINMUX_FUNCTIONS)
 
 | Function | Export | الغرض |
 |---|---|---|
-| `pinmux_generic_get_function_count` | GPL | عدد الـ functions المسجلة |
-| `pinmux_generic_get_function_name` | GPL | اسم function من الـ selector |
-| `pinmux_generic_get_function_groups` | GPL | الـ groups المرتبطة بـ function |
-| `pinmux_generic_get_function` | GPL | يرجع `function_desc` كاملة |
-| `pinmux_generic_function_is_gpio` | GPL | هل الـ function هي GPIO؟ |
-| `pinmux_generic_add_function` | GPL | يضيف function بالاسم والـ groups |
-| `pinmux_generic_add_pinfunction` | GPL | يضيف function من `pinfunction` struct |
-| `pinmux_generic_remove_function` | GPL | يحذف function بالـ selector |
-| `pinmux_generic_free_functions` | internal | يحذف كل الـ functions |
+| `pinmux_generic_get_function_count()` | `EXPORT_SYMBOL_GPL` | عدد الـ functions المسجلة |
+| `pinmux_generic_get_function_name()` | `EXPORT_SYMBOL_GPL` | اسم function بالـ selector |
+| `pinmux_generic_get_function_groups()` | `EXPORT_SYMBOL_GPL` | مجموعات الـ function |
+| `pinmux_generic_get_function()` | `EXPORT_SYMBOL_GPL` | الـ `function_desc` بالكامل |
+| `pinmux_generic_function_is_gpio()` | `EXPORT_SYMBOL_GPL` | هل الـ function هي GPIO؟ |
+| `pinmux_generic_add_function()` | `EXPORT_SYMBOL_GPL` | إضافة function بالاسم والـ groups |
+| `pinmux_generic_add_pinfunction()` | `EXPORT_SYMBOL_GPL` | إضافة function بـ `pinfunction` struct |
+| `pinmux_generic_remove_function()` | `EXPORT_SYMBOL_GPL` | حذف function بالـ selector |
+| `pinmux_generic_free_functions()` | internal | حذف جميع الـ functions |
 
-#### Group 6: DebugFS
+#### مجموعة: DebugFS
 
 | Function | الغرض |
 |---|---|
-| `pinmux_init_device_debugfs` | ينشئ ملفات debugfs للـ device |
-| `pinmux_functions_show` | يعرض قائمة الـ functions في debugfs |
-| `pinmux_pins_show` | يعرض حالة كل pin في debugfs |
-| `pinmux_show_map` | يطبع معلومات الـ map entry |
-| `pinmux_show_setting` | يطبع معلومات الـ setting المفعّل |
-| `pinmux_select_write` | يسمح بضبط الـ mux يدوياً من debugfs |
+| `pinmux_init_device_debugfs()` | إنشاء ملفات debugfs للـ device |
+| `pinmux_show_map()` | طباعة `pinctrl_map` في debugfs |
+| `pinmux_show_setting()` | طباعة `pinctrl_setting` في debugfs |
+| `pinmux_functions_show()` | `/sys/kernel/debug/.../pinmux-functions` |
+| `pinmux_pins_show()` | `/sys/kernel/debug/.../pinmux-pins` |
+| `pinmux_select_write()` | كتابة في `pinmux-select` لتفعيل mux يدوياً |
 
 ---
 
-### Group 1: Validation & Initialization
+### مجموعة 1: Validation & Initialization
 
-الـ core يستدعي الاتنين دول أثناء تسجيل الـ pin controller، قبل ما أي driver يشتغل. هدفهم التحقق من صحة الـ driver descriptor والـ map table اللي جوّاه.
+الـ core يستدعي هذه الـ functions أثناء تسجيل الـ pin controller للتأكد من صحة البيانات قبل أي عملية.
 
 ---
 
-#### `pinmux_check_ops`
+#### `pinmux_check_ops()`
 
 ```c
 int pinmux_check_ops(struct pinctrl_dev *pctldev);
 ```
 
-بيتحقق إن الـ `pinmux_ops` اللي سجّلها الـ driver فيها الـ callbacks الإلزامية: `get_functions_count`، `get_function_name`، `get_function_groups`، و`set_mux`. لو أي واحدة ناقصة يرجع `-EINVAL`. كمان بيعدّي على كل الـ functions ويتأكد إن كل واحدة ليها اسم غير NULL.
+الـ core يستدعيها في `pinctrl_register()` للتحقق من أن الـ driver يوفر الـ callbacks الإلزامية في `pinmux_ops`. تتحقق من وجود `get_functions_count`، `get_function_name`، `get_function_groups`، و`set_mux`. بعدها تمشي على كل الـ functions وتتأكد من أن كل واحدة عندها اسم غير NULL.
 
 **Parameters:**
-- `pctldev` — الـ pin controller device المسجّل
+- `pctldev` — الـ pin controller المسجَّل، يحتوي على `desc->pmxops`
 
-**Return:** `0` لو تمام، `-EINVAL` لو أي op ناقصة أو function بدون اسم.
+**Return:**
+- `0` عند النجاح
+- `-EINVAL` إذا أي callback إلزامي ناقص أو أي function بدون اسم
 
 **Key Details:**
-- بيُستدعى من `pinctrl_register()` / `devm_pinctrl_register()` مرة واحدة.
-- لا يحتاج lock لأن الـ device لسه في طور التسجيل.
-- الـ `ops->get_function_name()` بتتعمل loop على كل الـ functions — عملية O(n).
+- يُشغَّل مرة واحدة فقط وقت التسجيل — لا يوجد locking ولا race condition هنا
+- إذا رجع error فالـ `pinctrl_register()` بتفشل ومايتسجلش الـ controller
 
-**Who calls it:** `pinctrl_register_and_init()` → `pinctrl_register()`.
+**Caller:** `pinctrl_register()` / `devm_pinctrl_register()` في `core.c`
 
 ---
 
-#### `pinmux_validate_map`
+#### `pinmux_validate_map()`
 
 ```c
 int pinmux_validate_map(const struct pinctrl_map *map, int i);
 ```
 
-يتحقق إن الـ `pinctrl_map` entry من نوع MUX فيها `function` name غير NULL. بسيطة جداً — guard بدائي يمنع الـ null dereference لاحقاً.
+تتحقق من أن الـ `pinctrl_map` من النوع `PIN_MAP_TYPE_MUX_GROUP` عنده `function` غير NULL. الـ `group` ممكن يكون NULL (الـ core هيختار الأول تلقائياً).
 
 **Parameters:**
-- `map` — الـ map entry المراد التحقق منها
-- `i` — رقمها في الـ table (للـ error message بس)
+- `map` — مدخل الـ machine map
+- `i` — رقم المدخل في الـ array (للـ error message فقط)
 
-**Return:** `0` أو `-EINVAL`.
+**Return:**
+- `0` عند النجاح
+- `-EINVAL` إذا `map->data.mux.function == NULL`
 
-**Who calls it:** `pinctrl_register_mappings()` تعمل loop على كل الـ entries وتستدعيها.
-
----
-
-### Group 2: GPIO Mux Interface
-
-الـ GPIO subsystem لما بيطلب pin معين، بيمر بالـ pinmux layer عشان يتأكد إن الـ pin مش محجوز لحاجة تانية، وعشان يضبط الـ multiplexer في الـ hardware للـ GPIO mode. الـ functions دي هي الواجهة بين `gpiolib` والـ pinmux core.
+**Caller:** `pinctrl_register_map()` في `core.c`
 
 ---
 
-#### `pinmux_can_be_used_for_gpio`
+### مجموعة 2: Internal Helpers — pin_request / pin_free
 
-```c
-bool pinmux_can_be_used_for_gpio(struct pinctrl_dev *pctldev, unsigned int pin);
-```
-
-بيسأل: هل الـ pin ده ممكن يتحول لـ GPIO دلوقتي؟ لو الـ controller مش `strict`، دايماً يرجع `true`. لو `strict`، بيبص على `mux_usecount` و`gpio_owner` — لو الـ pin محجوز لـ function مش GPIO يرجع `false`.
-
-**Parameters:**
-- `pctldev` — الـ pin controller
-- `pin` — رقم الـ pin في الـ global namespace
-
-**Return:** `true` لو الـ pin متاح لـ GPIO، `false` لو محجوز لـ function تانية.
-
-**Key Details:**
-- يأخذ `desc->mux_lock` بالـ `guard(mutex)` — scoped locking تلقائي.
-- لو `desc == NULL` أو `ops == NULL` يرجع `true` افتراضياً (conservative).
-- بيستخدم `ops->function_is_gpio()` لو موجودة عشان يميز GPIO function من غيرها.
-
-**Who calls it:** `pinctrl_gpio_request()` في `core.c`.
+دي أهم functions في الملف — كل العمليات الخارجية بتتكل عليها.
 
 ---
 
-#### `pinmux_request_gpio`
-
-```c
-int pinmux_request_gpio(struct pinctrl_dev *pctldev,
-                        struct pinctrl_gpio_range *range,
-                        unsigned int pin, unsigned int gpio);
-```
-
-يحجز pin واحد لاستخدامه كـ GPIO. بيبني اسم الـ owner تلقائياً على شكل `"range_name:gpio_number"` باستخدام `kasprintf`، ثم يستدعي `pin_request()`.
-
-**Parameters:**
-- `pctldev` — الـ controller
-- `range` — الـ GPIO range اللي فيها الـ GPIO ده
-- `pin` — رقم الـ pin في الـ controller
-- `gpio` — رقم الـ GPIO العالمي (لبناء اسم الـ owner)
-
-**Return:** `0` أو error code سالب.
-
-**Key Details:**
-- الـ owner string تتخصص بـ `kasprintf(GFP_KERNEL, ...)` — ممكن تفشل بـ `-ENOMEM`.
-- لو `pin_request()` فشل، الـ owner string بتتحرر فوراً بـ `kfree`.
-- لو نجح، الـ owner string بتتحفظ في `desc->gpio_owner` وبتتحرر لاحقاً في `pinmux_free_gpio`.
-
-**Who calls it:** `pinctrl_gpio_request()` في `core.c`.
-
----
-
-#### `pinmux_free_gpio`
-
-```c
-void pinmux_free_gpio(struct pinctrl_dev *pctldev, unsigned int pin,
-                      struct pinctrl_gpio_range *range);
-```
-
-يحرر pin من الـ GPIO mode. بيستدعي `pin_free()` اللي بترجع pointer للـ owner string، ثم بيحررها بـ `kfree` — لأن الـ string اتخصصت ديناميكياً في `pinmux_request_gpio`.
-
-**Parameters:**
-- `pctldev`, `pin`, `range` — نفس `pinmux_request_gpio`
-
-**Return:** void
-
-**Who calls it:** `pinctrl_gpio_free()` في `core.c`.
-
----
-
-#### `pinmux_gpio_direction`
-
-```c
-int pinmux_gpio_direction(struct pinctrl_dev *pctldev,
-                          struct pinctrl_gpio_range *range,
-                          unsigned int pin, bool input);
-```
-
-يضبط اتجاه الـ GPIO (input أو output) عن طريق استدعاء `ops->gpio_set_direction()`. لو الـ callback مش موجودة، يرجع `0` — الـ hardware ممكن يتعامل مع الاتجاه بطريقة تانية.
-
-**Parameters:**
-- `pctldev` — الـ controller
-- `range` — الـ GPIO range
-- `pin` — رقم الـ pin
-- `input` — `true` للـ input، `false` للـ output
-
-**Return:** قيمة `ops->gpio_set_direction()` أو `0`.
-
-**Who calls it:** `pinctrl_gpio_direction_input/output()` في `core.c`.
-
----
-
-### Group 3: Setting Lifecycle
-
-الـ pinctrl core بتدير state machine — كل device بيقدر يكون في state معين (مثلاً `default`، `sleep`). كل state بيحتوي على قائمة `pinctrl_setting`. الـ functions دي هي المسؤولة عن تحويل الـ map table entries لـ settings، وتفعيلها، وإلغاءها.
-
----
-
-#### `pinmux_map_to_setting`
-
-```c
-int pinmux_map_to_setting(const struct pinctrl_map *map,
-                          struct pinctrl_setting *setting);
-```
-
-يحوّل `pinctrl_map` entry (اللي بيحدد function name وgroup name كـ strings) إلى `pinctrl_setting` (اللي بيحتوي على selectors أرقام جاهزة للاستخدام). بيعمل name lookup للـ function وللـ group.
-
-**Parameters:**
-- `map` — الـ map entry من الـ mapping table (strings)
-- `setting` — الـ setting المراد ملؤه (يُعدَّل in-place)
-
-**Return:** `0` أو error code سالب.
-
-**Key Details — Pseudocode:**
-
-```
-1. تحقق إن pctldev فيه pmxops
-2. استدعِ pinmux_func_name_to_selector(map->data.mux.function)
-   → يرجع fsel أو -EINVAL
-3. setting->data.mux.func = fsel
-4. استدعِ pmxops->get_function_groups(fsel)
-   → يرجع groups[] و num_groups
-5. لو map->data.mux.group محدد:
-     match_string(groups, group_name) → تحقق إن الـ group صح
-   لو مش محدد:
-     استخدم groups[0] (default)
-6. استدعِ pinctrl_get_group_selector(group_name)
-   → يرجع gsel
-7. setting->data.mux.group = gsel
-8. return 0
-```
-
-**Who calls it:** `pinctrl_map_add_setting()` في `core.c` عند بناء الـ state.
-
----
-
-#### `pinmux_free_setting`
-
-```c
-void pinmux_free_setting(const struct pinctrl_setting *setting);
-```
-
-Stub فاضية حالياً — placeholder لمستقبل لو احتاج الـ setting تحرير resources. مفيش حاجة تتعمل جوّاها.
-
----
-
-#### `pinmux_enable_setting`
-
-```c
-int pinmux_enable_setting(const struct pinctrl_setting *setting);
-```
-
-يطبّق mux setting على الـ hardware — ده القلب الحقيقي للـ pinmux core. بيعمل 3 خطوات: يجيب الـ pins من الـ group، يحجزهم واحداً واحداً، يضبط الـ mux في الـ hardware.
-
-**Parameters:**
-- `setting` — الـ setting اللي فيه `func` و`group` selectors
-
-**Return:** `0` أو error code سالب.
-
-**Key Details — Pseudocode:**
-
-```
-1. استدعِ pctlops->get_group_pins(group) → pins[], num_pins
-   (لو فشل: warning فقط، num_pins = 0)
-
-2. for i in 0..num_pins:
-     pin_request(pctldev, pins[i], setting->dev_name, NULL)
-     لو فشل: اطبع error → goto err_pin_request
-
-3. for i in 0..num_pins:
-     mutex_lock(desc->mux_lock)
-     desc->mux_setting = &setting->data.mux
-     mutex_unlock(desc->mux_lock)
-
-4. ops->set_mux(pctldev, func, group)
-   لو فشل: goto err_set_mux
-
-5. return 0
-
-err_set_mux:
-   امسح mux_setting من كل الـ descs
-err_pin_request:
-   حرر كل الـ pins اللي اتحجزت (بالعكس)
-   return ret
-```
-
-**Locking:**
-- `desc->mux_lock` لكل pin على حدا (per-pin mutex) باستخدام `scoped_guard`.
-- الـ `pctldev->mutex` مش مأخود هنا — المسؤولية على الـ caller.
-
-**Side Effects:**
-- يزوّد `mux_usecount` لكل pin.
-- يضبط `desc->mux_setting` pointer.
-- يستدعي `try_module_get()` عبر `pin_request()` — يزوّد refcount للـ module.
-
-**Who calls it:** `pinctrl_commit_state()` في `core.c`.
-
----
-
-#### `pinmux_disable_setting`
-
-```c
-void pinmux_disable_setting(const struct pinctrl_setting *setting);
-```
-
-يلغي setting مفعّل — عكس `pinmux_enable_setting`. بيمشي على الـ pins في الـ group ويتحقق إن كل pin لسه مرتبط بالـ setting ده (مش setting تاني اتطبق عليه)، لو نعم يحرره بـ `pin_free`.
-
-**Parameters:**
-- `setting` — الـ setting المراد إلغاؤه
-
-**Return:** void
-
-**Key Details:**
-- بيتحقق `desc->mux_setting == &setting->data.mux` قبل الـ `pin_free` — ده important جداً عشان منحرّرش pin محجوز بـ setting تاني.
-- لو الـ pin مش مرتبط بالـ setting ده، بيطبع warning بس ومبيحرروش.
-- اللـ `set_mux` callback مش بتتعكس هنا — الـ hardware state مش بيترجعش تلقائياً.
-
-**Who calls it:** `pinctrl_commit_state()` عند الانتقال من state لـ state تاني.
-
----
-
-### Group 4: Low-level Pin Ownership (Static — Internal)
-
-دول الـ functions الأساسية اللي بتدير ملكية كل pin على مستوى `pin_desc`. مش exported — internal للـ pinmux.c بس.
-
----
-
-#### `pin_request` (static)
+#### `pin_request()` (static)
 
 ```c
 static int pin_request(struct pinctrl_dev *pctldev,
@@ -1440,128 +1324,305 @@ static int pin_request(struct pinctrl_dev *pctldev,
                        struct pinctrl_gpio_range *gpio_range);
 ```
 
-يحجز pin واحد لـ owner معين. لو `gpio_range != NULL` فده طلب GPIO، لو `NULL` فده طلب mux. بيدير `mux_usecount` (reference counting) ويمنع الـ conflicts حسب `strict` mode.
+الـ function المحورية اللي بتحجز pin منفرد. بتفرّق بين نوعين من الحجز:
+- **GPIO request** (لما `gpio_range != NULL`): يكتب في `desc->gpio_owner`
+- **Mux request** (لما `gpio_range == NULL`): يزيّد `desc->mux_usecount` ويكتب في `desc->mux_owner`
+
+الـ `mux_usecount` بيسمح بالـ sharing — لو نفس الـ owner طلب نفس الـ pin تاني مرة يرجع `0` فوراً بدون ما يكلّم الـ hardware.
 
 **Parameters:**
-- `pctldev` — الـ controller
-- `pin` — رقم الـ pin
-- `owner` — string اسم الـ owner (device name أو GPIO name)
-- `gpio_range` — لو طلب GPIO، الـ range المناسبة؛ لو NULL فطلب mux
+- `pctldev` — الـ pin controller
+- `pin` — رقم الـ pin في الـ global space
+- `owner` — string يمثّل المالك (اسم الـ device أو `"rangename:gpio_num"`)
+- `gpio_range` — إذا طلب GPIO يبعت الـ range، إذا mux يبعت NULL
 
-**Return:** `0` أو error code سالب.
+**Return:**
+- `0` عند النجاح
+- `-EINVAL` إذا الـ pin مش مسجّل أو في conflict
+- error من `ops->request` أو `ops->gpio_request_enable`
 
-**Key Details:**
-
-```
-Conflict Detection Logic:
-┌─────────────────────────────────────────────────────────────┐
-│ هل gpio_range == NULL (mux request)?                         │
-│   - لو mux_usecount > 0 && owner != mux_owner → EBUSY      │
-│   - (إلا لو function_is_gpio → مسموح بالشارك)              │
-│                                                              │
-│ هل gpio_range != NULL (GPIO request)?                        │
-│   - لو gpio_owner != NULL → EBUSY                           │
-│   - لو strict && mux_usecount > 0 → EBUSY                  │
-└─────────────────────────────────────────────────────────────┘
-```
-
-**Reference Counting:**
-- لو mux request: `mux_usecount++` — لو > 1 يرجع `0` مباشرة بدون استدعاء `ops->request()` مرة تانية.
-- لو GPIO: `gpio_owner = owner` مباشرة (مفيش usecount).
-
-**Module Refcount:**
-- `try_module_get(pctldev->owner)` — يمنع unload الـ module لو فيه pins محجوزة.
-- لو `ops->gpio_request_enable` أو `ops->request` فشلت → `module_put()` + rollback.
+**Key Details — Locking:**
+- يمسك `desc->mux_lock` (per-pin mutex) في كل قراءة/كتابة لحقول الـ descriptor
+- يستخدم `scoped_guard(mutex, ...)` — الـ lock بيتفكّ تلقائياً عند الخروج من الـ scope
+- بعد تسجيل الـ ownership يستدعي `try_module_get()` لحماية الـ driver module
 
 **Error Path:**
-- يعمل rollback كامل: يشيل الـ owner ويرجع `mux_usecount`.
-- يستخدم `dev_err_probe` للـ logging عشان يتعامل صح مع `-EPROBE_DEFER`.
+```
+pin_request()
+  ├── pin_desc_get()           → get descriptor
+  ├── [mux_lock] check conflicts
+  ├── set gpio_owner or mux_usecount/mux_owner
+  ├── try_module_get()         → pin module ref
+  ├── ops->gpio_request_enable() OR ops->request()
+  └── on failure:
+       ├── module_put()
+       └── [mux_lock] rollback ownership
+```
+
+**الـ strict mode:**
+لما `ops->strict == true`، المنع بيكون bilateral — pin مأخود كـ GPIO ممكن ميتطلبش كـ mux والعكس، حتى لو مختلف owners.
 
 ---
 
-#### `pin_free` (static)
+#### `pin_free()` (static)
 
 ```c
 static const char *pin_free(struct pinctrl_dev *pctldev, int pin,
                             struct pinctrl_gpio_range *gpio_range);
 ```
 
-يحرر pin واحد. بيرجع pointer للـ owner string عشان الـ caller يحررها لو اتخصصت ديناميكياً (زي حالة GPIO).
+عكس `pin_request()`. بتنقص `mux_usecount` وإذا وصلت لـ صفر بتمسح `mux_owner` و`mux_setting`. تعيد pointer للـ owner string — مهم لأن الـ caller هو اللي مسؤول عن `kfree()` اللي عملها `kasprintf()` في حالة الـ GPIO.
 
-**Parameters:**
-- `pctldev` — الـ controller
-- `pin` — رقم الـ pin
-- `gpio_range` — لو GPIO release، لو NULL فـ mux release
-
-**Return:** الـ owner string السابقة (الـ caller مسؤول عن تحريرها لو محتاج) أو `NULL` لو error.
+**Return:**
+- الـ `owner` string pointer
+- `NULL` لو الـ pin مش مسجّل أو `mux_usecount` كان zero (مع `WARN_ON`)
 
 **Key Details:**
-- لو mux: `mux_usecount--` — لو لسه > 0 يرجع `NULL` بدون تحرير (reference counting).
-- لو GPIO: يشيل `gpio_owner` مباشرة.
-- يستدعي `ops->gpio_disable_free` أو `ops->free` حسب النوع.
-- `module_put(pctldev->owner)` دايماً في الآخر.
-- لو `mux_usecount == 0` بعد الـ decrement: يشيل `mux_setting` pointer.
+- `mux_usecount > 0` بعد التنقيص: بترجع NULL بدون ما تكلّم الـ hardware — shared ownership
+- عند free الـ GPIO: يستدعي `ops->gpio_disable_free()`
+- عند free الـ mux: يستدعي `ops->free()`
+- دايماً بتنهي بـ `module_put()` مقابل `try_module_get()` اللي اتعمل في `pin_request()`
 
 ---
 
-#### `pinmux_func_name_to_selector` (static)
+### مجموعة 3: GPIO ↔ Pinmux Bridge
+
+---
+
+#### `pinmux_can_be_used_for_gpio()`
+
+```c
+bool pinmux_can_be_used_for_gpio(struct pinctrl_dev *pctldev, unsigned int pin);
+```
+
+بتسأل: هل ممكن أستخدم الـ pin ده كـ GPIO دلوقتي؟ الجواب بيعتمد على حالة الـ pin والـ `strict` mode في الـ controller.
+
+بتفحص:
+1. لو الـ pin مفيش له descriptor أو مفيش `pmxops` → آمن (return true)
+2. لو في `mux_setting` والـ driver يعرف يحدد هل الـ function دي GPIO أصلاً (`function_is_gpio`)
+3. في الـ strict mode: لو الـ pin متأخد كـ mux بـ non-GPIO function → false
+4. في الـ strict mode: لو الـ pin عنده `gpio_owner` → false
+
+**Key Details:**
+- يمسك `desc->mux_lock` للقراءة الآمنة
+- المنطق ده مهم قبل ما `gpiochip_request_own_desc()` تستدعي `pinmux_request_gpio()`
+
+**Caller:** `gpiochip_generic_request()` في `gpiolib.c`
+
+---
+
+#### `pinmux_request_gpio()`
+
+```c
+int pinmux_request_gpio(struct pinctrl_dev *pctldev,
+                        struct pinctrl_gpio_range *range,
+                        unsigned int pin, unsigned int gpio);
+```
+
+الـ public API اللي بيطلبه الـ GPIO subsystem لحجز pin. بتبني owner string بـ `kasprintf()` بالشكل `"rangename:gpio_num"` وتبعته لـ `pin_request()`.
+
+**Parameters:**
+- `range` — الـ GPIO range المطابق للـ GPIO controller
+- `pin` — رقم الـ pin في الـ pin controller space
+- `gpio` — رقم الـ GPIO في الـ global GPIO space
+
+**Return:**
+- `0` عند النجاح
+- `-ENOMEM` لو `kasprintf()` فشلت
+- أي error من `pin_request()`
+
+**Key Details:**
+- الـ owner string بتتخزن في `desc->gpio_owner` وبتتحرر في `pinmux_free_gpio()`
+- مسؤولية الـ `kfree()` للـ owner string على `pinmux_free_gpio()` عن طريق القيمة المرجعة من `pin_free()`
+
+---
+
+#### `pinmux_free_gpio()`
+
+```c
+void pinmux_free_gpio(struct pinctrl_dev *pctldev, unsigned int pin,
+                      struct pinctrl_gpio_range *range);
+```
+
+عكس `pinmux_request_gpio()`. بتستدعي `pin_free()` وتاخد الـ owner string المرجعة وتعمل لها `kfree()`.
+
+**Caller:** `gpiochip_generic_free()` في `gpiolib.c`
+
+---
+
+#### `pinmux_gpio_direction()`
+
+```c
+int pinmux_gpio_direction(struct pinctrl_dev *pctldev,
+                          struct pinctrl_gpio_range *range,
+                          unsigned int pin, bool input);
+```
+
+بتضبط اتجاه الـ GPIO pin على مستوى الـ pinmux. لو الـ driver عنده `gpio_set_direction` callback بتستدعيه، غير كده بترجع `0` مباشرة (لو الـ hardware مش محتاج إعداد خاص للاتجاه).
+
+**Parameters:**
+- `input` — `true` = input، `false` = output
+
+**Caller:** `pinctrl_gpio_direction_input/output()` في `core.c`
+
+---
+
+### مجموعة 4: Setting Lifecycle
+
+الـ `pinctrl_setting` هو التمثيل الداخلي للـ active mux configuration. دي الـ functions اللي بتدير حياته.
+
+---
+
+#### `pinmux_map_to_setting()`
+
+```c
+int pinmux_map_to_setting(const struct pinctrl_map *map,
+                          struct pinctrl_setting *setting);
+```
+
+بتحوّل الـ `pinctrl_map` (اللي بتيجي من machine code أو DT) لـ `pinctrl_setting` اللي فيه selectors رقمية جاهزة للـ hardware. دي أساساً مرحلة "resolve" — بتترجم أسماء لـ indices.
+
+**Pseudocode Flow:**
+```
+pinmux_map_to_setting(map, setting):
+  1. func_name → pinmux_func_name_to_selector() → setting->data.mux.func
+  2. pmxops->get_function_groups(func) → groups[], num_groups
+  3. if map->data.mux.group specified:
+       match_string(groups, map->group) → validate
+     else:
+       use groups[0]   <- default: first group
+  4. pinctrl_get_group_selector(group_name) → setting->data.mux.group
+  5. return 0
+```
+
+**Return:**
+- `0` عند النجاح
+- `-EINVAL` لو الـ function أو الـ group مش موجود
+
+**Key Details:**
+- لا توجد locking هنا — الـ `pctldev->mutex` بيتمسك من الـ caller في `core.c`
+- `setting->data.mux.func` و `setting->data.mux.group` هم selectors رقمية مش أسماء
+
+---
+
+#### `pinmux_free_setting()`
+
+```c
+void pinmux_free_setting(const struct pinctrl_setting *setting);
+```
+
+**الـ function دي stub فارغة حالياً** — التعليق في الكود يقول "currently unused". مكانها محجوز في الـ API للـ cleanup المستقبلي لو الـ settings احتاجت موارد ديناميكية.
+
+---
+
+#### `pinmux_enable_setting()`
+
+```c
+int pinmux_enable_setting(const struct pinctrl_setting *setting);
+```
+
+أعقد function في الملف. بتطبّق فعلياً الـ mux setting على الـ hardware. المراحل:
+
+**Pseudocode Flow:**
+```
+pinmux_enable_setting(setting):
+  1. pctlops->get_group_pins(group) -> pins[], num_pins
+     on error: warn, set num_pins=0 (non-fatal)
+
+  2. for each pin in pins[]:
+       pin_request(pin, setting->dev_name, NULL)  <- mux request
+       on error: goto err_pin_request
+
+  3. for each pin in pins[]:
+       [mux_lock] desc->mux_setting = &setting->data.mux
+
+  4. ops->set_mux(pctldev, func, group)   <- actual HW config
+     on error: goto err_set_mux
+
+  5. return 0
+
+err_set_mux:
+  for each pin: [mux_lock] desc->mux_setting = NULL
+err_pin_request:
+  for pins already requested: pin_free()  <- rollback
+  return ret
+```
+
+**Key Details:**
+- الـ rollback كامل — لو أي step فشل الـ function بتتراجع عن كل اللي عملته
+- `desc->mux_setting` بيتضبط قبل `set_mux()` للـ debugfs وفحوصات `pinmux_can_be_used_for_gpio()`
+- كل write على `desc->mux_setting` بيتعمل تحت `desc->mux_lock`
+- الـ `dev_name` بيبقى الـ `mux_owner` للـ pins دي
+
+**Caller:** `pinctrl_select_state()` عن طريق `pinctrl_commit_state()` في `core.c`
+
+---
+
+#### `pinmux_disable_setting()`
+
+```c
+void pinmux_disable_setting(const struct pinctrl_setting *setting);
+```
+
+عكس `pinmux_enable_setting()`. بتمشي على pins الـ group وبتحرر كل pin عنده `mux_setting` تساوي `&setting->data.mux`. لو الـ pin اتأخد من setting تاني في الأثناء بتطبع warning وميحرروش.
+
+**Key Details:**
+- الـ comparison بتتعمل بـ pointer equality مش بـ value — ضمان أن ده نفس الـ setting object
+- مفيش explicit call لـ `ops->set_mux` هنا — الـ hardware بيتعدّل لما الـ state الجديد يتفعّل
+
+---
+
+#### `pinmux_func_name_to_selector()` (static)
 
 ```c
 static int pinmux_func_name_to_selector(struct pinctrl_dev *pctldev,
                                         const char *function);
 ```
 
-بيعمل linear search على كل الـ functions المسجلة عشان يلاقي selector بناءً على الاسم. O(n) في عدد الـ functions.
+Linear scan على كل الـ functions اللي الـ driver يدعمها للبحث عن الـ selector بالاسم.
 
-**Parameters:**
-- `pctldev` — الـ controller
-- `function` — اسم الـ function المطلوب
+**Return:**
+- الـ selector (unsigned int مُرجَع كـ int) عند النجاح
+- `-EINVAL` لو الاسم مش موجود
 
-**Return:** الـ selector (رقم غير سالب) أو `-EINVAL` لو مش موجود.
-
-**Who calls it:** `pinmux_map_to_setting`، `pinmux_generic_add_pinfunction`، `pinmux_select_write`.
-
----
-
-### Group 5: Generic Functions API
-
-لو الـ driver بيستخدم `CONFIG_GENERIC_PINMUX_FUNCTIONS`، مش محتاج يبني الـ function registry بتاعه من الصفر. الـ core بيوفر radix tree (`pin_function_tree`) جاهز ومجموعة functions كاملة لإدارته.
-
-الـ `struct function_desc` هي الـ wrapper:
-
-```c
-struct function_desc {
-    const struct pinfunction *func;  /* name + groups[] + flags */
-    void *data;                      /* driver-private data */
-};
-```
+**Key Details:**
+- `O(n)` في عدد الـ functions — مقبول لأن عدد الـ functions عادة صغير
+- مُستخدَمة في `pinmux_map_to_setting()` وفي `pinmux_select_write()` (debugfs) وفي `pinmux_generic_add_pinfunction()` للـ idempotency check
 
 ---
 
-#### `pinmux_generic_get_function_count`
+### مجموعة 5: Generic Functions (CONFIG_GENERIC_PINMUX_FUNCTIONS)
+
+الـ generic layer بتوفر implementation جاهزة لـ `pinmux_ops` callbacks للـ drivers اللي مش عايزة تكتب إدارة الـ functions من الصفر. البيانات مخزنة في `radix_tree` في `pctldev->pin_function_tree`.
+
+---
+
+#### `pinmux_generic_get_function_count()`
 
 ```c
 int pinmux_generic_get_function_count(struct pinctrl_dev *pctldev);
 ```
 
-يرجع `pctldev->num_functions` مباشرة.
-
-**Who calls it:** الـ driver بيحطها في `pmxops->get_functions_count`.
+بترجع `pctldev->num_functions` مباشرة. بسيطة جداً لكن مطلوبة كـ callback في `pinmux_ops`.
 
 ---
 
-#### `pinmux_generic_get_function_name`
+#### `pinmux_generic_get_function_name()`
 
 ```c
 const char *pinmux_generic_get_function_name(struct pinctrl_dev *pctldev,
                                               unsigned int selector);
 ```
 
-يعمل `radix_tree_lookup(&pctldev->pin_function_tree, selector)` ويرجع `function->func->name`. لو مش موجود يرجع `NULL`.
+بتعمل `radix_tree_lookup()` بالـ selector وبترجع `function->func->name`.
+
+**Return:**
+- الاسم عند النجاح
+- `NULL` لو الـ selector مش موجود في الـ radix tree
 
 ---
 
-#### `pinmux_generic_get_function_groups`
+#### `pinmux_generic_get_function_groups()`
 
 ```c
 int pinmux_generic_get_function_groups(struct pinctrl_dev *pctldev,
@@ -1570,37 +1631,41 @@ int pinmux_generic_get_function_groups(struct pinctrl_dev *pctldev,
                                        unsigned int * const ngroups);
 ```
 
-يجيب الـ function من الـ radix tree ويملي `*groups` بـ `func->groups` و`*ngroups` بـ `func->ngroups`.
+بتعمل lookup بالـ selector وبتملي `*groups` و`*ngroups` من `function->func->groups` و`function->func->ngroups`.
 
-**Return:** `0` أو `-EINVAL` لو الـ selector مش موجود.
+**Return:**
+- `0` عند النجاح
+- `-EINVAL` لو الـ selector مش موجود
 
 ---
 
-#### `pinmux_generic_get_function`
+#### `pinmux_generic_get_function()`
 
 ```c
-const struct function_desc *
-pinmux_generic_get_function(struct pinctrl_dev *pctldev, unsigned int selector);
+const struct function_desc *pinmux_generic_get_function(
+    struct pinctrl_dev *pctldev, unsigned int selector);
 ```
 
-يرجع الـ `function_desc` كاملة — للـ drivers اللي تحتاج الـ `data` pointer.
+بترجع الـ `function_desc` بالكامل بدلاً من جزء منه. مفيدة لـ drivers اللي عايزة تصل لـ `function->data` (الـ driver-specific data).
 
 ---
 
-#### `pinmux_generic_function_is_gpio`
+#### `pinmux_generic_function_is_gpio()`
 
 ```c
 bool pinmux_generic_function_is_gpio(struct pinctrl_dev *pctldev,
                                      unsigned int selector);
 ```
 
-يبص على `function->func->flags & PINFUNCTION_FLAG_GPIO`. الـ driver بيحط الـ flag ده عند تعريف الـ GPIO function.
+بتفحص الـ flag `PINFUNCTION_FLAG_GPIO` في `function->func->flags`. دي اللي بتخلي الـ strict mode يشتغل صح مع الـ GPIO functions.
 
-**Who calls it:** الـ driver بيحطها في `pmxops->function_is_gpio`.
+**Return:**
+- `true` لو `PINFUNCTION_FLAG_GPIO` مضبوط
+- `false` في أي حالة تانية بما فيها لو الـ selector مش موجود
 
 ---
 
-#### `pinmux_generic_add_function`
+#### `pinmux_generic_add_function()`
 
 ```c
 int pinmux_generic_add_function(struct pinctrl_dev *pctldev,
@@ -1610,130 +1675,104 @@ int pinmux_generic_add_function(struct pinctrl_dev *pctldev,
                                 void *data);
 ```
 
-Convenience wrapper — بيبني `pinfunction` struct باستخدام `PINCTRL_PINFUNCTION(name, groups, ngroups)` ثم يستدعي `pinmux_generic_add_pinfunction`.
-
-**Return:** الـ selector الجديد أو error code.
+Convenience wrapper بتبني `pinfunction` struct باستخدام ماكرو `PINCTRL_PINFUNCTION()` وبتبعته لـ `pinmux_generic_add_pinfunction()`.
 
 ---
 
-#### `pinmux_generic_add_pinfunction`
+#### `pinmux_generic_add_pinfunction()`
 
 ```c
 int pinmux_generic_add_pinfunction(struct pinctrl_dev *pctldev,
                                    const struct pinfunction *func, void *data);
 ```
 
-ده الـ function الأساسية اللي بتضيف function فعلاً في الـ radix tree.
+الـ core function للإضافة. المراحل:
+1. بتتحقق لو الـ function موجودة بالفعل بالاسم (idempotent) → بترجع الـ selector الموجود
+2. بتخصص `function_desc` بـ `devm_kzalloc()` — مرتبطة بـ lifetime الـ device
+3. بتعمل `devm_kmemdup_const()` للـ `pinfunction` struct
+4. بتدرجها في الـ `pin_function_tree` بالـ selector التالي
+5. بتزوّد `num_functions`
 
-**Key Details — Flow:**
+**Key Details:**
+- استخدام `devm_*` بدل `kzalloc` عادي — تعمل cleanup تلقائياً عند `device_unregister()`
+- الكود نفسه فيه تعليق يعترف إن استخدام `devres` في subsystem core مش أفضل ممارسة لكنه موجود كـ technical debt
+- الـ `func` pointer بيتنسخ بـ `devm_kmemdup_const()` — الـ caller ممكن يمرر pointer لـ stack variable
 
-```
-1. pinmux_func_name_to_selector(func->name)
-   لو موجود → يرجع الـ selector الموجود (idempotent)
-
-2. selector = pctldev->num_functions
-
-3. devm_kzalloc(pctldev->dev, sizeof(function_desc))
-   → memoized على الـ device lifecycle
-
-4. devm_kmemdup_const(func) → نسخة من الـ pinfunction
-
-5. radix_tree_insert(&pin_function_tree, selector, function)
-
-6. num_functions++
-
-7. return selector
-```
-
-**Important:** بيستخدم `devm_*` — الـ memory بتتحرر تلقائياً عند `device_unregister`. الـ kernel نفسه بيعلّق على ده كـ "technical debt" في الكود (FIXME comment).
-
-**Return:** الـ selector (>= 0) أو error code سالب.
+**Return:**
+- الـ selector الجديد (أو الموجود لو الاسم مكرر)
+- `-ENOMEM` أو error من `radix_tree_insert()`
 
 ---
 
-#### `pinmux_generic_remove_function`
+#### `pinmux_generic_remove_function()`
 
 ```c
 int pinmux_generic_remove_function(struct pinctrl_dev *pctldev,
                                    unsigned int selector);
 ```
 
-يحذف function من الـ radix tree بـ `radix_tree_delete` ويحرر الـ `function_desc` بـ `devm_kfree`. يقلل `num_functions`.
+بتحذف function بالـ selector من الـ radix tree وبتعمل `devm_kfree()` للـ descriptor. الـ `pinfunction` struct نفسه مش محتاج explicit free لأنه اتخصص بـ `devm_kmemdup_const()`.
 
-**Note:** الـ caller مسؤول عن الـ locking.
+**Key Details:**
+- الـ comment في الكود يقول "the caller must take care of locking" — مش thread-safe بدون لوك خارجي
 
 ---
 
-#### `pinmux_generic_free_functions`
+#### `pinmux_generic_free_functions()`
 
 ```c
 void pinmux_generic_free_functions(struct pinctrl_dev *pctldev);
 ```
 
-يعمل `radix_tree_for_each_slot` ويحذف كل الـ entries. مبيحررش الـ `function_desc` struct نفسه لأن الـ `devm_*` بيعمل ده تلقائياً.
+بتمسح كل الـ radix tree بـ `radix_tree_for_each_slot()` وتضبط `num_functions = 0`. مش بتعمل `devm_kfree()` للعناصر لأن الـ `devres` هيتولى ده عند device teardown.
+
+**Caller:** `pinctrl_unregister()` في `core.c`
 
 ---
 
-### Group 6: DebugFS
-
-الـ debugfs interface بيوفر رؤية real-time لحالة الـ pinmux في runtime — مفيد جداً للـ debugging على الـ embedded targets.
+### مجموعة 6: DebugFS
 
 ---
 
-#### `pinmux_init_device_debugfs`
+#### `pinmux_init_device_debugfs()`
 
 ```c
 void pinmux_init_device_debugfs(struct dentry *devroot,
                                 struct pinctrl_dev *pctldev);
 ```
 
-ينشئ 3 ملفات تحت `devroot` في debugfs:
+بتنشئ تلاتة ملفات تحت `/sys/kernel/debug/pinctrl/<device>/`:
 
-| الملف | الصلاحيات | الوظيفة |
+| الملف | الصلاحيات | المحتوى |
 |---|---|---|
-| `pinmux-functions` | `0444` | قراءة كل الـ functions والـ groups |
-| `pinmux-pins` | `0444` | حالة كل pin (mux_owner, gpio_owner) |
-| `pinmux-select` | `0200` | كتابة fقط — ضبط mux يدوياً |
+| `pinmux-functions` | `0444` | قائمة الـ functions والـ groups |
+| `pinmux-pins` | `0444` | حالة كل pin (owner, mux, gpio) |
+| `pinmux-select` | `0200` | write-only لتفعيل mux يدوياً |
 
 ---
 
-#### `pinmux_functions_show`
+#### `pinmux_show_map()`
 
 ```c
-static int pinmux_functions_show(struct seq_file *s, void *what);
+void pinmux_show_map(struct seq_file *s, const struct pinctrl_map *map);
 ```
 
-يمشي على كل الـ functions بـ `get_function_name` و`get_function_groups` ويطبع:
-```
-function 0: uart0, groups = [ uart0_pins uart0_flow ]
-function 1: spi0, groups = [ spi0_pins ]
-```
-
-يأخذ `pctldev->mutex` طول الـ iteration.
+بتطبع `group` و`function` من الـ map entry. لو الـ group مش محدد بتطبع "(default)".
 
 ---
 
-#### `pinmux_pins_show`
+#### `pinmux_show_setting()`
 
 ```c
-static int pinmux_pins_show(struct seq_file *s, void *what);
+void pinmux_show_setting(struct seq_file *s,
+                         const struct pinctrl_setting *setting);
 ```
 
-يمشي على كل الـ pins في الـ controller ويطبع حالة كل pin. الـ output بيختلف حسب `strict` mode:
-
-```
-# strict mode:
-pin 42 (GPIO_B10): device uart0 (HOG) function uart0 group uart0_pins
-
-# non-strict mode:
-pin 42 (GPIO_B10): uart0 (GPIO UNCLAIMED) function uart0 group uart0_pins
-```
-
-يأخذ `pctldev->mutex` (outer) و`desc->mux_lock` (per-pin، inner) — ترتيب الـ locking ثابت لتجنب deadlock.
+بتطبع اسم الـ group والـ function مع selectors الرقمية للـ active setting.
 
 ---
 
-#### `pinmux_select_write`
+#### `pinmux_select_write()` (static)
 
 ```c
 static ssize_t pinmux_select_write(struct file *file,
@@ -1741,651 +1780,931 @@ static ssize_t pinmux_select_write(struct file *file,
                                    size_t len, loff_t *ppos);
 ```
 
-بيسمح للمطور يكتب مباشرة في debugfs لضبط الـ mux. الـ format المتوقع:
-```bash
-echo "group_name function_name" > /sys/kernel/debug/pinctrl/DEVICE/pinmux-select
-```
+تسمح بـ manual mux selection من userspace عن طريق كتابة `"group_name function_name"` في ملف `pinmux-select`. مفيدة جداً لـ debugging في الـ development.
 
 **Flow:**
 ```
-1. memdup_user_nul → copy from userspace
-2. strstrip → remove leading/trailing spaces
-3. split on first whitespace → gname / fname
-4. pinmux_func_name_to_selector(fname) → fsel
-5. get_function_groups(fsel) → validate gname
-6. pinctrl_get_group_selector(gname) → gsel
-7. ops->set_mux(pctldev, fsel, gsel)
+write("uart0_grp uart") ->
+  memdup_user_nul() -> parse gname, fname
+  pinmux_func_name_to_selector(fname) -> fsel
+  pmxops->get_function_groups(fsel) -> validate gname
+  pinctrl_get_group_selector(gname) -> gsel
+  pmxops->set_mux(pctldev, fsel, gsel)
 ```
 
-**Note:** مبيعملش `pin_request` — بيكتب الـ hardware مباشرة بدون tracking. للـ debugging فقط، مش للإنتاج.
+**Key Details:**
+- الـ `pinmux_select_show()` ترجع `-EPERM` دايماً — الـ read مش مدعوم
+- بتكسر الـ normal ownership model — لا يوجد `pin_request()` هنا
+- تستخدمها للـ debugging فقط مش للـ production
 
 ---
 
-#### `pinmux_show_map` / `pinmux_show_setting`
+### الـ `struct pinmux_ops` — الـ Driver Contract
 
 ```c
-void pinmux_show_map(struct seq_file *s, const struct pinctrl_map *map);
-void pinmux_show_setting(struct seq_file *s, const struct pinctrl_setting *setting);
+struct pinmux_ops {
+    /* Optional: can driver allow/deny a pin being muxed? */
+    int (*request)(struct pinctrl_dev *pctldev, unsigned int offset);
+    int (*free)(struct pinctrl_dev *pctldev, unsigned int offset);
+
+    /* Mandatory: enumerate functions */
+    int (*get_functions_count)(struct pinctrl_dev *pctldev);
+    const char *(*get_function_name)(struct pinctrl_dev *pctldev,
+                                     unsigned int selector);
+    int (*get_function_groups)(struct pinctrl_dev *pctldev,
+                               unsigned int selector,
+                               const char * const **groups,
+                               unsigned int *num_groups);
+
+    /* Optional but recommended for strict mode */
+    bool (*function_is_gpio)(struct pinctrl_dev *pctldev,
+                             unsigned int selector);
+
+    /* Mandatory: apply mux to hardware */
+    int (*set_mux)(struct pinctrl_dev *pctldev,
+                   unsigned int func_selector,
+                   unsigned int group_selector);
+
+    /* Optional: GPIO-specific mux acceleration */
+    int (*gpio_request_enable)(struct pinctrl_dev *pctldev,
+                               struct pinctrl_gpio_range *range,
+                               unsigned int offset);
+    void (*gpio_disable_free)(struct pinctrl_dev *pctldev,
+                              struct pinctrl_gpio_range *range,
+                              unsigned int offset);
+    int (*gpio_set_direction)(struct pinctrl_dev *pctldev,
+                              struct pinctrl_gpio_range *range,
+                              unsigned int offset,
+                              bool input);
+
+    /* strict: prevent simultaneous GPIO + mux use of same pin */
+    bool strict;
+};
 ```
 
-دول helpers بيستدعيهم الـ core لطباعة معلومات الـ map والـ setting في debugfs. مباشرة ومفيش complexity.
+| Callback | إلزامي؟ | الاستخدام |
+|---|---|---|
+| `request` | اختياري | الـ driver يرفض أو يقبل حجز الـ pin |
+| `free` | اختياري | تحرير ما عمله `request` |
+| `get_functions_count` | **إلزامي** | عدد الـ functions |
+| `get_function_name` | **إلزامي** | اسم function بالـ selector |
+| `get_function_groups` | **إلزامي** | groups بتاعة function |
+| `function_is_gpio` | اختياري | للـ strict mode |
+| `set_mux` | **إلزامي** | كتابة الـ HW registers |
+| `gpio_request_enable` | اختياري | GPIO mux acceleration |
+| `gpio_disable_free` | اختياري | عكس `gpio_request_enable` |
+| `gpio_set_direction` | اختياري | ضبط direction على الـ pinmux level |
+| `strict` | flag | منع dual ownership |
 
 ---
 
-### ملاحظات عامة على الـ Locking Model
+### الـ `struct function_desc` (CONFIG_GENERIC_PINMUX_FUNCTIONS)
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│                    Locking Hierarchy                          │
-│                                                              │
-│  pctldev->mutex          (per-controller, coarse-grained)    │
-│      └── desc->mux_lock  (per-pin, fine-grained)             │
-│                                                              │
-│  القاعدة: دايماً خد pctldev->mutex الأول لو محتاجهم معاً   │
-│  pinmux_enable_setting: مش بياخد pctldev->mutex             │
-│  (المسؤولية على pinctrl_commit_state في core.c)             │
-└──────────────────────────────────────────────────────────────┘
+```c
+struct function_desc {
+    const struct pinfunction *func;  /* name, groups[], ngroups */
+    void *data;                      /* driver-specific opaque data */
+};
 ```
 
-الـ `scoped_guard(mutex, &desc->mux_lock)` اللي بتظهر كتير في الكود هي الـ cleanup-based locking من `<linux/cleanup.h>` — بتضمن إن الـ lock بيتحرر تلقائياً حتى لو اتعمل `goto` أو `return` جوّا الـ scope.
+الـ generic layer بتخزن هذا الـ struct في `pctldev->pin_function_tree` (radix tree indexed by selector). الـ `data` field ده بيتوصله لـ driver وممكن يبقى pointer لـ register addresses أو أي بيانات خاصة بالـ SoC.
+
+---
+
+### تفاعل الـ Subsystems — Big Picture
+
+```
+GPIO Subsystem              pinctrl core              pin controller driver
+     |                           |                           |
+     |-- gpio_request()          |                           |
+     |    |                      |                           |
+     |    +-- pinmux_request_gpio()                         |
+     |         |                 |                           |
+     |         +-- pin_request() --> ops->gpio_request_enable() --> [HW]
+     |                           |                           |
+Device Driver                    |                           |
+     |                           |                           |
+     |-- pinctrl_select_state()  |                           |
+     |    |                      |                           |
+     |    +-- pinmux_enable_setting()                        |
+     |         |-- pin_request() x N pins                   |
+     |         +-- ops->set_mux() --------------------------> [HW regs]
+     |                           |                           |
+     |-- devm cleanup            |                           |
+          |                      |                           |
+          +-- pinmux_disable_setting()                       |
+               +-- pin_free() x N --> ops->free() --------> [HW]
+```
 ## Phase 5: دليل الـ Debugging الشامل
-
----
 
 ### Software Level
 
 #### 1. مدخلات الـ debugfs
 
-الـ pinmux subsystem بيسجّل ملفات debugfs تلقائيًا عن طريق `pinmux_init_device_debugfs()` لما يتفعّل `CONFIG_DEBUG_FS`.
+الـ pinmux بيسجل مدخلاته في `/sys/kernel/debug/pinctrl/<controller-name>/` أوتوماتيك لما بتفعّل `CONFIG_DEBUG_FS`. الدالة `pinmux_init_device_debugfs()` بتعمل ٣ ملفات:
 
-| المسار | الصلاحية | المحتوى |
-|--------|----------|---------|
-| `/sys/kernel/debug/pinctrl/<dev>/pinmux-functions` | 0444 | كل الـ functions المسجّلة + الـ groups بتاعتها |
-| `/sys/kernel/debug/pinctrl/<dev>/pinmux-pins` | 0444 | كل pin وحالته: owner، gpio_owner، function، group |
-| `/sys/kernel/debug/pinctrl/<dev>/pinmux-select` | 0200 | Write-only: force mux setting يدوي |
-| `/sys/kernel/debug/pinctrl/<dev>/pinctrl-handles` | 0444 | الـ handles النشطة + الـ settings |
-| `/sys/kernel/debug/pinctrl/<dev>/pinctrl-maps` | 0444 | جدول الـ mapping الكامل للـ machine |
-| `/sys/kernel/debug/pinctrl/pinctrl-handles` | 0444 | global view لكل الـ handles |
-| `/sys/kernel/debug/gpio` | 0444 | الـ GPIO lines + الـ requesters — مرتبط بالـ pinmux |
+| المدخل | الـ Permission | الوظيفة |
+|--------|----------------|---------|
+| `pinmux-functions` | 0444 | بيعرض كل الـ functions والـ groups المرتبطة بيها |
+| `pinmux-pins` | 0444 | بيعرض حالة كل pin — مين الـ owner وهل هو HOG |
+| `pinmux-select` | 0200 | بيخليك تعمل `set_mux()` يدوي وقت الـ debug |
 
-**قراءة الـ pinmux-pins:**
+**قراءة الـ functions:**
 
 ```bash
-# اقرأ حالة كل pin مع مين طالبه
-cat /sys/kernel/debug/pinctrl/$(ls /sys/kernel/debug/pinctrl/ | head -1)/pinmux-pins
+# اعرف اسم الـ controller الأول
+CTRL=$(ls /sys/kernel/debug/pinctrl/ | head -1)
+cat /sys/kernel/debug/pinctrl/$CTRL/pinmux-functions
 ```
 
-**مثال على الـ output:**
+مثال output:
+
+```
+function 0: gpio,  groups = [ gpio0 gpio1 gpio2 ]
+function 1: uart0, groups = [ uart0_grp ]
+function 2: spi0,  groups = [ spi0_grp spi0_cs_grp ]
+```
+
+**قراءة حالة الـ pins:**
+
+```bash
+cat /sys/kernel/debug/pinctrl/$CTRL/pinmux-pins
+```
+
+مثال output لـ strict controller:
+
 ```
 Pinmux settings per pin
+Format: pin (name): mux_owner|gpio_owner (strict) hog?
+pin 12 (GPIO12): device serial0 function uart0 group uart0_grp
+pin 13 (GPIO13): device serial0 function uart0 group uart0_grp
+pin 20 (GPIO20): GPIO gpiochip0:20
+pin 25 (GPIO25): UNCLAIMED
+```
+
+مثال output لـ non-strict controller:
+
+```
 Format: pin (name): mux_owner gpio_owner hog?
-pin 0 (GPIO0): (MUX UNCLAIMED) (GPIO UNCLAIMED)
-pin 5 (UART0_TX): uart0 (GPIO UNCLAIMED) function uart0 group uart0_grp
-pin 6 (UART0_RX): uart0 (GPIO UNCLAIMED) function uart0 group uart0_grp
-pin 10 (SPI0_CLK): pinctrl-imx (HOG) function spi0 group spi0_grp
-pin 20 (GPIO20): (MUX UNCLAIMED) gpio-keys:20
+pin 10 (GPIO10): serial0 (GPIO UNCLAIMED) function uart0 group uart0_grp
+pin 11 (GPIO11): (MUX UNCLAIMED) gpiochip0:11
 ```
 
-**التفسير:**
-- `(MUX UNCLAIMED)` → الـ pin مش مأخود لأي function
-- `(HOG)` → الـ pin controller نفسه طالبه من الـ DT (`pinctrl-0` في نود الـ controller)
-- `gpio-keys:20` → طلبته الـ driver دي كـ GPIO
-
-**قراءة الـ pinmux-functions:**
+**تفعيل mux يدويًا عبر pinmux-select (الصيغة: `<group> <function>`):**
 
 ```bash
-cat /sys/kernel/debug/pinctrl/$(ls /sys/kernel/debug/pinctrl/ | head -1)/pinmux-functions
+echo "uart0_grp uart0" > /sys/kernel/debug/pinctrl/$CTRL/pinmux-select
+# لو نجح: مفيش output
+# لو فشل: راجع dmesg
+dmesg | tail -5
 ```
 
-**مثال:**
-```
-function 0: gpio, groups = [ gpio0 gpio1 gpio2 ... ]
-function 1: uart0, groups = [ uart0_grp uart0_noflow_grp ]
-function 2: spi0, groups = [ spi0_grp spi0_quad_grp ]
-function 3: i2c1, groups = [ i2c1_grp ]
-```
-
-**Force mux يدوي للاختبار (write إلى pinmux-select):**
+**عرض الـ maps وباقي المعلومات:**
 
 ```bash
-# تفعيل function "uart0" على group "uart0_grp"
-echo "uart0_grp uart0" > /sys/kernel/debug/pinctrl/<dev>/pinmux-select
+cat /sys/kernel/debug/pinctrl/$CTRL/maps        # كل الـ pinctrl maps المسجلة
+cat /sys/kernel/debug/pinctrl/$CTRL/pins        # كل الـ pins المسجلة مع أرقامها
+cat /sys/kernel/debug/pinctrl/$CTRL/pingroups   # الـ pin groups وأعضاؤها
 ```
-
-> تحذير: `pinmux-select` بيستدعي `set_mux()` مباشرة بدون أي resource tracking — للاختبار بس.
 
 ---
 
 #### 2. مدخلات الـ sysfs
 
+الـ pinmux نفسه ما بيعرضش entries مباشرة في sysfs، لكن المعلومات متاحة من خلال:
+
+| المسار | المعلومة |
+|--------|---------|
+| `/sys/class/gpio/export` | طلب GPIO pin من user space — بيستدعي `pinmux_request_gpio()` |
+| `/sys/class/gpio/gpioN/direction` | تحقق إن الـ direction اتسطّ صح بعد `pinmux_gpio_direction()` |
+| `/sys/bus/platform/devices/<dev>/driver` | تأكد إن الـ pinctrl driver اتحمل |
+
 ```bash
-# قائمة بكل الـ pinctrl controllers المسجّلة
-ls /sys/bus/platform/drivers/pinctrl/
-ls /sys/class/gpio/
+# تصدير GPIO 20 ومراقبة حالتها في pinmux-pins
+echo 20 > /sys/class/gpio/export
+cat /sys/class/gpio/gpio20/direction
+cat /sys/kernel/debug/pinctrl/$CTRL/pinmux-pins | grep "pin 20"
+# المفروض تلاقي: pin 20 (GPIO20): GPIO gpiochip0:20
+```
 
-# معلومات الـ device
-cat /sys/bus/platform/devices/<pinctrl-dev>/driver
-ls /sys/bus/platform/devices/<pinctrl-dev>/
-
-# الـ GPIO lines عبر libgpiod
-gpiodetect          # كل الـ GPIO chips
-gpioinfo gpiochip0  # كل lines + requesters
+```bash
+# استخدام libgpiod (الطريقة الحديثة)
+gpiodetect                 # يعرض كل GPIO controllers
+gpioinfo gpiochip0         # يعرض حالة كل pin في الـ chip
+gpioget gpiochip0 14       # يقرأ قيمة pin
+gpiomon gpiochip0 14       # يراقب edge events
 ```
 
 ---
 
-#### 3. الـ ftrace — Tracepoints والـ Events
+#### 3. الـ ftrace — function tracing على دوال الـ pinmux
 
-الـ pinctrl subsystem عنده tracepoints في `include/trace/events/pinctrl.h`:
-
-```bash
-# عرض كل الـ trace events المتاحة للـ pinctrl
-ls /sys/kernel/debug/tracing/events/pinctrl/
-
-# تفعيل كل الـ pinctrl events
-echo 1 > /sys/kernel/debug/tracing/events/pinctrl/enable
-
-# أو events محددة
-echo 1 > /sys/kernel/debug/tracing/events/pinctrl/pinctrl_map_add/enable
-echo 1 > /sys/kernel/debug/tracing/events/pinctrl/pinctrl_state_init/enable
-
-# تتبع مع function tracer لحظة probe
-echo function > /sys/kernel/debug/tracing/current_tracer
-echo 'pinmux*' > /sys/kernel/debug/tracing/set_ftrace_filter
-echo 1 > /sys/kernel/debug/tracing/tracing_on
-# ... شغّل العملية المشبوهة ...
-cat /sys/kernel/debug/tracing/trace
-echo 0 > /sys/kernel/debug/tracing/tracing_on
-```
-
-**تتبع `pin_request` و `pin_free` بالـ kprobe:**
+الـ pinmux ما بيوفرش tracepoints مخصصة، لكن **function tracing** على دواله الأساسية بيكشف كل حاجة:
 
 ```bash
-# أضف kprobe على pin_request
-echo 'p:pin_req pin_request pctldev=%di pin=%si owner=%dx' \
-    > /sys/kernel/debug/tracing/kprobe_events
+T=/sys/kernel/tracing
+echo 0 > $T/tracing_on
+echo function > $T/current_tracer
 
-echo 1 > /sys/kernel/debug/tracing/events/kprobes/pin_req/enable
-cat /sys/kernel/debug/tracing/trace_pipe
+# فلترة على دوال الـ pinmux الأساسية
+echo 'pin_request pin_free pinmux_enable_setting pinmux_disable_setting \
+      pinmux_request_gpio pinmux_free_gpio pinmux_gpio_direction' \
+  > $T/set_ftrace_filter
+
+echo 1 > $T/tracing_on
+# شغّل العملية اللي بتسبب المشكلة هنا ...
+echo 0 > $T/tracing_on
+cat $T/trace
+echo nop > $T/current_tracer   # cleanup
 ```
 
-**مثال output من الـ trace:**
+**تتبع call chain كامل عبر function_graph:**
+
+```bash
+echo function_graph > $T/current_tracer
+echo 'pinmux_enable_setting' > $T/set_graph_function
+echo 1 > $T/tracing_on
 ```
-     init-1    [000] ....  5.123: pin_req: (pin_request+0x0/0x140) pctldev=0xffff... pin=5 owner=0xffff...
-     init-1    [000] ....  5.124: pin_req: pctldev=0xffff... pin=6 owner=uart0
+
+مثال output:
+
+```
+ 1)               |  pinmux_enable_setting() {
+ 1)               |    pin_request() {
+ 1)   0.312 us    |      pin_desc_get();
+ 1)   1.204 us    |      ops->gpio_request_enable();
+ 1)               |    }
+ 1)               |    ops->set_mux();
+ 1)   3.891 us    |  }
+```
+
+**تتبع الـ driver-specific set_mux مباشرة:**
+
+```bash
+# مثال لـ sunxi pinctrl driver
+echo 'sunxi_pmx_set_mux' > $T/set_ftrace_filter
+echo 1 > $T/tracing_on
 ```
 
 ---
 
 #### 4. الـ printk والـ Dynamic Debug
 
-الكود بيستخدم `dev_dbg()` بشكل أساسي في `pin_request()`:
-
-```c
-dev_dbg(pctldev->dev, "request pin %d (%s) for %s\n",
-        pin, desc->name, owner);
-```
-
-**تفعيل الـ dynamic debug للـ pinmux subsystem:**
+الـ `pinmux.c` بيستخدم `pr_fmt` بـ prefix `"pinmux core: "` وبيستخدم `dev_dbg` للرسائل العادية.
 
 ```bash
-# تفعيل كل messages الـ pinmux core
-echo 'module pinctrl +p' > /sys/kernel/debug/dynamic_debug/control
-
-# أو تفعيل ملف محدد
+# تفعيل كل dev_dbg في ملف pinmux.c
 echo 'file drivers/pinctrl/pinmux.c +p' > /sys/kernel/debug/dynamic_debug/control
 
-# تفعيل مع stack trace
-echo 'file drivers/pinctrl/pinmux.c +ps' > /sys/kernel/debug/dynamic_debug/control
+# تفعيل مع line numbers وأسماء الدوال والـ module
+echo 'file drivers/pinctrl/pinmux.c +pflm' > /sys/kernel/debug/dynamic_debug/control
 
 # تفعيل كل الـ pinctrl subsystem
-echo 'file drivers/pinctrl/* +p' > /sys/kernel/debug/dynamic_debug/control
+echo 'module pinctrl +p' > /sys/kernel/debug/dynamic_debug/control
 
-# إيقاف
-echo 'file drivers/pinctrl/pinmux.c -p' > /sys/kernel/debug/dynamic_debug/control
+# تحقق مما تم تفعيله
+grep pinmux /sys/kernel/debug/dynamic_debug/control
 ```
 
-**أو عبر kernel command line (للمشاكل في الـ boot):**
+أهم رسالة `dev_dbg` في الكود:
+
+```c
+/* في pin_request() — بتظهر عند كل طلب pin */
+dev_dbg(pctldev->dev, "request pin %d (%s) for %s\n",
+    pin, desc->name, owner);
+```
+
+```bash
+# مراقبة مستمرة
+dmesg -w | grep "pinmux core:"
+dmesg -w | grep "pin.*requested"
+```
+
+**تفعيل من الـ boot:**
 
 ```
-dyndbg="file drivers/pinctrl/pinmux.c +p"
+# في kernel command line
+dyndbg="file drivers/pinctrl/pinmux.c +p" loglevel=8
 ```
 
 ---
 
-#### 5. الـ Kernel Config Options للـ Debugging
+#### 5. خيارات الـ Kernel Config للـ Debugging
 
-| الـ Option | الغرض |
-|-----------|--------|
-| `CONFIG_PINMUX` | الـ pinmux core نفسه — لازم يكون enabled |
-| `CONFIG_DEBUG_FS` | يفعّل `/sys/kernel/debug/pinctrl/*` |
-| `CONFIG_GENERIC_PINMUX_FUNCTIONS` | دعم الـ `function_desc` + الـ radix tree |
-| `CONFIG_PINCTRL` | الـ pinctrl core — prerequisite |
-| `CONFIG_DEBUG_KERNEL` | يفعّل assertions إضافية |
-| `CONFIG_DEBUG_SPINLOCK` | يكشف locking errors في `mux_lock` |
-| `CONFIG_PROVE_LOCKING` | `lockdep` — يكشف deadlocks في الـ mutex |
-| `CONFIG_LOCK_STAT` | إحصائيات الـ lock contention |
-| `CONFIG_DYNAMIC_DEBUG` | يفعّل `dev_dbg()` runtime |
-| `CONFIG_KALLSYMS` | أسماء الـ symbols في stack traces |
-| `CONFIG_STACKTRACE` | مطلوب للـ lockdep وغيره |
-| `CONFIG_KPROBES` | للـ kprobe tracing على `pin_request` |
-| `CONFIG_FTRACE` | للـ function tracing |
-
-**في `.config` أو `make menuconfig`:**
+| الـ Config | الوظيفة |
+|-----------|---------|
+| `CONFIG_PINMUX` | الـ pinmux subsystem الأساسي — لازم يكون مفعّل |
+| `CONFIG_DEBUG_FS` | لازم عشان تتفعّل ملفات debugfs الثلاثة |
+| `CONFIG_GENERIC_PINMUX_FUNCTIONS` | الـ generic implementation باستخدام radix tree |
+| `CONFIG_PROVE_LOCKING` | بيكتشف deadlocks في `desc->mux_lock` mutex |
+| `CONFIG_DEBUG_MUTEXES` | تتبع mutex ownership في `mux_lock` |
+| `CONFIG_LOCKDEP` | تتبع تسلسل الـ lock acquisition |
+| `CONFIG_DYNAMIC_DEBUG` | لازم مفعّل عشان `dev_dbg` يشتغل runtime |
+| `CONFIG_KALLSYMS` | مهم لقراءة stack traces بأسماء دوال مفهومة |
+| `CONFIG_FRAME_POINTER` | بيحسّن جودة الـ stack traces |
 
 ```bash
-# تحقق من الـ options الحالية
-grep -E 'CONFIG_(PINMUX|PINCTRL|DEBUG_FS|DYNAMIC_DEBUG)' /boot/config-$(uname -r)
+# تحقق من الـ config الحالي
+zcat /proc/config.gz | grep -E 'PINMUX|PINCTRL|DEBUG_FS|DYNAMIC_DEBUG|PROVE_LOCKING'
 ```
 
 ---
 
 #### 6. أدوات خاصة بالـ Subsystem
 
-**libgpiod (أفضل من الـ sysfs القديم):**
-
 ```bash
-# اعرض كل الـ GPIO chips وحالة الـ lines
-gpiodetect
-gpioinfo gpiochip0
+# عرض كل الـ debugfs entries للـ pinctrl subsystem
+ls /sys/kernel/debug/pinctrl/
+ls /sys/kernel/debug/pinctrl/$CTRL/
 
-# اقرأ قيمة GPIO (يطلبه ويحرره)
-gpioget gpiochip0 5
-
-# راقب الـ events على GPIO
-gpiomon gpiochip0 5
+# script شامل لتفريغ حالة كل الـ controllers
+#!/bin/bash
+PINCTRL_DIR="/sys/kernel/debug/pinctrl"
+for ctrl in "$PINCTRL_DIR"/*/; do
+    name=$(basename "$ctrl")
+    echo "=== Controller: $name ==="
+    echo "--- Functions ---"
+    cat "$ctrl/pinmux-functions" 2>/dev/null
+    echo "--- Pin States ---"
+    cat "$ctrl/pinmux-pins" 2>/dev/null
+    echo ""
+done
 ```
 
-**pinctrl tool (في بعض الـ distros):**
-
 ```bash
-# من package devmem2 أو util-linux
-# مباشرة للـ debugfs
-find /sys/kernel/debug/pinctrl/ -type f | xargs -I{} sh -c 'echo "=== {} ==="; cat {}'
+# libgpiod tools
+gpiodetect                         # يعرض كل GPIO chips
+gpioinfo gpiochip0                 # يعرض pin states مع الـ names
+gpioset --mode=time --sec=2 gpiochip0 14=1   # يضبط pin لمدة معينة
+
+# python-gpiod
+python3 -c "
+import gpiod
+chip = gpiod.Chip('gpiochip0')
+info = chip.get_info()
+print(f'Chip: {info.name}, {info.num_lines} lines')
+for i in range(min(20, info.num_lines)):
+    linfo = chip.get_line_info(i)
+    print(f'  Line {i}: {linfo.name}, consumer={linfo.consumer}, used={linfo.used}')
+"
 ```
 
 ---
 
-#### 7. جدول رسائل الـ Errors الشائعة
+#### 7. جدول رسائل الأخطاء الشائعة
 
-| رسالة الـ Kernel Log | المعنى | الحل |
-|---------------------|--------|------|
-| `pinmux ops lacks necessary functions` | الـ driver ما implement الـ ops المطلوبة (`get_functions_count`, `get_function_name`, `get_function_groups`, `set_mux`) | تحقق من `struct pinmux_ops` في الـ driver |
-| `pinmux ops has no name for function%u` | `get_function_name()` رجّعت NULL لـ function معين | بق في الـ driver — تحقق من الـ function table |
-| `pin %d is not registered so it cannot be requested` | pin number غير موجود في `pin_desc` | تحقق من `npins` وحدود الـ `pinctrl_desc.pins` |
-| `pin %s already requested by %s; cannot claim for %s` | pin conflict — اتنين طالبين نفس الـ pin | تحقق من الـ DT: هل نفس الـ pin في أكتر من `pinctrl-0` node؟ |
-| `could not request pin %d (%s) from group %s on device %s` | `pin_request()` فشل لـ pin في group | ممكن conflict أو `ops->request()` رجّع error |
-| `invalid function %s in map table` | اسم الـ function في الـ DT/board مش موجود في الـ driver | طابق أسماء functions في الـ DT مع `get_function_name()` |
-| `invalid group "%s" for function "%s"` | الـ group المطلوب مش ضمن الـ groups التابعة للـ function | راجع `get_function_groups()` في الـ driver |
-| `function %s can't be selected on any group` | `get_function_groups()` رجّعت 0 groups | بق في الـ driver — الـ function ما ليهاش groups |
-| `does not support mux function` | `pmxops` = NULL — الـ controller مش بيدعم pinmux | تحقق من `pinctrl_desc.pmxops` |
-| `could not increase module refcount for pin %d` | الـ module بدأ يتـunload أثناء request | race condition أو الـ module مش محمّل صح |
-| `could not get pins for group %s` | `get_group_pins()` فشل | الـ group selector غلط أو بق في الـ pctlops |
-| `not freeing pin %d (%s) as part of deactivating group %s` | الـ `mux_setting` pointer اتغير — مش نفس الـ setting اللي طلبت الـ pin | state inconsistency — ممكن double free أو race |
-| `set_mux() failed: %d` | الـ hardware رفض الـ mux setting | تحقق من الـ hardware datasheet + الـ register values |
+| رسالة الخطأ | المعنى | الحل |
+|-------------|--------|------|
+| `pinmux ops lacks necessary functions` | الـ `pinmux_ops` ناقص فيه واحدة أو أكتر من: `get_functions_count`، `get_function_name`، `get_function_groups`، `set_mux` | افحص `struct pinmux_ops` في الـ driver وتأكد إن الـ 4 callbacks موجودين |
+| `pinmux ops has no name for function%u` | الـ `get_function_name()` بيرجع NULL لـ selector معين | الـ driver لازم يرجع اسم valid لكل function من 0 لـ nfuncs-1 |
+| `failed to register map %s (%d): no function given` | الـ `pinctrl_map` entry ليهاش `data.mux.function` | في الـ DT أو board file، تأكد إن `function` property موجودة في كل mux entry |
+| `invalid function %s in map table` | الـ function name في الـ map مش موجود في الـ controller | قارن الأسماء في الـ DT مع اللي بيرجعه `get_function_name()` في الـ driver |
+| `can't query groups for function %s` | `get_function_groups()` فشل | تحقق من الـ driver implementation |
+| `function %s can't be selected on any group` | `get_function_groups()` رجع `ngroups = 0` | الـ function محتاجة group واحدة على الأقل |
+| `invalid group "%s" for function "%s"` | الـ group المحددة في الـ map مش ضمن groups الـ function | تحقق من الـ DT — `pinctrl-0` بيشاور على group موجودة؟ |
+| `pin %s already requested by %s; cannot claim for %s` | الـ pin محجوز من جهة تانية — conflict | افحص `pinmux-pins` وشوف مين حاجز الـ pin، وراجع الـ DT |
+| `pin %d is not registered so it cannot be requested` | الـ pin number مش موجود في الـ `pin_desc` | الـ controller لازم يسجل الـ pin ده في `pinctrl_register_pins()` |
+| `could not increase module refcount for pin %d` | الـ pinctrl module بيتم unload وقت الـ request | race condition في module lifecycle |
+| `could not request pin %d (%s) from group %s on device %s` | `pin_request()` فشل لـ pin داخل group | الرسالة قبليها بتوضح السبب — غالبًا pin conflict |
+| `not freeing pin %d (%s) as part of deactivating group %s` | الـ `mux_setting` pointer اتغير من تحت الـ function | race condition أو double-free في الـ setting lifecycle |
+| `does not support mux function` | الـ `pctldev->desc->pmxops` = NULL | الـ controller driver مش بيدعم pinmux أصلاً |
+| `pin is not registered so it cannot be freed` | محاولة تحرير pin مش مسجلة | bug في الـ driver — `pin_free()` اتحلت بـ pin number غلط |
 
 ---
 
-#### 8. نقاط استراتيجية لـ `dump_stack()` و `WARN_ON()`
+#### 8. نقاط استراتيجية لـ dump_stack() وWARN_ON()
 
-**النقاط المهمة في الكود:**
+الـ kernel بيستخدم `WARN_ON` في `pin_free()` أصلاً:
 
 ```c
-/* في pin_free() — موجودة أصلًا في الكود */
+/* في pin_free() — موجودة في الكود الأصلي */
 if (WARN_ON(!desc->mux_usecount))
     return NULL;
-/* تكشف: محاولة free pin أكتر من ما اتطلب */
-
-/* نقطة مقترحة في pin_request() لتتبع الـ ownership conflicts */
-WARN_ON(desc->mux_usecount > 1 && strcmp(desc->mux_owner, owner));
-
-/* في pinmux_enable_setting() بعد set_mux() */
-if (ret) {
-    dump_stack(); /* يوضح call chain كامل لمين طلب الـ setting */
-}
+/* بتطلع warning لو حاولت تحرر pin أكتر من ما طلبتها */
 ```
 
-**أضف `pr_debug` مؤقت في `pinmux_disable_setting()` لتتبع الـ is_equal check:**
+**نقاط إضافية مفيدة للـ debugging:**
 
 ```c
-/* في pinmux_disable_setting() */
-scoped_guard(mutex, &desc->mux_lock)
-    is_equal = (desc->mux_setting == &(setting->data.mux));
-
-/* نقطة مقترحة للـ debugging */
-if (!is_equal) {
-    dev_warn(pctldev->dev,
-             "mux_setting mismatch on pin %d: expected %p got %p\n",
-             pins[i], &setting->data.mux, desc->mux_setting);
-    dump_stack(); /* يكشف من غيّر الـ mux_setting */
+/* في pin_request() — لمعرفة مين طلب pin معينة */
+if (pin == TARGET_PIN) {
+    dev_warn(pctldev->dev, "pin %d requested by: %s\n", pin, owner);
+    dump_stack(); /* يطبع الـ call stack كامل — مفيد لاكتشاف من أين جاء الطلب */
 }
+
+/* في pinmux_enable_setting() — تتبع فشل set_mux */
+ret = ops->set_mux(pctldev, setting->data.mux.func,
+                   setting->data.mux.group);
+if (WARN_ON(ret)) {
+    dump_stack();
+    goto err_set_mux;
+}
+
+/* تحقق من consistency الـ mux_usecount */
+WARN_ON(desc->mux_usecount < 0);
+
+/* تحقق إن الـ owner مش NULL لما يكون usecount > 0 */
+WARN_ON(desc->mux_usecount > 0 && !desc->mux_owner);
+
+/* في pinmux_disable_setting() — الـ dev_warn موجودة في الكود */
+/* ممكن تضيف dump_stack() هنا لمعرفة الـ setting التاني */
+dev_warn(pctldev->dev,
+         "not freeing pin %d (%s) as part of deactivating group %s"
+         " - it is already used for some other setting",
+         pins[i], desc->name, gname);
+/* أضف: dump_stack(); */
 ```
 
 ---
 
 ### Hardware Level
 
-#### 1. التحقق إن الـ Hardware State يطابق الـ Kernel State
+#### 1. التحقق إن حالة الـ Hardware تطابق حالة الـ Kernel
+
+الهدف: التأكد إن الـ MUX register في الـ SoC فعلاً اتغير بعد ما `set_mux()` اتنفّذ.
 
 ```bash
-# 1. شوف الـ kernel يقول إيه عن الـ pin
-cat /sys/kernel/debug/pinctrl/<dev>/pinmux-pins | grep "pin 5"
-# Output: pin 5 (UART0_TX): uart0 (GPIO UNCLAIMED) function uart0 group uart0_grp
+# الخطوة 1: اعرف الـ kernel state
+cat /sys/kernel/debug/pinctrl/$CTRL/pinmux-pins | grep "pin 14"
+# output: pin 14 (GPIO14): device uart0 function uart0 group uart0_grp
 
-# 2. تحقق من الـ hardware register يطابق الـ expected mux value
-# مثلًا على i.MX: IOMUXC_SW_MUX_CTL_PAD_UART0_TX في 0x020E0084
-devmem2 0x020E0084 w
-# Expected: 0x0 (ALT0 = UART) / 0x5 (ALT5 = GPIO)
+# الخطوة 2: اقرأ الـ MUX register من الـ hardware مباشرة
+# مثال Raspberry Pi: GPFSEL1 يتحكم في GPIO10-19
+devmem2 0x3F200004 w
+# Output: 0x00024000 ← bits[14:12] = 100 (ALT0 = UART) ← GPIO14 ✓
 
-# 3. تحقق من الـ GPIO direction يطابق
-cat /sys/kernel/debug/gpio | grep "gpio-5"
-```
-
-**مخطط التحقق:**
-
-```
-Kernel (pinmux-pins)          Hardware Register
-  function = uart0    <---->   MUX_CTL = 0x0 (ALT0)
-  function = gpio     <---->   MUX_CTL = 0x5 (ALT5)
-  UNCLAIMED           <---->   MUX_CTL = reset default
+# الخطوة 3: قارن
+# الـ kernel قال UART + الـ register بيقول ALT0 → متطابقين
+# الـ kernel قال UART + الـ register بيقول 000 (GPIO Input) → set_mux() فشل أو مش اتنفّذ
 ```
 
 ---
 
 #### 2. تقنيات الـ Register Dump
 
-**باستخدام `devmem2`:**
-
 ```bash
-# اقرأ register واحد (32-bit)
-devmem2 0x020E0084 w
+# devmem2 — أسهل طريقة لقراءة registers
+devmem2 0x3F200004 w    # قراءة word (32-bit)
 
-# اكتب قيمة جديدة (للاختبار فقط — بدون الـ kernel!)
-devmem2 0x020E0084 w 0x5
+# busybox devmem (بديل)
+busybox devmem 0x3F200004 32
 
-# loop لقراءة range من الـ registers
-for addr in $(seq 0x020E0000 4 0x020E00FF); do
-    printf "0x%08x: " $addr
-    devmem2 $addr w 2>/dev/null | grep -oP '0x[0-9A-Fa-f]+'
+# io utility
+io -4 -r 0x3F200004
+
+# قراءة block من الـ registers دفعة واحدة
+BASE=0x3F200000   # BCM2835 GPIO base
+for offset in 0 4 8 12 16 20; do
+    ADDR=$(printf "0x%08x" $((BASE + offset)))
+    VAL=$(devmem2 $ADDR w 2>/dev/null | awk '/Value at/ {print $NF}')
+    echo "REG[$ADDR] = $VAL"
 done
 ```
 
-**باستخدام `/dev/mem` مع Python:**
+**عبر /dev/mem وPython:**
 
-```python
+```bash
+python3 << 'EOF'
 import mmap, struct
 
+BASE = 0x3F200000  # BCM2835 GPIO base
 with open('/dev/mem', 'r+b') as f:
-    base = 0x020E0000  # IOMUXC base على i.MX6
-    size = 0x1000
-    m = mmap.mmap(f.fileno(), size, offset=base)
-    for i in range(0, 64, 4):
-        val = struct.unpack('<I', m[i:i+4])[0]
-        print(f"0x{base+i:08x}: 0x{val:08x}")
+    m = mmap.mmap(f.fileno(), 4096, offset=BASE)
+    gpfsel1 = struct.unpack('<I', m[4:8])[0]  # GPFSEL1 offset=4
+    print(f"GPFSEL1 = 0x{gpfsel1:08x}")
+    # GPIO14: bits [14:12]
+    gpio14_func = (gpfsel1 >> 12) & 0x7
+    funcs = {0:'INPUT', 1:'OUTPUT', 4:'ALT0(UART)', 5:'ALT1', 6:'ALT2', 7:'ALT3', 3:'ALT4', 2:'ALT5'}
+    print(f"GPIO14 = {funcs.get(gpio14_func, hex(gpio14_func))}")
     m.close()
+EOF
 ```
 
-**باستخدام `io` utility:**
+**جدول تفسير bits (generic 3-bit mux field — مثال BCM2835):**
 
-```bash
-# من package iotools أو busybox
-io -4 -r 0x020E0084      # قراءة 32-bit
-io -4 -w 0x020E0084 0x0  # كتابة
-```
-
-**على ARM64 مع MMIO:**
-
-```bash
-# تحقق إن /dev/mem مفعّل: CONFIG_DEVMEM=y + CONFIG_STRICT_DEVMEM=n
-grep DEVMEM /boot/config-$(uname -r)
-```
+| قيمة الـ bits | الوظيفة |
+|--------------|---------|
+| `000` | GPIO Input |
+| `001` | GPIO Output |
+| `100` | ALT0 — الـ function الأساسية للـ pin |
+| `101` | ALT1 |
+| `110` | ALT2 |
+| `111` | ALT3 |
+| `011` | ALT4 |
+| `010` | ALT5 |
 
 ---
 
-#### 3. نصائح الـ Logic Analyzer / Oscilloscope
+#### 3. Logic Analyzer وOscilloscope
 
-**للتحقق من الـ pinmux setting على مستوى الـ hardware:**
+**متى تستخدم Logic Analyzer:**
+
+- التحقق إن الـ function signal ظهر فعلاً على الـ pin بعد الـ mux activation.
+- لو الـ kernel بيقول الـ pin = UART لكن مفيش data بتطلع.
+- الكشف عن glitches أثناء الـ mux switching.
 
 ```
-السيناريو: UART0_TX (pin 5) مفروض يكون مُعرَّف كـ UART
+Setup أساسي:
+Pin Under Test ──────────── Channel 0 (Logic Analyzer)
+GND ─────────────────────── GND (Logic Analyzer)
 
-الخطوات:
-1. Connect probe to physical pin
-2. في الـ kernel: echo "uart0_grp uart0" > .../pinmux-select
-3. راقب الـ signal على الـ oscilloscope
-
-Expected:
-  ┌─┐ ┌──┐ ┌─┐
-──┘ └─┘  └─┘ └──   (UART serial data)
-
-إذا شفت:
-  ─────────────    (static high/low) → الـ mux ما اتغيرش = hardware issue
-  ─/─/─/─/─/─     (clock-like) → اتمسّك كـ GPIO output clock
+Sample Rate: >= 10x أعلى frequency متوقعة
+مثال: UART 115200 baud → sample rate >= 1.15MHz
 ```
 
-**نقاط المراقبة:**
-- راقب الـ pin أثناء `probe` للـ device (بعد `pinmux_enable_setting` مباشرة)
-- راقب الـ glitch عند switching: بعض الـ controllers بيعمل momentary float
-- استخدم `gpioset` مع GPIO function للتحقق من الـ direction
+```bash
+# sigrok/pulseview — تحليل UART signal
+sigrok-cli -d fx2lafw --config samplerate=2m \
+  --channels D0=TX,D1=RX \
+  --time 100ms \
+  -P uart:baudrate=115200:tx=TX:rx=RX \
+  -A uart=rx-data,tx-data
+```
+
+**قراءة نتيجة Oscilloscope:**
+
+- الـ signal موجود بـ voltage levels صح (3.3V) → الـ mux اشتغل
+- الـ signal موجود لكن levels غلط → مشكلة في الـ pull-up/pull-down — مش pinmux
+- الـ pin flat HIGH طول الوقت → الـ MUX register مش اتكتب صح أو الـ UART TX idle state
 
 ---
 
 #### 4. مشاكل الـ Hardware الشائعة وأنماطها في الـ Kernel Log
 
-| المشكلة الـ Hardware | النمط في الـ Kernel Log | التشخيص |
-|---------------------|------------------------|---------|
-| الـ pin مش موصول أو مقطوع | `pin_request()` بينجح لكن الـ device مش شغّال | اقرأ الـ register يدوي بـ `devmem2` |
-| الـ MUX register read-only (lock) | `set_mux()` فشل صامت أو رجّع success لكن ما اتغيرش | تحقق من الـ Security/Trustzone settings |
-| Pull-up/Pull-down غلط | الـ GPIO input بيقرأ قيمة عشوائية | راجع `pinconf` settings + `pinctrl-imx` conf registers |
-| الـ Power domain مش enabled | `pin_request()` ينجح لكن `set_mux()` يفشل بـ timeout | تفعيل الـ clock/power للـ IOMUXC أو الـ GPIO controller |
-| الـ pin مستخدم من الـ bootloader | الـ kernel يلاقي الـ pin مأخود أو بـ مفاجأة | اعمل dump للـ registers قبل وبعد الـ kernel boot |
-| Reset value غلط بعد الـ suspend/resume | الـ device بيشتغل صح بعد boot لكن يفشل بعد suspend | أضف `pinctrl_pm_select_default_state()` في الـ driver |
+| المشكلة | الـ Kernel Log Pattern | التفسير والحل |
+|---------|----------------------|--------------|
+| Pin conflict بين driverين | `pin GPIO14 already requested by uart0; cannot claim for gpiochip0:14` | دriverين بيطلبوا نفس الـ pin — راجع الـ DT |
+| `set_mux()` بيرجع 0 لكن الـ hardware مش بيستجيب | لا error | الـ driver بيكتب في address غلط، أو الـ peripheral clock متوقف |
+| HOG pin بيتعارض مع consumer driver | `pin GPIO5 already requested by pinctrl-device; cannot claim for spi0` | الـ hog في الـ DT محتجز الـ pin — عدّل الـ DT |
+| الـ mux صح لكن مفيش signal | لا error في pinmux | افحص الـ clock gating للـ peripheral والـ power domain |
+| الـ pin بيرجع لـ GPIO بعد suspend/resume | `not freeing pin... already used for some other setting` | race بين suspend/resume وـ pinmux disable/enable |
+| strict controller وGPIO request على pin مشغولة | `pin GPIO10 already requested by i2c0; cannot claim for gpiochip0:10` | الـ controller `strict=true` — الـ pin مش ممكن تتشارك |
 
 ---
 
 #### 5. الـ Device Tree Debugging
 
-**تحقق إن الـ DT يطابق الـ hardware:**
-
 ```bash
-# اعرض الـ compiled DT
-dtc -I fs /sys/firmware/devicetree/base 2>/dev/null | grep -A 20 "pinctrl"
+# عرض الـ DT المُحمَّل فعلاً
+dtc -I fs /proc/device-tree 2>/dev/null | grep -A 20 "pinctrl"
 
-# أو الـ DT source
-find /sys/firmware/devicetree/base -name "compatible" | xargs -I{} sh -c \
-    'echo "{}:"; strings {}'
+# أو باستخدام fdtdump على الـ DTB
+fdtdump /boot/bcm2835-rpi-b.dtb | grep -A 10 "uart0_pins"
 
-# تحقق من الـ pinctrl phandles
-cat /sys/firmware/devicetree/base/soc/iomuxc/compatible 2>/dev/null
-strings /sys/firmware/devicetree/base/soc/iomuxc/status 2>/dev/null
+# تحقق من الـ pinctrl properties على device معينة
+cat /proc/device-tree/soc/uart@7e201000/pinctrl-names
+
+# عرض الـ maps المسجلة — يتحقق من إن الـ DT parsing نجح
+cat /sys/kernel/debug/pinctrl/$CTRL/maps | grep uart0
 ```
 
-**تحقق من الـ pinctrl-0 mapping في الـ DT:**
-
-```bash
-# هل الـ device اتربط بالـ pinctrl state صح؟
-cat /sys/kernel/debug/pinctrl/<dev>/pinctrl-maps | grep -A5 "device"
-```
-
-**مثال DT صح مقابل خاطئ:**
+**مثال DT صح لـ UART pinmux:**
 
 ```dts
-/* صح - uart0 عنده pinctrl-0 يشاور على group صح */
+/* في الـ SoC .dtsi */
+uart0_pins: uart0-pins {
+    pins = "GPIO14", "GPIO15";
+    function = "uart0";   /* لازم يطابق get_function_name() في الـ driver */
+};
+
+/* في الـ board .dts */
 &uart0 {
     pinctrl-names = "default";
     pinctrl-0 = <&uart0_pins>;
     status = "okay";
 };
-
-&iomuxc {
-    uart0_pins: uart0-pins {
-        fsl,pins = <
-            MX6Q_PAD_UART0_TX__UART0_TX  0x1b0b1   /* الـ mux + الـ config */
-            MX6Q_PAD_UART0_RX__UART0_RX  0x1b0b1
-        >;
-    };
-};
-
-/* خاطئ - pinctrl-0 بيشاور على group تانية */
-&uart0 {
-    pinctrl-0 = <&spi0_pins>;  /* Wrong group! */
-};
 ```
 
-**للتحقق إن الـ DT node اتحمل:**
+**أخطاء DT شائعة ونتائجها:**
+
+```
+# خطأ 1: function name مختلف
+DT:     function = "uart";           /* "uart" */
+driver: get_function_name() → "uart0"  /* "uart0" */
+نتيجة في dmesg: invalid function uart in map table
+
+# خطأ 2: group name غلط
+DT:     groups = "uart0_grp";        /* underscore */
+driver: returns "uart0-grp"          /* hyphen */
+نتيجة: invalid group "uart0_grp" for function "uart0"
+
+# خطأ 3: ناسي pinctrl-names
+# → pinctrl_bind_pins() مش هتتعمل
+# → الـ device بيشتغل بالـ default hardware state من الـ bootloader
+```
 
 ```bash
-# هل الـ pinctrl node enabled؟
-cat /sys/bus/platform/devices/*/of_node/status 2>/dev/null
-
-# هل الـ maps اتحملت؟
-cat /sys/kernel/debug/pinctrl/*/pinctrl-maps 2>/dev/null | head -40
+# تحقق إن الـ pinctrl bind اشتغل للـ device
+cat /sys/kernel/debug/pinctrl/$CTRL/pinmux-pins | grep -i "uart\|spi\|i2c"
+# لو الـ device موجود → الـ DT mapping صح
+# لو مش موجود → راجع pinctrl-0 / pinctrl-names في الـ DT
 ```
 
 ---
 
 ### Practical Commands
 
-#### كل الأوامر جاهزة للنسخ
+#### 1. الفحص الشامل السريع
 
 ```bash
 #!/bin/bash
-# === pinmux-debug.sh ===
-# شغّله كـ root
-
-PCTLDEV=$(ls /sys/kernel/debug/pinctrl/ | grep -v "^pinctrl-" | head -1)
-DBGBASE="/sys/kernel/debug/pinctrl/$PCTLDEV"
-
-echo "=== [1] Pin Controller Device ==="
-echo "Using: $PCTLDEV"
+# quick-pinmux-debug.sh
+CTRL=$(ls /sys/kernel/debug/pinctrl/ | head -1)
+BASE="/sys/kernel/debug/pinctrl/$CTRL"
+echo "=== Controller: $CTRL ==="
 
 echo ""
-echo "=== [2] All Registered Functions ==="
-cat "$DBGBASE/pinmux-functions"
+echo "=== Available Functions ==="
+cat "$BASE/pinmux-functions"
 
 echo ""
-echo "=== [3] All Pins Status ==="
-cat "$DBGBASE/pinmux-pins"
+echo "=== Pin States ==="
+cat "$BASE/pinmux-pins"
 
 echo ""
-echo "=== [4] Active Pinctrl Handles ==="
-cat "$DBGBASE/pinctrl-handles" 2>/dev/null
+echo "=== Active Pins (not UNCLAIMED) ==="
+cat "$BASE/pinmux-pins" | grep -v UNCLAIMED
 
 echo ""
-echo "=== [5] Pinctrl Map Table ==="
-cat "$DBGBASE/pinctrl-maps" 2>/dev/null
+echo "=== HOG Pins ==="
+cat "$BASE/pinmux-pins" | grep HOG
 
 echo ""
-echo "=== [6] GPIO Status ==="
-cat /sys/kernel/debug/gpio 2>/dev/null
-
-echo ""
-echo "=== [7] Claimed Pins (non-UNCLAIMED) ==="
-cat "$DBGBASE/pinmux-pins" | grep -v UNCLAIMED
+echo "=== Map Table ==="
+cat "$BASE/maps" 2>/dev/null || echo "(maps not available)"
 ```
 
-```bash
-# تفعيل الـ dynamic debug للـ pinmux core
-echo 'file drivers/pinctrl/pinmux.c +p' > /sys/kernel/debug/dynamic_debug/control
-echo 'file drivers/pinctrl/core.c +p'   > /sys/kernel/debug/dynamic_debug/control
+---
 
-# مراقبة الـ kernel messages في real time
-dmesg -w | grep -E 'pinmux|pinctrl|pin '
+#### 2. البحث عن pin conflict
+
+```bash
+# ابحث عن pins مشغولة في كل الـ controllers
+cat /sys/kernel/debug/pinctrl/*/pinmux-pins | grep -v UNCLAIMED
+
+# ابحث عن pins محجوزة من device وGPIO في نفس الوقت
+cat /sys/kernel/debug/pinctrl/*/pinmux-pins | grep "GPIO"
+
+# تشخيص conflict خطوة بخطوة
+# الخطأ: "pin GPIO5 already requested by i2c0; cannot claim for spi0"
+
+# الخطوة 1: مين حاجز الـ pin؟
+cat /sys/kernel/debug/pinctrl/$CTRL/pinmux-pins | grep "pin 5"
+
+# الخطوة 2: مين يفترض يستخدمها؟
+cat /sys/kernel/debug/pinctrl/$CTRL/maps | grep "pin 5\|GPIO5"
+
+# الخطوة 3: افحص الـ DT
+dtc -I fs /proc/device-tree 2>/dev/null | grep -B5 -A5 "GPIO5\|pin 5"
+
+# الخطوة 4: هل i2c0 المفروض يكون disabled؟
+cat /proc/device-tree/soc/i2c*/status 2>/dev/null
 ```
 
+---
+
+#### 3. تفعيل dynamic debug أثناء الـ probe
+
 ```bash
-# Force mux setting (للاختبار)
-PCTLDEV=$(ls /sys/kernel/debug/pinctrl/ | grep -v "^pinctrl-" | head -1)
-echo "uart0_grp uart0" > /sys/kernel/debug/pinctrl/$PCTLDEV/pinmux-select
-echo $?  # 0 = success
+# قبل ربط الـ driver
+echo 'file drivers/pinctrl/pinmux.c +pflmt' > /sys/kernel/debug/dynamic_debug/control
+echo 'file drivers/pinctrl/core.c +pflmt' > /sys/kernel/debug/dynamic_debug/control
+
+# شغّل الـ driver
+echo "soc:pinctrl" > /sys/bus/platform/drivers/my-pinctrl/bind
+
+# تابع الـ log
+dmesg -w | grep -E "pinmux|pinctrl"
 ```
 
+---
+
+#### 4. اختبار mux يدوي عبر pinmux-select
+
 ```bash
-# تتبع pin_request باستخدام ftrace kprobe
-echo 'p:my_pin_req pin_request pin=%si' > /sys/kernel/debug/tracing/kprobe_events
-echo 1 > /sys/kernel/debug/tracing/events/kprobes/my_pin_req/enable
-echo 1 > /sys/kernel/debug/tracing/tracing_on
-# ... افعل الـ operation المشبوهة ...
-cat /sys/kernel/debug/tracing/trace | grep my_pin_req
-# cleanup
-echo 0 > /sys/kernel/debug/tracing/tracing_on
-echo '-:my_pin_req' > /sys/kernel/debug/tracing/kprobe_events
+CTRL=$(ls /sys/kernel/debug/pinctrl/ | head -1)
+BASE="/sys/kernel/debug/pinctrl/$CTRL"
+
+# اعرف الـ functions والـ groups المتاحة
+cat "$BASE/pinmux-functions"
+
+# اعمل set_mux يدوي — الصيغة: "<group> <function>"
+echo "uart0_grp uart0" > "$BASE/pinmux-select"
+
+# تحقق إن الـ setting اتطبق
+cat "$BASE/pinmux-pins" | grep -i uart
+
+# لو فشل: راجع dmesg
+dmesg | tail -10
 ```
 
+---
+
+#### 5. تفريغ الـ registers عبر devmem2
+
 ```bash
-# تحقق من الـ mux register يدوي (مثال i.MX6)
-IOMUXC_BASE=0x020E0000
+#!/bin/bash
+# dump-pinctrl-regs.sh — يفرغ block من الـ pin control registers
+BASE_ADDR=0x3F200000   # غيّر لعنوان الـ SoC بتاعك (BCM2835 GPIO base هنا)
+COUNT=8                # عدد الـ GPFSEL registers (GPFSEL0-GPFSEL5 + padding)
 
-# MUX control لـ UART1_TX_DATA (offset 0x84)
-devmem2 $((IOMUXC_BASE + 0x84)) w
-# 0x0 = ALT0 (UART)  |  0x5 = ALT5 (GPIO)
-
-# اقرأ 16 register متتالي
-for i in $(seq 0 4 60); do
-    addr=$(printf "0x%08x" $((IOMUXC_BASE + i)))
-    val=$(devmem2 $addr w 2>/dev/null | grep -oP '(?<=Read at address  0x[0-9a-f]+: )\S+')
-    echo "$addr: $val"
+echo "=== GPIO Function Select Registers ==="
+for i in $(seq 0 $((COUNT-1))); do
+    ADDR=$(printf "0x%08X" $((BASE_ADDR + i * 4)))
+    VAL=$(devmem2 $ADDR w 2>/dev/null | awk '/Value at/ {print $NF}')
+    echo "GPFSEL$i [$ADDR] = $VAL"
 done
 ```
 
+مثال output:
+
+```
+=== GPIO Function Select Registers ===
+GPFSEL0 [0x3F200000] = 0x00000000   ← GPIO0-9 كلهم inputs
+GPFSEL1 [0x3F200004] = 0x00024000   ← GPIO14,15 = ALT0 (UART)
+GPFSEL2 [0x3F200008] = 0x00000924   ← GPIO20-23 = ALT0 (PCM)
+```
+
+---
+
+#### 6. ftrace كامل على دوال الـ pinmux
+
 ```bash
-# تحقق من الـ module refcount
-cat /proc/modules | grep pinctrl
-# الـ column الثالث هو عدد الـ users
+T=/sys/kernel/tracing
+echo 0 > $T/tracing_on
+echo function > $T/current_tracer
+echo 'pin_request pin_free pinmux_enable_setting pinmux_disable_setting \
+      pinmux_request_gpio pinmux_free_gpio' > $T/set_ftrace_filter
+echo 1 > $T/tracing_on
 
-# تحقق من الـ devices المرتبطة بالـ pinctrl
-ls -la /sys/bus/platform/devices/*/driver | grep pinctrl
+# أجرِ العملية المطلوبة هنا
+echo 1 > /sys/class/gpio/export  # مثلاً
+
+echo 0 > $T/tracing_on
+cat $T/trace | grep -E "pin_request|pinmux"
+echo nop > $T/current_tracer   # cleanup دايمًا
 ```
+
+---
+
+#### 7. مراقبة الـ kernel log في real-time
 
 ```bash
-# مقارنة الـ DT مع الـ kernel state
-dtc -I fs /sys/firmware/devicetree/base 2>/dev/null | \
-    awk '/pinctrl/{found=1} found{print; if(/};/){found=0}}' | head -60
+# تفعيل dynamic debug
+echo 'file drivers/pinctrl/pinmux.c +p' > /sys/kernel/debug/dynamic_debug/control
 
-# مقابل
-cat /sys/kernel/debug/pinctrl/*/pinctrl-maps 2>/dev/null
+# مراقبة مستمرة
+dmesg -w | grep -E "pinmux core:|pin.*requested|cannot claim"
+
+# أو باستخدام journalctl
+journalctl -k -f | grep -i "pinmux\|pinctrl"
 ```
 
-#### تفسير الـ Output الشائع
+---
+
+#### 8. تفسير pinmux-pins بالتفصيل
 
 ```
-# pinmux-pins output مع strict mode:
-pin 5 (UART0_TX): device uart0 function uart0 group uart0_grp
-#   ↑ pin number  ↑ pin name    ↑ mux_owner    ↑ function    ↑ group
+pin 12 (GPIO12): device serial0 (HOG) function uart0 group uart0_grp
+│    │   │        │       │       │           │              │
+│    │   │        │       │       │           │              └─ group name
+│    │   │        │       │       │           └─ function name
+│    │   │        │       │       └─ controller هو اللي طلب الـ pin (HOG)
+│    │   │        │       └─ mux_owner = الـ device اللي طالب الـ mux
+│    │   │        └─ strict controller mode
+│    │   └─ pin name
+│    └─ pin number in global pin space
+└─ keyword "pin"
+```
 
-# pinmux-pins output بدون strict mode:
-pin 5 (UART0_TX): uart0 (GPIO UNCLAIMED) function uart0 group uart0_grp
-#                  ↑mux_owner ↑gpio_owner=none
+```
+pin 20 (GPIO20): (MUX UNCLAIMED) gpiochip0:20
+                  └─ مفيش function طلب الـ pin
+                                   └─ الـ GPIO subsystem طالب الـ pin
+```
 
-# pin conflict في dmesg:
-# pinmux core: pin GPIO5 already requested by uart0; cannot claim for spi0
-#   ↑ اتنين drivers بيطلبوا نفس الـ pin — راجع الـ DT
+```
+pin 25 (GPIO25): UNCLAIMED
+                  └─ الـ pin حر تماماً — مش محجوز لأي function أو GPIO
 ```
 ## Phase 6: سيناريوهات من الحياة العملية
 
 ---
 
-### السيناريو الأول: Industrial Gateway على RK3562 — UART3 مش شغال بعد bring-up
+### السيناريو 1: Industrial Gateway على RK3562 — UART مش شغال بعد bring-up
 
 #### العنوان
-**الـ UART3 مش بيظهر في `/dev/` على industrial gateway بـ RK3562**
+**الـ UART2 مش بيظهر على gateway صناعي بعد تحويل الـ pinmux**
 
 #### السياق
-شركة بتبني industrial gateway بيربط sensors بـ Modbus RTU. الـ SoC هو **RK3562**، والـ UART3 المفروض يتوصل بـ RS-485 transceiver. الـ board جديدة، أول مرة بيتعمل لها bring-up.
+بنبني industrial gateway على RK3562 للتحكم في معدات المصنع. الـ gateway محتاج UART2 لاتصال RS-485 مع PLCs. الـ board جديدة وعملنا bring-up من zero.
 
 #### المشكلة
-الـ driver `serial8250` بيطلع في `dmesg` لكن `/dev/ttyS3` مش بيظهر. الـ application بتفشل لما بتحاول تفتح الـ port.
-
-```bash
-# dmesg بيدي:
-[    2.341] pinctrl core: pin uart3-tx already requested by fe640000.uart; cannot claim for fe650000.uart
+بعد ما حطينا الـ device tree وبوتنا الكيرنل، `ttyS2` مش بيظهر خالص، وفي الـ dmesg:
+```
+pinmux core: pin-45 (uart2-tx): invalid function uart2 in map table
 ```
 
 #### التحليل
-الـ error جاي من `pin_request()` في `pinmux.c`:
+الخطأ جاي من `pinmux_map_to_setting()`:
 
 ```c
-/* في pin_request() — السطر 152-158 */
+ret = pinmux_func_name_to_selector(pctldev, map->data.mux.function);
+if (ret < 0) {
+    dev_err(pctldev->dev, "invalid function %s in map table\n",
+        map->data.mux.function);
+    return ret;
+}
+```
+
+**الـ `pinmux_func_name_to_selector()`** بتلف على كل الـ functions المسجلة في الـ controller وتقارن الأسماء:
+
+```c
+while (selector < nfuncs) {
+    const char *fname = ops->get_function_name(pctldev, selector);
+    if (fname && !strcmp(function, fname))
+        return selector;
+    selector++;
+}
+return -EINVAL; /* ما لاقتش */
+```
+
+يعني الـ function name اللي في الـ DT مش متطابق مع اللي سجله driver الـ RK3562 pinctrl.
+
+نشوف debugfs:
+```bash
+cat /sys/kernel/debug/pinctrl/pinctrl-rk3562/pinmux-functions
+```
+Output:
+```
+function 0: uart2m0, groups = [ uart2m0-xfer ]
+function 1: uart2m1, groups = [ uart2m1-xfer ]
+```
+
+الـ function الصح اسمه `uart2m0` مش `uart2`.
+
+#### الحل
+نصلح الـ device tree:
+
+```dts
+/* خطأ */
+pinctrl-0 = <&uart2_pins>;
+&uart2_pins {
+    function = "uart2";   /* ده غلط */
+    groups = "uart2m0-xfer";
+};
+
+/* صح */
+&uart2 {
+    pinctrl-names = "default";
+    pinctrl-0 = <&uart2m0_xfer>;
+    status = "okay";
+};
+
+&pinctrl {
+    uart2 {
+        uart2m0_xfer: uart2m0-xfer {
+            rockchip,pins =
+                <1 RK_PD0 4 &pcfg_pull_up>,   /* TX */
+                <1 RK_PD1 4 &pcfg_pull_none>;  /* RX */
+        };
+    };
+};
+```
+
+نتحقق بعد إصلاح:
+```bash
+cat /sys/kernel/debug/pinctrl/pinctrl-rk3562/pinmux-pins | grep -i uart
+# pin 45 (gpio1-d0): device uart2: uart2m0 (uart2m0-xfer)
+```
+
+#### الدرس المستفاد
+**الـ `pinmux_func_name_to_selector()`** بتعمل string comparison حرفية. أي فرق في الاسم بين الـ DT والـ driver بيرجع `-EINVAL`. دايمًا استخدم:
+```bash
+cat /sys/kernel/debug/pinctrl/<controller>/pinmux-functions
+```
+الأول عشان تعرف الأسماء الصح قبل ما تكتب الـ DT.
+
+---
+
+### السيناريو 2: Android TV Box على Allwinner H616 — conflict بين SPI وGPIO
+
+#### العنوان
+**الـ SPI flash مش بيشتغل وبيرجع "pin already requested"**
+
+#### السياق
+Android TV box على Allwinner H616. البورد بتستخدم SPI0 لـ NOR flash لتخزين configuration، ونفس الوقت عندنا GPIO expander بيستخدم بعض الـ pins دي عشان يتحكم في LED status.
+
+#### المشكلة
+الـ SPI driver بيفشل في probe وفي dmesg:
+```
+pinmux core: pin-34 (PC2): device spi0 already requested by gpio-leds; cannot claim for spi0
+```
+
+#### التحليل
+الخطأ بيجي من `pin_request()`. الـ pin بيتأكد إن مفيش owner تاني بيمسكه:
+
+```c
 if ((!gpio_range || ops->strict) && !gpio_ok &&
     desc->mux_usecount && strcmp(desc->mux_owner, owner)) {
     dev_err(pctldev->dev,
@@ -2395,169 +2714,162 @@ if ((!gpio_range || ops->strict) && !gpio_ok &&
 }
 ```
 
-الـ `mux_usecount` للـ pin مش صفر — يعني pin اتطلب من device تانية. السبب: في الـ DT، فيه node تاني بيستخدم نفس الـ pin group. الـ `pinmux_enable_setting()` بتلف على كل الـ pins في الـ group وبتعمل `pin_request()` لكل واحدة — لو أي حاجة request نفس الـ pin قبل كده وأصحابها ما فرّغوش، الـ call بتفشل.
+الـ `gpio-leds` driver طلب PC2 كـ GPIO عشان يتحكم في LED. بعدين لما SPI driver جا يطلب نفس الـ pin جزء من group، `desc->mux_owner` مش NULL وهو مش نفس الـ owner فبيفشل.
 
-```c
-/* في pinmux_enable_setting() — السطر 461-476 */
-for (i = 0; i < num_pins; i++) {
-    ret = pin_request(pctldev, pins[i], setting->dev_name, NULL);
-    if (ret) {
-        /* ... error handling ... */
-        goto err_pin_request;
-    }
-}
+نتحقق من الـ state:
+```bash
+cat /sys/kernel/debug/pinctrl/pio/pinmux-pins | grep PC2
+# pin 34 (PC2): device gpio-leds (GPIO UNCLAIMED)
 ```
 
-المشكلة الفعلية: في الـ DT، نودين بيستخدموا نفس الـ pinmux group بالغلط:
-
-```dts
-/* غلط — نفس الـ pins في اتنين nodes */
-&uart2 {
-    pinctrl-0 = <&uart3m0_xfer>;  /* غلط! uart2 بياخد pins بتاعة uart3 */
-    status = "okay";
-};
-
-&uart3 {
-    pinctrl-0 = <&uart3m0_xfer>;
-    status = "okay";
-};
+بعدين لما SPI حاول:
+```bash
+cat /sys/kernel/debug/pinctrl/pio/pinmux-pins | grep PC2
+# pin 34 (PC2): gpio-leds spi0 CONFLICT
 ```
+
+الـ H616 pinctrl driver بيعمل `ops->strict = true`، يعني مفيش sharing خالص.
 
 #### الحل
-```bash
-# الخطوة الأولى: اشوف مين بيمسك الـ pins
-cat /sys/kernel/debug/pinctrl/pinctrl-rockchip-pinctrl/pinmux-pins | grep uart3
-# output: pin 32 (uart3-tx): device fe640000.uart function uart2 group uart2m0-xfer
-
-# الخطوة التانية: اشوف الـ DT المحمّل
-cat /sys/kernel/debug/pinctrl/pinctrl-rockchip-pinctrl/pinmux-functions | grep uart
-```
-
-تصحيح الـ DT:
-```dts
-/* صح — كل uart بـ pins خاصة بيه */
-&uart2 {
-    pinctrl-0 = <&uart2m0_xfer>;  /* pins بتاعة uart2 صح */
-    status = "okay";
-};
-
-&uart3 {
-    pinctrl-0 = <&uart3m0_xfer>;  /* pins بتاعة uart3 صح */
-    status = "okay";
-};
-```
-
-#### الدرس المستفاد
-الـ `pin_request()` بتحفظ `mux_owner` في `desc->mux_owner` وبتزود `mux_usecount`. لما يجي owner تاني يطلب نفس الـ pin، الكود بيعمل `strcmp(desc->mux_owner, owner)` — لو مختلفين، error فوري. دايما افحص `/sys/kernel/debug/pinctrl/` الأول قبل ما تبدأ تـ debug الـ driver نفسه.
-
----
-
-### السيناريو الثاني: Android TV Box على Allwinner H616 — GPIO وـ SPI بيتعاركوا
-
-#### العنوان
-**الـ SPI flash مش بيشتغل وـ GPIO بيعمل conflict على Allwinner H616**
-
-#### السياق
-Android TV box بـ **Allwinner H616**. الـ SPI0 متوصل بـ NOR flash بيحمل bootloader backup. الـ engineer بيحاول يستخدم نفس الـ pins كـ GPIO للـ factory test mode — بيحط jumper ويشوف لو الـ pin low → يدخل test mode.
-
-#### المشكلة
-لما الـ SPI driver بيشتغل، محاولة تعمل `gpio_request()` على نفس الـ pin بتفشل بـ `-EBUSY`. لما بيعمل العكس ويطلب الـ GPIO الأول، الـ SPI بيفشل.
-
-```bash
-[    3.102] spi-sun6i 4025000.spi: could not request pin 68 (PC4) from group spi0-cs0 on device 300b000.pinctrl
-[    3.103] pinctrl core: pin PC4 already requested by spi0; cannot claim for gpiochip0:68
-```
-
-#### التحليل
-الـ H616 pinctrl driver بيستخدم `ops->strict = true`. لما `strict` شغال، الـ `pinmux_can_be_used_for_gpio()` بتتصرف مختلف:
-
-```c
-/* في pinmux_can_be_used_for_gpio() — السطر 105-108 */
-if (ops->strict && desc->mux_usecount && !func_is_gpio)
-    return false;   /* الـ pin متحجز لـ function مش GPIO */
-
-return !(ops->strict && !!desc->gpio_owner);
-```
-
-وفي `pin_request()` لما الـ GPIO بيحاول يحجز:
-
-```c
-/* السطر 160-165 */
-if ((gpio_range || ops->strict) && !gpio_ok && desc->gpio_owner) {
-    dev_err(pctldev->dev,
-        "pin %s already requested by %s; cannot claim for %s\n",
-        desc->name, desc->gpio_owner, owner);
-    goto out;
-}
-```
-
-في الـ strict mode، مفيش sharing خالص. الـ SPI حجز الـ pin أول → الـ GPIO request بتفشل قطعي.
-
-الـ `gpio_ok` بتتحدد من `ops->function_is_gpio`:
-```c
-/* السطر 144-150 */
-if (mux_setting) {
-    if (ops->function_is_gpio)
-        gpio_ok = ops->function_is_gpio(pctldev, mux_setting->func);
-} else {
-    gpio_ok = true;  /* مفيش mux_setting = GPIO مقبول */
-}
-```
-
-#### الحل
-الـ solution الصح: استخدم SPI device نفسه للـ CS pin بدل GPIO مباشر، أو استخدم pin تاني للـ factory test:
+نراجع الـ schematic، PC2 هو SPI0-MISO. الـ LED محتاج pin مختلف. نغير الـ LED لـ PC8 اللي مش مستخدمة:
 
 ```dts
-/* استخدم pin منفصل للـ factory test */
-factory_test: factory-test {
-    compatible = "gpio-keys";
-    test-button {
-        gpios = <&pio 2 8 GPIO_ACTIVE_LOW>;  /* PC8 — pin منفصل */
-        label = "factory-test";
+/* قبل */
+leds {
+    compatible = "gpio-leds";
+    status-led {
+        gpios = <&pio 2 2 GPIO_ACTIVE_HIGH>; /* PC2 - conflict */
+    };
+};
+
+/* بعد */
+leds {
+    compatible = "gpio-leds";
+    status-led {
+        gpios = <&pio 2 8 GPIO_ACTIVE_HIGH>; /* PC8 - free */
     };
 };
 ```
 
-لو لازم تستخدم نفس الـ pin، استخدم pinctrl states:
-
-```dts
-&spi0 {
-    pinctrl-names = "default", "gpio-mode";
-    pinctrl-0 = <&spi0_pins>;       /* SPI function */
-    pinctrl-1 = <&spi0_gpio_pins>;  /* نفس الـ pins كـ GPIO */
-};
-```
-
+لو مش عارفين أي pins حرة:
 ```bash
-# للـ debug: شوف الـ strict mode وحالة الـ pins
-cat /sys/kernel/debug/pinctrl/300b000.pinctrl/pinmux-pins
-# Format: pin (name): mux_owner|gpio_owner (strict)
+cat /sys/kernel/debug/pinctrl/pio/pinmux-pins | grep UNCLAIMED | head -20
 ```
 
 #### الدرس المستفاد
-الـ `strict` flag في `pinmux_ops` بتغير كل الـ conflict resolution logic. في الـ strict controllers، الـ pin عنده owner واحد بس في أي وقت — إما mux function أو GPIO، مش الاتنين. لازم تعرف لو الـ SoC controller بتاعك strict ولا لأ قبل ما تصمم الـ hardware.
+**`pin_request()`** بتسجل الـ owner في `desc->mux_owner` أو `desc->gpio_owner`. مع `strict = true`، حتى لو الـ pin معمول mux لـ GPIO، مش ممكن حد تاني يطلبه. راجع الـ schematic دايمًا قبل تحديد الـ GPIO للـ LEDs والـ peripherals، وما تعتمدش على "بيشتغل في الـ reference board".
 
 ---
 
-### السيناريو الثالث: IoT Sensor Board على STM32MP1 — Pinmux Driver مش بيـ probe
+### السيناريو 3: IoT Sensor على STM32MP1 — الـ I2C بيتعطل بشكل عشوائي في production
 
 #### العنوان
-**الـ STM32 pinctrl driver بيفشل في probe بـ `-EINVAL` والسبب مش واضح**
+**الـ I2C3 بيتعطل بعد runtime PM cycle على STM32MP157**
 
 #### السياق
-IoT sensor board بـ **STM32MP1**. الـ engineer بيكتب custom pinctrl driver لـ FPGA-based pin controller مربوط بالـ SoC. الـ driver بيـ probe بالـ DT لكن بيرجع `-EINVAL` فوراً.
+IoT environmental sensor بيقيس temperature وhumidity كل 30 ثانية. الـ MCU بيدخل low-power sleep بين القراءات. المشكلة اتظهرت بعد 3 أيام من testing المتواصل.
 
 #### المشكلة
-```bash
-[    1.823] pinctrl core: pinmux ops lacks necessary functions
-[    1.824] stm32mp1-custom-pinctrl: probe failed: -22
+بعد كذا دورة sleep/wake، الـ I2C3 بيتعطل ومش بيصحى. الـ log:
+```
+i2c i2c-3: timeout waiting for bus ready
+pinmux core: not freeing pin 89 (PD13) as part of deactivating group i2c3-grp - it is already used for some other setting
 ```
 
 #### التحليل
-الـ error جاي من `pinmux_check_ops()` في أول ما الـ pinctrl device بيتسجل:
+الرسالة دي بتيجي من `pinmux_disable_setting()`:
 
 ```c
-/* في pinmux_check_ops() — السطر 43-50 */
+scoped_guard(mutex, &desc->mux_lock)
+    is_equal = (desc->mux_setting == &(setting->data.mux));
+
+if (is_equal) {
+    pin_free(pctldev, pins[i], NULL);
+} else {
+    dev_warn(pctldev->dev,
+         "not freeing pin %d (%s) as part of deactivating group %s"
+         " - it is already used for some other setting",
+         pins[i], desc->name, gname);
+}
+```
+
+الـ check بيقارن pointer: `desc->mux_setting == &(setting->data.mux)`. لو الـ setting object اتحركت في الـ memory أو اتعمل لها reallocate (مثلاً بسبب runtime PM قام بـ devm reallocation)، الـ pointer comparison هتفشل حتى لو الـ content نفسه.
+
+لما الـ PM subsystem بيعمل `pinctrl_select_state("sleep")` فبيطلب enable لـ I2C sleep state، وبعدين لما بيصحى بيحاول `pinctrl_select_state("default")` — لكن الـ disable للـ sleep state فشل فالـ pin فضل محجوز للـ sleep config، وبعدين الـ default state ما اتطبقتش صح.
+
+نشوف الحالة لحظة الـ bug:
+```bash
+cat /sys/kernel/debug/pinctrl/soc:pin-controller/pinmux-pins | grep PD13
+# pin 89 (PD13): device i2c3-sleep (HOG) function i2c3 group i2c3-grp
+```
+
+المفروض يكون default مش sleep بعد الـ wake.
+
+#### الحل
+نضيف `pinctrl-1` لحالة الـ sleep بـ pins محايدة (input بدون function):
+
+```dts
+&i2c3 {
+    pinctrl-names = "default", "sleep";
+    pinctrl-0 = <&i2c3_pins_default>;
+    pinctrl-1 = <&i2c3_pins_sleep>;
+    status = "okay";
+};
+
+&pinctrl {
+    i2c3_pins_default: i2c3-default {
+        pins = "PD12", "PD13";
+        function = "i2c3";
+        bias-disable;
+    };
+
+    i2c3_pins_sleep: i2c3-sleep {
+        /* في الـ sleep: خلي الـ pins input بدون function */
+        pins = "PD12", "PD13";
+        function = "gpio";
+        bias-pull-up;
+        input-enable;
+    };
+};
+```
+
+ونتأكد إن الـ PM callbacks بتستخدم `pinctrl_pm_select_sleep_state()` و `pinctrl_pm_select_default_state()` بالترتيب الصح.
+
+#### الدرس المستفاد
+**`pinmux_disable_setting()`** بتعمل pointer comparison مش value comparison. لو الـ setting object بيتغير عنوانه في الـ memory، الـ disable بيفشل صامت وبيسيب الـ pin محجوز. دايمًا حدد `pinctrl-names = "default", "sleep"` لأي peripheral بيدخل power management cycles.
+
+---
+
+### السيناريو 4: Automotive ECU على i.MX8MP — الـ CAN bus مش بيشتغل بعد driver load
+
+#### العنوان
+**الـ `set_mux` بيرجع error بعد ما `pinmux_check_ops` نجح على i.MX8MP**
+
+#### السياق
+Automotive ECU بيتحكم في نظام الفرامل. البورد على i.MX8MP. محتاجين CAN FD على `flexcan1`. الـ kernel بيبوت لكن `can0` مش بيظهر.
+
+#### المشكلة
+```
+imx8mp-pinctrl: does not support mux function
+flexcan 30bf0000.can: pinctrl: Error applying setting 1: -22
+```
+
+أو في حالة تانية:
+```
+pinmux core: pinmux ops lacks necessary functions
+```
+
+#### التحليل
+الـ error الأول بيجي من `pinmux_map_to_setting()`:
+```c
+if (!pmxops) {
+    dev_err(pctldev->dev, "does not support mux function\n");
+    return -EINVAL;
+}
+```
+
+الـ error التاني من `pinmux_check_ops()`:
+```c
 if (!ops ||
     !ops->get_functions_count ||
     !ops->get_function_name ||
@@ -2568,711 +2880,578 @@ if (!ops ||
 }
 ```
 
-الأربعة functions دول **إجبارية** — لو أي واحدة `NULL`، الـ registration بتفشل. الـ engineer نسي يـ implement `get_function_groups`:
-
-```c
-/* كود الـ driver الغلط */
-static const struct pinmux_ops custom_pmxops = {
-    .get_functions_count = custom_get_functions_count,
-    .get_function_name   = custom_get_function_name,
-    /* get_function_groups ناسي! */
-    .set_mux             = custom_set_mux,
-};
-```
-
-بعد كده، حتى لو الـ ops كاملة، في check تاني:
-
-```c
-/* السطر 52-62 */
-nfuncs = ops->get_functions_count(pctldev);
-while (selector < nfuncs) {
-    const char *fname = ops->get_function_name(pctldev, selector);
-    if (!fname) {
-        dev_err(pctldev->dev,
-            "pinmux ops has no name for function%u\n", selector);
-        return -EINVAL;
-    }
-    selector++;
-}
-```
-
-يعني حتى لو `get_function_name` موجودة، لو رجعت `NULL` لأي selector، الـ registration بتفشل برضو.
-
-#### الحل
-```c
-/* كود صح */
-static const char * const custom_uart_groups[] = { "uart0_grp" };
-static const char * const custom_spi_groups[]  = { "spi0_grp", "spi1_grp" };
-
-static const struct pinfunction custom_functions[] = {
-    PINCTRL_PINFUNCTION("uart0", custom_uart_groups, ARRAY_SIZE(custom_uart_groups)),
-    PINCTRL_PINFUNCTION("spi0",  custom_spi_groups,  ARRAY_SIZE(custom_spi_groups)),
-};
-
-static int custom_get_function_groups(struct pinctrl_dev *pctldev,
-                                      unsigned int selector,
-                                      const char * const **groups,
-                                      unsigned int * const ngroups)
-{
-    /* لازم يـ return groups لكل function */
-    *groups  = custom_functions[selector].groups;
-    *ngroups = custom_functions[selector].ngroups;
-    return 0;
-}
-
-static const struct pinmux_ops custom_pmxops = {
-    .get_functions_count = custom_get_functions_count,
-    .get_function_name   = custom_get_function_name,
-    .get_function_groups = custom_get_function_groups,  /* الـ missing function */
-    .set_mux             = custom_set_mux,
-};
-```
+نشوف الـ driver الـ i.MX8MP pinctrl driver بيسجل الـ ops:
 
 ```bash
-# للـ verification بعد الـ fix
-cat /sys/kernel/debug/pinctrl/custom-pinctrl/pinmux-functions
-# function 0: uart0, groups = [ uart0_grp ]
-# function 1: spi0, groups = [ spi0_grp spi1_grp ]
+cat /sys/kernel/debug/pinctrl/30330000.iomuxc/pinmux-functions | grep can
+# function 12: flexcan1, groups = [ flexcan1grp ]
+# function 13: flexcan2, groups = [ flexcan2grp ]
+```
+
+الـ functions موجودة! إذن المشكلة مش في الـ check. نشوف الـ DT أكتر:
+
+```bash
+cat /sys/kernel/debug/pinctrl/30330000.iomuxc/pinmux-pins | grep can
+# (nothing)
+```
+
+يعني الـ pinmux_enable_setting اتنفذت لكن `set_mux` فشل. نشوف الـ i.MX8MP driver:
+
+```c
+/* الـ set_mux function في driver الـ imx */
+static int imx_pmx_set(struct pinctrl_dev *pctldev, unsigned selector,
+                       unsigned group)
+{
+    /* بيكتب في IOMUXC registers */
+    /* لو الـ clock للـ IOMUXC مش enabled بيفشل */
+}
+```
+
+الـ IOMUXC clock مش معمله enable قبل الـ pinctrl registration.
+
+#### الحل
+نتأكد إن الـ IOMUXC clock enabled في الـ DT:
+
+```dts
+iomuxc: pinctrl@30330000 {
+    compatible = "fsl,imx8mp-iomuxc";
+    reg = <0x30330000 0x10000>;
+    /* لازم الـ clock يكون enabled */
+    clocks = <&clk IMX8MP_CLK_IOMUXC>;
+    clock-names = "iomuxc";
+};
+```
+
+وفي بعض الـ boards نحتاج نضيف `assigned-clocks` لو الـ default مش كافي.
+
+نتحقق:
+```bash
+# نشوف لو الـ clock شغال
+cat /sys/kernel/debug/clk/clk_summary | grep iomuxc
+
+# نشوف الـ pinmux بعد الإصلاح
+cat /sys/kernel/debug/pinctrl/30330000.iomuxc/pinmux-pins | grep can
+# pin 120 (GPIO5_IO9): device flexcan1 function flexcan1 group flexcan1grp
 ```
 
 #### الدرس المستفاد
-الـ `pinmux_check_ops()` هي الـ gatekeeper الأولى — بتتأكد إن الأربعة ops الأساسية موجودة وإن كل function عنده اسم. لما بتكتب custom pinctrl driver، الأربعة دول **required**، مفيش optional فيهم. استخدم `CONFIG_GENERIC_PINMUX_FUNCTIONS` لو ممكن عشان `pinmux_generic_*` functions تعمل الشغل ده أوتوماتيك.
+**`pinmux_check_ops()`** بتتحقق من وجود الـ function pointers فقط. لو الـ `set_mux` موجودة لكن بتفشل internally (مثلاً clock مش enabled، أو register مش accessible)، الـ check بتنجح لكن الـ `pinmux_enable_setting()` بتفشل وقت `ops->set_mux()`. في الـ automotive context، اهتم بـ power domains وclocks قبل الـ pinctrl.
 
 ---
 
-### السيناريو الرابع: Automotive ECU على i.MX8 — Pinmux State Switching بيعمل Kernel Warning
+### السيناريو 5: Custom Board على AM62x — GPIO request يفشل بعد HDMI enable
 
 #### العنوان
-**`WARN_ON` في `pin_free()` أثناء runtime pinmux switching على i.MX8**
+**GPIO لـ reset line بيفشل بعد ما HDMI يشتغل على AM62x**
 
 #### السياق
-Automotive ECU بـ **i.MX8MP**. الـ system بيعمل dynamic switching لـ pinmux states — الـ CAN bus pins بيتحولوا لـ GPIO في الـ sleep mode عشان يقلل الـ current consumption. الـ switching بيحصل بـ `pinctrl_select_state()`.
+Custom board للـ digital signage على TI AM62x. البورد بتعمل display على HDMI وبيتحكم في display controller خارجي عن طريق GPIO reset line. المشكلة بتظهر بعد enable الـ HDMI.
 
 #### المشكلة
-```bash
-[  142.331] WARNING: CPU: 2 PID: 847 at drivers/pinctrl/pinmux.c:252
-[  142.331] pinmux: pin is not freed more times than allocated
-[  142.331] Call trace:
-[  142.331]  pin_free+0x7c/0x120
-[  142.331]  pinmux_disable_setting+0x94/0x110
 ```
+gpio gpiochip0: (pinctrl-am62x):
+pinmux core: pin GPIO0_15 already requested by cdns_hdmi;
+cannot claim for gpiochip0:15
+```
+
+الـ display controller reset مش بيشتغل وال HDMI screen مش بيبان.
 
 #### التحليل
-الـ `WARN_ON` ده في `pin_free()`:
+الـ AM62x pinctrl driver بيستخدم `ops->strict = true`. نفهم الـ flow:
+
+أول حاجة، `pinmux_request_gpio()` بتتنفذ عشان الـ GPIO reset line:
 
 ```c
-/* في pin_free() — السطر 248-256 */
-scoped_guard(mutex, &desc->mux_lock) {
-    if (!gpio_range) {
-        /*
-         * A pin should not be freed more times than allocated.
-         */
-        if (WARN_ON(!desc->mux_usecount))
-            return NULL;
-        desc->mux_usecount--;
-        if (desc->mux_usecount)
-            return NULL;
-    }
-    /* ... */
+int pinmux_request_gpio(struct pinctrl_dev *pctldev,
+                        struct pinctrl_gpio_range *range,
+                        unsigned int pin, unsigned int gpio)
+{
+    const char *owner;
+    int ret;
+
+    owner = kasprintf(GFP_KERNEL, "%s:%d", range->name, gpio);
+    if (!owner)
+        return -ENOMEM;
+
+    ret = pin_request(pctldev, pin, owner, range);
+    ...
 }
 ```
 
-الـ `mux_usecount` وصل صفر قبل الـ free. السبب: الـ `pinmux_disable_setting()` بتتحقق من `mux_setting`:
+جوا `pin_request()`، مع `ops->strict`:
 
 ```c
-/* في pinmux_disable_setting() — السطر 551-564 */
-scoped_guard(mutex, &desc->mux_lock)
-    is_equal = (desc->mux_setting == &(setting->data.mux));
-
-if (is_equal) {
-    pin_free(pctldev, pins[i], NULL);  /* بتعمل free بس لو الـ setting هي اللي حاطة الـ mux */
-} else {
-    dev_warn(pctldev->dev,
-             "not freeing pin %d (%s) as part of deactivating group %s"
-             " - it is already used for some other setting",
-             pins[i], desc->name, gname);
+if ((gpio_range || ops->strict) && !gpio_ok && desc->gpio_owner) {
+    dev_err(pctldev->dev,
+        "pin %s already requested by %s; cannot claim for %s\n",
+        desc->name, desc->gpio_owner, owner);
+    goto out;
 }
 ```
 
-المشكلة: الـ engineer عمل double-disable لنفس الـ setting بالغلط — call `pinctrl_select_state()` لـ sleep state مرتين متتاليتين بدون state tracking. الـ مرة الأولى عملت free صح، الـ مرة التانية لقت `mux_usecount = 0` → WARN_ON.
+الـ HDMI driver طلب GPIO0_15 كـ `gpio_owner` عشان HDMI hot-plug detection. بعدين الـ display controller driver حاول يطلب نفس الـ pin كـ reset GPIO وفشل.
 
-الـ flow المشكلة:
+نشوف الـ state:
+```bash
+cat /sys/kernel/debug/pinctrl/pinctrl-am62x/pinmux-pins | grep GPIO0_15
+# pin 15 (GPIO0_15): GPIO gpiochip0:15 (strict)
 ```
-pinctrl_select_state(sleep) → pinmux_disable_setting() → pin_free() → mux_usecount: 1→0
-pinctrl_select_state(sleep) → pinmux_disable_setting() → pin_free() → mux_usecount: 0 → WARN!
+
+نشوف الـ HDMI DT:
+```bash
+grep -r "gpio0_15\|gpio0 15" /proc/device-tree/
 ```
+
+لاقينا إن الـ HDMI driver بيستخدم GPIO0_15 كـ HPD (hot-plug detect) pin.
 
 #### الحل
+
+خيارين:
+
+**الخيار الأول**: نغير الـ reset GPIO لـ pin مختلف (أسهل لو ممكن hardware):
+
+```dts
+/* قبل */
+&display_controller {
+    reset-gpios = <&gpio0 15 GPIO_ACTIVE_LOW>; /* conflict مع HDMI HPD */
+};
+
+/* بعد */
+&display_controller {
+    reset-gpios = <&gpio0 22 GPIO_ACTIVE_LOW>; /* pin حر */
+};
+```
+
+**الخيار الثاني**: لو مش ممكن تغيير الـ hardware، نتحقق من `pinmux_can_be_used_for_gpio()`:
+
 ```c
-/* في الـ ECU power management driver */
-static int ecu_can_suspend(struct device *dev)
+bool pinmux_can_be_used_for_gpio(struct pinctrl_dev *pctldev, unsigned int pin)
 {
-    struct ecu_priv *priv = dev_get_drvdata(dev);
-
-    /* تأكد مش بتعمل switch لنفس الـ state */
-    if (priv->current_pinctrl_state == PINCTRL_STATE_SLEEP)
-        return 0;  /* already in sleep, skip */
-
-    int ret = pinctrl_select_state(priv->pctl, priv->sleep_state);
-    if (!ret)
-        priv->current_pinctrl_state = PINCTRL_STATE_SLEEP;
-
-    return ret;
-}
-
-static int ecu_can_resume(struct device *dev)
-{
-    struct ecu_priv *priv = dev_get_drvdata(dev);
-
-    if (priv->current_pinctrl_state == PINCTRL_STATE_DEFAULT)
-        return 0;
-
-    int ret = pinctrl_select_state(priv->pctl, priv->default_state);
-    if (!ret)
-        priv->current_pinctrl_state = PINCTRL_STATE_DEFAULT;
-
-    return ret;
+    ...
+    /* لو ops->strict والـ gpio_owner موجود: return false */
+    return !(ops->strict && !!desc->gpio_owner);
 }
 ```
 
+مع `strict = true`، مفيش حل غير إن الـ HDMI يحرر الـ pin أول. نضيف ordering في الـ DT:
+
+```dts
+/* نخلي الـ display controller يـ probe بعد الـ HDMI */
+&display_controller {
+    /* نضيف dependency */
+    power-domains = <&hdmi_domain>;
+    /* أو نستخدم defer probe mechanism */
+};
+```
+
+أو الحل الأنظف: نستخدم dedicated HPD pin للـ HDMI مختلف عن الـ reset.
+
+نتحقق من النتيجة:
 ```bash
-# للـ monitoring أثناء الـ switching
-watch -n 0.5 'cat /sys/kernel/debug/pinctrl/30330000.pinctrl/pinmux-pins | grep can'
+# بعد الإصلاح
+cat /sys/kernel/debug/pinctrl/pinctrl-am62x/pinmux-pins | grep -E "GPIO0_15|GPIO0_22"
+# pin 15 (GPIO0_15): GPIO gpiochip0:15 (strict) [HDMI HPD]
+# pin 22 (GPIO0_22): GPIO gpiochip0:22 (strict) [display reset]
 ```
 
 #### الدرس المستفاد
-الـ `mux_usecount` في `pin_desc` هو reference counter دقيق. `pinmux_enable_setting()` بتزوده، `pin_free()` بتنقصه. الـ WARN_ON عند `mux_usecount == 0` هو protection من double-free. في الـ runtime PM code، دايما track الـ current state عشان تمنع double-disable. الـ kernel مش بيحفظ "current state" بالنيابة عنك في الـ pinctrl layer.
-
----
-
-### السيناريو الخامس: Custom Board على AM62x — debugfs لـ Manual Pinmux Override أثناء Bringup
-
-#### العنوان
-**استخدام `pinmux-select` debugfs لاختبار HDMI pins على AM62x بدون DT recompile**
-
-#### السياق
-Engineer بيعمل bring-up لـ custom display board بـ **TI AM62x**. الـ HDMI controller بيتشكى إن الـ I2C DDC pins مش شغالة. الـ DT معمول بشكل صح نظرياً، لكن الـ engineer عايز يـ verify إن الـ pinmux hardware بيستجاوب صح قبل ما يضيع وقت في الـ DT.
-
-#### المشكلة
-```bash
-[    5.441] cdns-mhdp8546 imx8mq-hdmi: failed to read EDID
-[    5.441] cdns-mhdp8546 imx8mq-hdmi: HPD lost
-# الـ HDMI مش بيشوف الـ monitor
-```
-
-#### التحليل
-الـ `pinmux-select` debugfs file بيسمح بـ manual override. الـ implementation في `pinmux_select_write()`:
-
-```c
-/* في pinmux_select_write() — السطر 715-788 */
-static ssize_t pinmux_select_write(struct file *file, const char __user *user_buf,
-                                   size_t len, loff_t *ppos)
-{
-    /* format: "group_name function_name" */
-    buf = memdup_user_nul(user_buf, len);
-
-    gname = strstrip(buf);          /* strip whitespace */
-    /* find separator (space) between group and function */
-    for (fname = gname; !isspace(*fname); fname++) { ... }
-    *fname = '\0';
-    fname = skip_spaces(fname + 1); /* skip extra spaces */
-
-    /* lookup function selector */
-    ret = pinmux_func_name_to_selector(pctldev, fname);
-    fsel = ret;
-
-    /* verify group belongs to this function */
-    ret = pmxops->get_function_groups(pctldev, fsel, &groups, &num_groups);
-    ret = match_string(groups, num_groups, gname);
-
-    /* get group selector */
-    gsel = pinctrl_get_group_selector(pctldev, gname);
-
-    /* apply mux directly! */
-    ret = pmxops->set_mux(pctldev, fsel, gsel);
-}
-```
-
-الـ file موجود على path:
-```
-/sys/kernel/debug/pinctrl/<controller>/pinmux-select
-```
-
-#### الحل — الـ Debug Session الكاملة
-
-```bash
-# الخطوة 1: شوف الـ controller الموجود
-ls /sys/kernel/debug/pinctrl/
-# 901000.pinctrl  pinctrl-handles  pinctrl-maps
-
-# الخطوة 2: شوف الـ functions المتاحة
-cat /sys/kernel/debug/pinctrl/901000.pinctrl/pinmux-functions
-# function 0: gpio0, groups = [ gpio0-0 gpio0-1 ... ]
-# function 15: i2c5, groups = [ i2c5-pins ]
-# function 23: hdmi-ddc, groups = [ hdmi-ddc-pins ]
-
-# الخطوة 3: شوف الحالة الحالية للـ pins
-cat /sys/kernel/debug/pinctrl/901000.pinctrl/pinmux-pins | grep -E "PIN_H|hdmi|i2c5"
-# pin 42 (PIN_H3): UNCLAIMED
-# pin 43 (PIN_H4): UNCLAIMED
-
-# الخطوة 4: الـ pins UNCLAIMED يعني الـ DT مش بيوصّل صح
-# جرب manual override
-echo "hdmi-ddc-pins hdmi-ddc" > /sys/kernel/debug/pinctrl/901000.pinctrl/pinmux-select
-
-# الخطوة 5: verify
-cat /sys/kernel/debug/pinctrl/901000.pinctrl/pinmux-pins | grep "PIN_H"
-# pin 42 (PIN_H3): device hdmi function hdmi-ddc group hdmi-ddc-pins
-# pin 43 (PIN_H4): device hdmi function hdmi-ddc group hdmi-ddc-pins
-
-# الخطوة 6: جرب الـ HDMI تاني
-i2cdetect -y 5  # لو ظهر device على 0x50 → الـ DDC شغال → المشكلة في الـ DT
-```
-
-لما الـ manual override نجح، الـ engineer اكتشف إن الـ DT كان فيه typo في اسم الـ pinmux group:
-
-```dts
-/* غلط */
-&hdmi0 {
-    pinctrl-0 = <&hdmi_ddc_pin>;    /* underscore */
-};
-
-/* والـ pinctrl node اسمه */
-hdmi-ddc-pins: hdmi-ddc-pins {     /* dash */
-    pinmux = <AM62X_IOPAD(...)>;
-};
-```
-
-```c
-/* pinmux_map_to_setting() السطر 404-413 — لما الاسم مش مطابق */
-if (map->data.mux.group) {
-    group = map->data.mux.group;
-    ret = match_string(groups, num_groups, group);
-    if (ret < 0) {
-        dev_err(pctldev->dev,
-            "invalid group \"%s\" for function \"%s\"\n",
-            group, map->data.mux.function);
-        return ret;
-    }
-}
-```
-
-الـ `match_string()` بتعمل exact match — underscore vs dash = failure.
-
-```dts
-/* الحل: توحيد الأسماء */
-hdmi_ddc_pins: hdmi-ddc-pins {
-    pinmux = <AM62X_IOPAD(0x01d0, PIN_INPUT, 0)>;  /* SCL */
-    pinmux = <AM62X_IOPAD(0x01d4, PIN_INPUT, 0)>;  /* SDA */
-};
-
-&hdmi0 {
-    pinctrl-names = "default";
-    pinctrl-0 = <&hdmi_ddc_pins>;  /* label reference — مش string matching */
-};
-```
-
-#### الدرس المستفاد
-الـ `pinmux-select` debugfs file هي أداة bring-up قوية جداً — بتسمحلك تـ apply أي pinmux function على أي group مباشرة بدون recompile. الـ `pinmux_select_write()` بتعمل الـ exact same path زي الـ normal kernel path بس بدون الـ DT validation. لو الـ manual override نجح وإنما الـ DT فشل، المشكلة دايماً في الـ string matching بين الـ map table وأسماء الـ groups/functions. ابدأ بـ debugfs دايماً في الـ bring-up قبل ما تتعمق في الـ DT.
+**`pinmux_can_be_used_for_gpio()`** و **`pin_request()`** مع `strict = true` بيمنعوا sharing خالص. كل GPIO لازم يكون له pin مخصص. في الـ digital signage systems، ارسم جدول كامل لتوزيع الـ GPIO قبل الـ layout وتأكد إن كل peripheral له pins حصرية خاصة بيه — خصوصًا لو الـ SoC بيستخدم strict pinmux model زي AM62x.
 ## Phase 7: مصادر ومراجع
 
-### توثيق Kernel الرسمي
+### مصادر رسمية — kernel.org
 
 | المصدر | الوصف |
 |--------|-------|
-| [`Documentation/driver-api/pin-control.rst`](https://docs.kernel.org/driver-api/pin-control.html) | التوثيق الرسمي والشامل لـ pinctrl subsystem — يغطي pinmux و pinconf و GPIO integration |
-| [`Documentation/pinctrl.txt`](https://www.kernel.org/doc/Documentation/pinctrl.txt) | النسخة الأقدم من التوثيق — مفيدة لفهم التصميم الأصلي |
-| [`Documentation/devicetree/bindings/pinctrl/pinmux-node.yaml`](https://mjmwired.net/kernel/Documentation/devicetree/bindings/pinctrl/pinmux-node.yaml) | Device Tree bindings الخاصة بـ pinmux nodes |
+| [docs.kernel.org — Pin Control subsystem](https://docs.kernel.org/driver-api/pin-control.html) | التوثيق الرسمي الكامل لـ pinctrl/pinmux داخل kernel.org — المرجع الأول والأهم |
+| [kernel.org — Documentation/pinctrl.txt (raw)](https://www.kernel.org/doc/Documentation/pinctrl.txt) | النسخة النصية الأصلية من التوثيق التي كتبها Linus Walleij |
+| [kernel.org/doc/html/v4.14 — PINCTRL subsystem](https://www.kernel.org/doc/html/v4.14/driver-api/pinctl.html) | نسخة HTML من توثيق الـ API للـ pinctrl subsystem |
 
-**الـ** `Documentation/driver-api/pin-control.html` هو المرجع الأساسي — بيشرح كل concept من `pinmux_ops` لـ `set_mux()` لـ GPIO integration بتفصيل كامل.
+**الملفات ذات الصلة داخل شجرة kernel:**
+
+```
+Documentation/driver-api/pin-control.rst   ← التوثيق الرئيسي
+include/linux/pinctrl/pinmux.h             ← public API للـ pinmux ops
+include/linux/pinctrl/pinctrl.h            ← public API للـ pinctrl core
+drivers/pinctrl/pinmux.c                   ← core implementation (المصدر المدروس)
+drivers/pinctrl/pinmux.h                   ← internal interface (المصدر المدروس)
+drivers/pinctrl/core.c                     ← pinctrl core
+drivers/pinctrl/core.h                     ← internal core structures
+```
 
 ---
 
 ### مقالات LWN.net
 
-دي أهم المقالات اللي تتابعها بالترتيب:
+**الـ** LWN.net هو المصدر الأهم لمتابعة تطور الـ pinctrl subsystem منذ نشأته:
 
-#### 1. The pin control subsystem
-**الرابط:** [https://lwn.net/Articles/468759/](https://lwn.net/Articles/468759/)
-
-أهم مقال — كتبه Linus Walleij نفسه. بيشرح:
-- ليه احتاجوا pinctrl بدل الـ GPIO-only approach
-- العلاقة بين functions و groups و pins
-- إزاي `pinmux_ops` اتصمم
-
-#### 2. Documentation/pinctrl.txt — Early Patch Discussion
-**الرابط:** [https://lwn.net/Articles/465077/](https://lwn.net/Articles/465077/)
-
-نقاش الـ mailing list حول التوثيق الأول للـ subsystem — مفيد لفهم القرارات التصميمية الأولى.
-
-#### 3. pinctrl: add a generic pin config interface
-**الرابط:** [https://lwn.net/Articles/468770/](https://lwn.net/Articles/468770/)
-
-بيشرح إضافة pinconf — مكمل لـ pinmux في الـ subsystem.
-
-#### 4. pinctrl: add a pin config interface
-**الرابط:** [https://lwn.net/Articles/471826/](https://lwn.net/Articles/471826/)
-
-تطور الـ pinconf API — مهم لفهم الفرق بين mux و config.
-
-#### 5. pinctrl: introduce the concept of a GPIO pin function category
-**الرابط:** [https://lwn.net/Articles/1031226/](https://lwn.net/Articles/1031226/)
-
-أحدث مقال — بيشرح `PINFUNCTION_FLAG_GPIO` وإزاي `pinmux_generic_function_is_gpio()` اتضافت للـ subsystem. مهم لفهم الكود الحديث في `pinmux.c`.
-
-#### 6. pin controller subsystem v7
-**الرابط:** [https://lwn.net/Articles/459190/](https://lwn.net/Articles/459190/)
-
-المراجعة السابعة للـ subsystem قبل merge — بيكشف التطور التصميمي.
+| المقال | الأهمية |
+|--------|---------|
+| [The pin control subsystem](https://lwn.net/Articles/468759/) | المقال التأسيسي الذي يشرح فكرة الـ pinctrl كـ superset لـ pinmux + pinconf — **ابدأ منه** |
+| [pin controller subsystem v7](https://lwn.net/Articles/459190/) | النسخة السابعة من patch series الأولى — يكشف كيف تطور التصميم قبل الـ merge |
+| [Documentation/pinctrl.txt](https://lwn.net/Articles/465077/) | أول إضافة للتوثيق الرسمي إلى kernel tree — يشمل شرح الـ pinmux functions والـ groups |
+| [pinctrl: add a generic pin config interface](https://lwn.net/Articles/468770/) | إضافة الـ pinconf بجانب الـ pinmux — يوضح التفريق بين الوظيفتين |
+| [pinctrl: add a pin config interface](https://lwn.net/Articles/471826/) | تفاصيل تطوير الـ pin configuration interface |
+| [pinctrl: introduce the concept of a GPIO pin function category](https://lwn.net/Articles/1031226/) | مقال حديث (2024) يناقش `PINFUNCTION_FLAG_GPIO` وإشكالية الـ strict controllers على Qualcomm SoCs — مرتبط مباشرة بـ `pinmux_generic_function_is_gpio()` |
+| [pinctrl: Add new pinctrl/GPIO driver](https://lwn.net/Articles/803863/) | مثال عملي على كتابة pinctrl driver جديد من الصفر |
 
 ---
 
 ### نقاشات Mailing List
 
-#### GPIO pin function category — Patch Series
-**الرابط:** [https://www.mail-archive.com/linux-hardening@vger.kernel.org/msg10546.html](https://www.mail-archive.com/linux-hardening@vger.kernel.org/msg10546.html)
+| الرابط | الموضوع |
+|--------|---------|
+| [lkml.org — Linus Walleij on rockchip pinctrl](https://lkml.org/lkml/2026/2/24/668) | نقاش حديث (فبراير 2026) على LKML بين Walleij ومطوري الـ rockchip pinctrl |
+| [mail-archive — GPIO pin function category v5](https://www.mail-archive.com/linux-hardening@vger.kernel.org/msg10546.html) | النقاش الكامل حول patch series إدخال `PINFUNCTION_FLAG_GPIO` |
+| [lkml — pinctrl: sirf/atlas7 GPIO internals](https://lkml.kernel.org/lkml/1455265873-21534-1-git-send-email-linus.walleij@linaro.org/) | مثال على فصل GPIO internals عن pinctrl — يشرح فلسفة التصميم |
+| [lore.kernel.org — pinctrl: devm_kasprintf leak fix](https://lore.kernel.org/all/CACRpkdYX7_rVTp5o8diBSx0JB4iFGjqyzxsqb7etW67SWD=ZRQ@mail.gmail.com/) | مثال على review من Walleij لـ memory management في pinctrl drivers |
 
-نقاش patch series اللي أضافت مفهوم `PINFUNCTION_FLAG_GPIO` — مهم لفهم `pinmux_generic_function_is_gpio()`.
+**للبحث المباشر في المراسلات:**
 
-#### keembay: use a dedicated structure for the pinfunction description
-**الرابط:** [https://www.mail-archive.com/linux-hardening@vger.kernel.org/msg10492.html](https://www.mail-archive.com/linux-hardening@vger.kernel.org/msg10492.html)
-
-بيشرح migration لـ `struct pinfunction` الجديد — الـ struct اللي `pinmux_generic_add_pinfunction()` بتستخدمه.
-
-#### imx: use generic pinmux helpers
-**الرابط:** [https://lore.kernel.org/patchwork/patch/746887/](https://lore.kernel.org/patchwork/patch/746887/)
-
-مثال عملي على migration لـ `CONFIG_GENERIC_PINMUX_FUNCTIONS` — الـ pattern اللي معظم الـ drivers بتتبعه دلوقتي.
-
-#### pinctrl-single: use generic pinmux helpers
-**الرابط:** [https://patchwork.kernel.org/patch/9395509/](https://patchwork.kernel.org/patch/9395509/)
-
-migration تاني مهم — `pinctrl-single` هو من أكتر الـ drivers استخداماً.
-
-#### Linus Walleij on rockchip pinctrl fix
-**الرابط:** [https://lkml.org/lkml/2026/2/24/668](https://lkml.org/lkml/2026/2/24/668)
-
-نقاش حديث من Walleij نفسه — maintainer الـ subsystem.
+```
+lore.kernel.org/linux-gpio/          ← القائمة الرئيسية للـ pinctrl/GPIO
+lore.kernel.org/linux-kernel/        ← LKML العام
+```
 
 ---
 
-### Source Code على GitHub
+### مستودع الـ Git — Commits مهمة
 
-| الملف | الرابط |
-|-------|--------|
-| `drivers/pinctrl/pinmux.c` | [torvalds/linux — pinmux.c](https://github.com/torvalds/linux/blob/master/drivers/pinctrl/pinmux.c) |
-| `drivers/pinctrl/pinmux.h` | [torvalds/linux — pinmux.h](https://github.com/torvalds/linux/blob/master/drivers/pinctrl/pinmux.h) |
-| `drivers/pinctrl/Kconfig` | [torvalds/linux — Kconfig](https://github.com/torvalds/linux/blob/master/drivers/pinctrl/Kconfig) |
-| `linux-pinctrl tree (Walleij)` | [kernel.googlesource.com](https://kernel.googlesource.com/pub/scm/linux/kernel/git/linusw/linux-pinctrl/) |
+**مستودع Linus Walleij الرسمي للـ pinctrl:**
+```
+https://kernel.googlesource.com/pub/scm/linux/kernel/git/linusw/linux-pinctrl/
+```
+
+**Commits تاريخية مهمة يمكن البحث عنها:**
+
+```bash
+# الـ commit الأول الذي أدخل الـ pinctrl subsystem (kernel 3.2 — 2011)
+git log --oneline --follow -- drivers/pinctrl/pinmux.c | tail -5
+
+# تتبع تطور pinmux_generic_add_function
+git log --oneline -- drivers/pinctrl/pinmux.c
+
+# البحث عن إضافة CONFIG_GENERIC_PINMUX_FUNCTIONS
+git log --all --oneline --grep="GENERIC_PINMUX_FUNCTIONS"
+```
+
+**السياق التاريخي:**
+- الـ `pinctrl` subsystem دخل في **Linux 3.2** (ديسمبر 2011)
+- الـ `CONFIG_GENERIC_PINMUX_FUNCTIONS` أضيف لاحقاً لتوفير generic helpers
+- الـ `strict` mode أضيف للتعامل مع controllers التي لا تسمح بمشاركة pin بين GPIO وfunction
 
 ---
 
-### eLinux.org
+### kernelnewbies.org — تغييرات pinctrl عبر الإصدارات
 
-| الصفحة | الوصف |
-|--------|-------|
-| [ELC-2021: Introduction to pin muxing and GPIO control under Linux](https://elinux.org/images/a/a7/ELC-2021_Introduction_to_pin_muxing_and_GPIO_control_under_Linux.pdf) | Presentation من ELC 2021 — شرح عملي ممتاز لـ pinmux و GPIO تحت Linux |
-| [EBC Device Trees](https://elinux.org/EBC_Device_Trees) | أمثلة عملية على pinctrl configuration في device tree overlays |
-| [Jetson AGX Xavier: Check Pin Setting](https://www.elinux.org/Jetson/AGX_Xavier_Check_Pin_Setting) | يشرح كيفية استخدام `tegra_pinctrl_reg` debugfs interface للتحقق من mux registers |
-| [Tests: i2c-demux-pinctrl](https://www.elinux.org/Tests:i2c-demux-pinctrl) | اختبار dynamic pinmux switching مع i2c — use case متقدم |
+| الإصدار | الرابط | ما الجديد في pinctrl |
+|---------|--------|---------------------|
+| Linux 6.1 | [kernelnewbies.org/Linux_6.1](https://kernelnewbies.org/Linux_6.1) | تحسينات pinctrl drivers |
+| Linux 6.8 | [kernelnewbies.org/Linux_6.8](https://kernelnewbies.org/Linux_6.8) | إضافة drivers جديدة للـ pinctrl |
+| Linux 6.11 | [kernelnewbies.org/Linux_6.11](https://kernelnewbies.org/Linux_6.11) | تحديثات pinctrl لـ i.MX91 وغيرها |
+| Linux 6.13 | [kernelnewbies.org/Linux_6.13](https://kernelnewbies.org/Linux_6.13) | pinctrl لـ Qualcomm SM8650 وSamsung gs101 |
+| Linux 6.14 | [kernelnewbies.org/Linux_6.14](https://kernelnewbies.org/Linux_6.14) | pinctrl لـ Eswin eic7700 وRaspberryPi RP1 |
+| LinuxChanges | [kernelnewbies.org/LinuxChanges](https://kernelnewbies.org/LinuxChanges) | صفحة الـ changelog الرئيسية — تحتوي قسم "Pin Controllers" |
 
 ---
 
-### kernelnewbies.org
+### elinux.org — موارد عملية
 
-بيغطي التغييرات في الـ subsystem per-release:
+| الرابط | المحتوى |
+|--------|---------|
+| [elinux.org — Pin Control GPIO Update (PDF)](https://elinux.org/images/c/cd/Pincontrol-gpio-update.pdf) | عرض تقديمي مهم يشرح العلاقة بين pinctrl وGPIO subsystem |
+| [elinux.org — EBC Device Trees](https://elinux.org/EBC_Device_Trees) | أمثلة عملية على إعداد الـ pinctrl-single في Device Tree للـ BeagleBone |
+| [elinux.org — Tests:i2c-demux-pinctrl](https://www.elinux.org/Tests:i2c-demux-pinctrl) | اختبار pinctrl مع الـ i2c-demux driver — مثال تطبيقي على تبديل الـ mux |
 
-| الإصدار | الرابط | أبرز التغييرات |
-|---------|--------|----------------|
-| Linux 6.11 | [kernelnewbies.org/Linux_6.11](https://kernelnewbies.org/Linux_6.11) | freescale i.MX91, nuvoton ma35d1 pinctrl |
-| Linux 6.13 | [kernelnewbies.org/Linux_6.13](https://kernelnewbies.org/Linux_6.13) | pinctrl-zynqmp Versal, Canaan K230 |
-| Linux 6.17 | [kernelnewbies.org/Linux_6.17](https://kernelnewbies.org/Linux_6.17) | Eswin eic7700, sm7635 pinctrl |
-| Linux 6.8 | [kernelnewbies.org/Linux_6.8](https://kernelnewbies.org/Linux_6.8) | Qualcomm و Samsung SoCs |
-| Linux 4.8 | [kernelnewbies.org/Linux_4.8](https://kernelnewbies.org/Linux_4.8) | تغييرات مبكرة في generic pinmux helpers |
+---
+
+### مواقع خارجية مفيدة
+
+| الرابط | المحتوى |
+|--------|---------|
+| [embedded.com — Linux pin control subsystem](https://www.embedded.com/linux-device-driver-development-the-pin-control-subsystem/) | مقال تعليمي مفصل للمطورين الجدد على pinctrl |
+| [STMicroelectronics — Pinctrl overview](https://wiki.st.com/stm32mpu/wiki/Pinctrl_overview) | شرح تطبيقي لـ pinctrl على STM32MP processors — مثال واقعي ممتاز |
+| [GitHub — torvalds/linux pinmux.c](https://github.com/torvalds/linux/blob/master/drivers/pinctrl/pinmux.c) | الكود الحالي على GitHub مع تاريخ التعديلات |
 
 ---
 
 ### كتب مرجعية
 
-#### Linux Device Drivers (LDD3)
+#### Linux Device Drivers, 3rd Edition (LDD3)
 - **المؤلفون:** Jonathan Corbet, Alessandro Rubini, Greg Kroah-Hartman
-- **الفصل المهم:** Chapter 14 — The Linux Device Model
-- **ملاحظة:** الكتاب قديم (kernel 2.6) لكن الـ concepts الأساسية لا تزال صالحة. الـ pinctrl subsystem نفسه جاء بعد إصدار الكتاب.
-- **رابط مجاني:** [https://lwn.net/Kernel/LDD3/](https://lwn.net/Kernel/LDD3/)
+- **الرابط:** [lwn.net/Kernel/LDD3](https://lwn.net/Kernel/LDD3/) — متاح مجاناً
+- **الملاحظة:** الكتاب قديم (2005) ولا يغطي الـ pinctrl لأنه أُضيف في 2011 — لكنه المرجع الأساسي لفهم بنية الـ kernel subsystems والـ driver model
 
-#### Linux Kernel Development — Robert Love
-- **الطبعة:** الثالثة (تغطي kernel 2.6.34)
-- **الفصول المهمة:**
-  - Chapter 13: The Virtual Filesystem — لفهم debugfs اللي `pinmux_init_device_debugfs()` بتستخدمه
-  - Chapter 14: The Block I/O Layer — لفهم نموذج الـ device model
-- **ملاحظة:** الـ pinctrl جاء بعد الكتاب لكن فهم الـ kernel internals ضروري
+#### Linux Kernel Development, 3rd Edition
+- **المؤلف:** Robert Love
+- **الفصول ذات الصلة:**
+  - Chapter 14: The Block I/O Layer — لفهم الـ request/free patterns المشابهة
+  - Chapter 17: Devices and Modules — لفهم الـ `module_get/put` المستخدمة في `pin_request()`
+  - Chapter 5: System Calls — لفهم الـ locking patterns (`mutex_lock/unlock`)
 
-#### Embedded Linux Primer — Christopher Hallinan
-- **الطبعة:** الثانية
-- **الفصل المهم:** Chapter 15: Embedded Linux Projects — Platform Devices and Device Tree
-- **ملاحظة:** بيغطي device tree integration وهو الـ mechanism الأساسي لتكوين pinctrl على embedded platforms
+#### Embedded Linux Primer, 2nd Edition
+- **المؤلف:** Christopher Hallinan
+- **الفصول ذات الصلة:**
+  - Chapter 16: Kernel Debugging Techniques — يشمل استخدام الـ debugfs مثل `pinmux-functions` و`pinmux-pins`
+  - الفصول عن الـ Device Tree وكيفية ربطها بالـ pinctrl settings
 
-#### Linux Device Driver Development — John Madieu
-- **الناشر:** Packt Publishing (2022)
-- **الفصل:** Chapter 12: Leveraging the Pinctrl Subsystem
-- **ده أحسن مرجع حديث** يغطي pinctrl/pinmux بشكل مباشر مع أمثلة كود
-
----
-
-### مواقع إضافية
-
-| المصدر | الرابط | الوصف |
-|--------|--------|-------|
-| embedded.com | [Linux device driver development: The pin control subsystem](https://www.embedded.com/linux-device-driver-development-the-pin-control-subsystem/) | شرح عملي من منظور driver developer |
-| STM32 Wiki | [Pinctrl overview](https://wiki.st.com/stm32mpu/wiki/Pinctrl_overview) | مثال حقيقي على STM32 — من أفضل التوثيقات الخاصة بـ vendor |
-| krybot.com | [Introduction to the Pinctrl subsystem](https://blog.krybot.com/a?ID=01600-cb8bc57c-f987-4202-9b8d-0635739c052d) | ملخص سريع ومركز |
-| infradead.org | [PINCTRL documentation (5.10-rc1+)](https://www.infradead.org/~mchehab/kernel_docs/driver-api/pinctl.html) | نسخة من التوثيق الرسمي |
+#### Mastering Embedded Linux Programming
+- **المؤلف:** Chris Simmonds
+- يغطي الإصدارات الحديثة ويشمل شرحاً عملياً لـ Device Tree bindings مع pinctrl
 
 ---
 
-### Search Terms للبحث عن معلومات أكتر
+### مصطلحات البحث
+
+للعثور على المزيد من المعلومات استخدم هذه المصطلحات:
 
 ```
-# للبحث في LKML و lore.kernel.org
-pinctrl pinmux subsystem linux kernel
-pinmux_ops set_mux linux kernel
-pinctrl generic functions radix tree
-pinmux_enable_setting linux
-pinmux_request_gpio kernel
-CONFIG_GENERIC_PINMUX_FUNCTIONS
-PINFUNCTION_FLAG_GPIO
-pinmux strict mode linux kernel
-pin_request pin_free pinctrl core
+# بحث عام
+"linux pinctrl pinmux"
+"linux pin multiplexing kernel"
+"pinctrl_ops set_mux kernel"
+"pinmux_enable_setting linux"
 
-# للبحث عن drivers مثال
-pinctrl-single driver example
-pinctrl imx generic pinmux
-qualcomm pinctrl pinmux driver
-rockchip pinctrl mux implementation
+# بحث متخصص
+"CONFIG_GENERIC_PINMUX_FUNCTIONS"
+"pinmux strict mode linux"
+"pin_request pin_free kernel"
+"PINFUNCTION_FLAG_GPIO"
+"function_desc pinctrl kernel"
 
-# للبحث عن debugging
-debugfs pinmux-functions linux
-debugfs pinmux-pins
-pinmux-select debugfs linux kernel
+# بحث في الكود
+# على codesearch.debian.net أو elixir.bootlin.com
+site:elixir.bootlin.com pinmux_enable_setting
+site:elixir.bootlin.com pinmux_ops
 
-# للبحث في Device Tree
-devicetree pinctrl pinmux-names
-pinctrl-0 pinctrl-names device tree
-pinmux-node yaml binding
+# بحث في Mailing List
+site:lore.kernel.org "pinmux" "set_mux"
+site:lkml.org "pinctrl" "strict"
 ```
 
----
-
-### مسار التعلم المقترح
-
-```
-1. اقرأ LWN Articles/468759 (The pin control subsystem) أولاً
-   ↓
-2. اقرأ Documentation/driver-api/pin-control.html كاملاً
-   ↓
-3. اتفرج على ELC-2021 PDF من elinux.org
-   ↓
-4. اتعلم من مثال حقيقي: STM32 Pinctrl overview
-   ↓
-5. اقرأ كود driver بسيط: drivers/pinctrl/pinctrl-single.c
-   ↓
-6. ارجع للـ source files: pinmux.c و pinmux.h
-```
+**الـ** [Elixir Cross Referencer](https://elixir.bootlin.com/linux/latest/source/drivers/pinctrl/pinmux.c) هو الأداة الأفضل لتصفح الكود والـ call graphs للـ pinmux subsystem بشكل تفاعلي.
 ## Phase 8: Writing simple module
 
-### الفكرة العامة
+### الهدف
 
-هنعمل module بيـhook الـ`pinmux_enable_setting` عن طريق **kprobe**، ده من أكتر الـentry points إثارةً في الـpinmux subsystem — بيتنادى كل مرة بيتفعل فيها mux setting على أي pin controller في النظام، يعني هنشوف كل مرة الـkernel بيحول function لـpin group.
+**`pinmux_generic_add_function()`** هي واحدة من أكثر الـ exported functions إثارة في الـ pinmux subsystem — كل مرة driver بيسجّل function جديدة (زي "uart0", "spi1", "gpio") بتتعمل call ليها. هنعمل **kprobe** عليها عشان نشوف إيه الـ function اللي بتتسجل، وعلى أنهي controller، وكام group بتدعمها.
 
 ---
 
-### الـModule الكامل
+### الـ Module كاملاً
 
 ```c
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-License-Identifier: GPL-2.0
 /*
- * kprobe on pinmux_enable_setting()
+ * kprobe on pinmux_generic_add_function()
  *
- * Fires every time a pinmux setting is activated on any
- * pin controller device — prints the device name + function/group indices.
+ * Intercepts every pinmux function registration and logs:
+ *   - pin controller name
+ *   - function name being registered
+ *   - number of groups it supports
  */
 
-#include <linux/module.h>
-#include <linux/kernel.h>
-#include <linux/kprobes.h>
-#include <linux/pinctrl/pinctrl.h>   /* struct pinctrl_dev, pinctrl_dev_get_name() */
-#include <linux/pinctrl/machine.h>   /* struct pinctrl_setting */
+/* --- Includes --- */
+#include <linux/module.h>       /* MODULE_LICENSE, module_init/exit         */
+#include <linux/kprobes.h>      /* struct kprobe, register_kprobe ...       */
+#include <linux/ptrace.h>       /* struct pt_regs — CPU register snapshot   */
+#include <linux/pinctrl/pinctrl.h> /* struct pinctrl_dev, pinctrl_dev_get_name() */
+#include <linux/pinctrl/pinmux.h>  /* pinmux_generic_add_function signature */
+
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Kernel Doc Project");
+MODULE_DESCRIPTION("kprobe: trace pinmux_generic_add_function() calls");
+
+/* ------------------------------------------------------------------ */
+/*  kprobe pre-handler — runs just BEFORE the probed function executes */
+/* ------------------------------------------------------------------ */
 
 /*
- * Forward-declare only what we need from the internal setting struct.
- * pinctrl_setting is defined in <linux/pinctrl/machine.h> but the
- * mux sub-struct fields are accessible via the public header.
+ * دي الـ callback اللي بتتنفذ قبل ما pinmux_generic_add_function تشتغل.
+ * بنقرأ الـ arguments من الـ CPU registers عشان نعرف مين بيسجّل إيه.
  */
-
-/* ------------------------------------------------------------------ */
-/*  kprobe pre-handler — runs just BEFORE pinmux_enable_setting()      */
-/* ------------------------------------------------------------------ */
 static int handler_pre(struct kprobe *p, struct pt_regs *regs)
 {
     /*
-     * On x86-64 the first argument arrives in RDI (regs->di).
-     * On ARM64 it is in x0 (regs->regs[0]).
-     * kprobes gives us pt_regs — we cast the first arg to the
-     * pointer type we expect.
+     * x86-64 calling convention (System V AMD64 ABI):
+     *   arg0 → RDI  → struct pinctrl_dev *pctldev
+     *   arg1 → RSI  → const char *name          (function name)
+     *   arg2 → RDX  → const char * const *groups (array of group names)
+     *   arg3 → RCX  → unsigned int ngroups       (number of groups)
+     *   arg4 → R8   → void *data                 (driver private data)
+     *
+     * على ARM64:
+     *   arg0 → x0, arg1 → x1, arg2 → x2, arg3 → x3, arg4 → x4
+     *
+     * بنستخدم regs_get_kernel_argument() اللي portable عبر architectures.
      */
-#ifdef CONFIG_X86_64
-    const struct pinctrl_setting *setting =
-        (const struct pinctrl_setting *)regs->di;
-#elif defined(CONFIG_ARM64)
-    const struct pinctrl_setting *setting =
-        (const struct pinctrl_setting *)regs->regs[0];
-#else
-    /* Generic fallback — may not work on every arch */
-    const struct pinctrl_setting *setting = NULL;
-#endif
+    struct pinctrl_dev *pctldev;
+    const char         *fname;
+    unsigned int        ngroups;
 
-    if (!setting || !setting->pctldev)
-        return 0;   /* skip if pointer looks bad */
+    /* arg0: pointer to the pin controller device */
+    pctldev = (struct pinctrl_dev *)regs_get_kernel_argument(regs, 0);
+
+    /* arg1: name of the mux function being registered (e.g. "uart0") */
+    fname   = (const char *)regs_get_kernel_argument(regs, 1);
+
+    /* arg3: how many pin groups this function can be applied to */
+    ngroups = (unsigned int)regs_get_kernel_argument(regs, 3);
 
     /*
-     * pinctrl_dev_get_name() is safe to call here — it just returns
-     * pctldev->desc->name without taking any lock.
+     * بنتأكد إن الـ pointers صحيحة قبل ما نعمل dereference
+     * عشان منوقعش kernel panic لو جاءتنا قيمة garbage.
      */
-    pr_info("pinmux_enable_setting called: dev=\"%s\" func_selector=%u group_selector=%u dev_name=\"%s\"\n",
-            pinctrl_dev_get_name(setting->pctldev),
-            setting->data.mux.func,
-            setting->data.mux.group,
-            setting->dev_name ? setting->dev_name : "(none)");
+    if (!pctldev || !fname)
+        return 0;
 
-    return 0;   /* 0 = continue normal execution */
-}
+    pr_info("[pinmux_probe] controller=\"%s\"  function=\"%s\"  ngroups=%u\n",
+            pinctrl_dev_get_name(pctldev),
+            fname,
+            ngroups);
 
-/* ------------------------------------------------------------------ */
-/*  kprobe post-handler — runs just AFTER the probed instruction       */
-/* ------------------------------------------------------------------ */
-static void handler_post(struct kprobe *p, struct pt_regs *regs,
-                         unsigned long flags)
-{
-    /* We only need pre — leave this empty but defined so kprobes is happy */
+    return 0; /* 0 = let the original function run normally */
 }
 
 /* ------------------------------------------------------------------ */
 /*  kprobe descriptor                                                   */
 /* ------------------------------------------------------------------ */
+
+/*
+ * الـ struct kprobe ده هو "الخطّاف" — بيحدد على أنهي symbol هنضع الـ breakpoint.
+ * بنستخدم الاسم بدل العنوان عشان يكون portable بين kernel versions.
+ */
 static struct kprobe kp = {
-    .symbol_name = "pinmux_enable_setting",  /* symbol to hook */
-    .pre_handler  = handler_pre,
-    .post_handler = handler_post,
+    .symbol_name = "pinmux_generic_add_function",
+    .pre_handler = handler_pre,
 };
 
 /* ------------------------------------------------------------------ */
 /*  module_init                                                         */
 /* ------------------------------------------------------------------ */
+
+/*
+ * بنسجّل الـ kprobe هنا — لو فشل التسجيل (مثلاً الـ symbol مش موجود
+ * أو CONFIG_KPROBES=n) بنرجع error عشان الـ module معيش.
+ */
 static int __init pinmux_probe_init(void)
 {
     int ret;
 
     ret = register_kprobe(&kp);
     if (ret < 0) {
-        pr_err("register_kprobe failed: %d\n", ret);
+        pr_err("[pinmux_probe] register_kprobe failed: %d\n", ret);
         return ret;
     }
 
-    pr_info("kprobe registered on pinmux_enable_setting @ %p\n",
-            kp.addr);   /* kp.addr filled by kernel after registration */
+    pr_info("[pinmux_probe] planted on %s at %px\n",
+            kp.symbol_name, kp.addr);
     return 0;
 }
 
 /* ------------------------------------------------------------------ */
 /*  module_exit                                                         */
 /* ------------------------------------------------------------------ */
+
+/*
+ * لازم نشيل الـ kprobe في الـ exit عشان الـ kernel يرجع يشتغل
+ * بدون breakpoint — لو مشيناه من غير ما نعمل unregister هيحصل
+ * kernel panic أو memory corruption.
+ */
 static void __exit pinmux_probe_exit(void)
 {
     unregister_kprobe(&kp);
-    pr_info("kprobe unregistered from pinmux_enable_setting\n");
+    pr_info("[pinmux_probe] removed from %s\n", kp.symbol_name);
 }
 
 module_init(pinmux_probe_init);
 module_exit(pinmux_probe_exit);
+```
 
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Kernel Student");
-MODULE_DESCRIPTION("kprobe demo: trace pinmux_enable_setting() calls");
+---
+
+### Makefile
+
+```makefile
+# ضعه في نفس الـ directory مع الـ .c file
+obj-m += pinmux_probe.o
+
+KDIR ?= /lib/modules/$(shell uname -r)/build
+
+all:
+	make -C $(KDIR) M=$(PWD) modules
+
+clean:
+	make -C $(KDIR) M=$(PWD) clean
+```
+
+---
+
+### Build & Test
+
+```bash
+# Build
+make
+
+# Load
+sudo insmod pinmux_probe.ko
+
+# شوف الـ output في dmesg
+sudo dmesg -w | grep pinmux_probe
+
+# مثال لو فيه device بيـprobe دلوقتي
+sudo modprobe pinctrl-bcm2835   # Raspberry Pi example
+
+# Unload
+sudo rmmod pinmux_probe
+```
+
+**مثال مخرجات متوقعة:**
+
+```
+[pinmux_probe] planted on pinmux_generic_add_function at ffffffffc08a1240
+[pinmux_probe] controller="pinctrl-bcm2835"  function="gpio"    ngroups=54
+[pinmux_probe] controller="pinctrl-bcm2835"  function="alt0"    ngroups=54
+[pinmux_probe] controller="pinctrl-bcm2835"  function="alt1"    ngroups=54
+[pinmux_probe] controller="pinctrl-bcm2835"  function="uart0"   ngroups=2
+[pinmux_probe] controller="pinctrl-bcm2835"  function="spi0"    ngroups=1
 ```
 
 ---
 
 ### شرح كل جزء
 
-#### الـ`#include`s
+#### الـ Includes
 
 | Header | السبب |
 |--------|-------|
-| `<linux/kprobes.h>` | تعريف `struct kprobe` وكل الـAPI بتاعه — `register_kprobe`, `unregister_kprobe`. |
-| `<linux/pinctrl/pinctrl.h>` | محتاجينه عشان `pinctrl_dev_get_name()` و`struct pinctrl_dev`. |
-| `<linux/pinctrl/machine.h>` | فيه تعريف `struct pinctrl_setting` وداخله `data.mux.func` و`data.mux.group`. |
+| `linux/kprobes.h` | يجيب الـ `struct kprobe` وكل الـ API الخاص بالـ kprobes |
+| `linux/ptrace.h` | يجيب `struct pt_regs` اللي فيها snapshot من الـ CPU registers وقت الـ trap |
+| `linux/pinctrl/pinctrl.h` | يجيب `struct pinctrl_dev` و `pinctrl_dev_get_name()` عشان نطبع اسم الـ controller |
+| `linux/pinctrl/pinmux.h` | يجيب تعريف الـ `struct pinmux_ops` وهو مفيد للفهم لو احتجنا نوسّع الـ probe |
+
+**الـ `linux/module.h`** ضروري لأي kernel module — من غيره مش هيشتغل `MODULE_LICENSE` ولا `module_init`.
+
+#### الـ `handler_pre` callback
+
+**الـ `struct pt_regs *regs`** هو الحجة الأهم — ده snapshot كامل من الـ CPU registers في اللحظة اللي الـ kprobe شافها وقبل ما الـ function الأصلية تشتغل. بنستخدم `regs_get_kernel_argument(regs, N)` بدل ما ناخد `regs->rdi` مباشرةً عشان الكود يشتغل على x86 وARM64 وRISC-V من غير تعديل.
+
+#### ليه `return 0` من الـ handler؟
+
+لو الـ `pre_handler` رجع قيمة غير صفر، الـ kprobe بيمنع تنفيذ الـ function الأصلية وده سلوك خطير في الـ production. **الـ `return 0`** معناها "اتفرجت بس، دلوقتي اشتغل زي ما أنت عارف".
+
+#### الـ `register_kprobe` في `module_init`
+
+**الـ `register_kprobe()`** بيدور على الـ symbol في الـ kernel symbol table، بيحسب العنوان، وبيضع breakpoint instruction (مثلاً `int3` على x86). لو الـ symbol مش exported أو الـ kernel اتبنى بـ `CONFIG_KPROBES=n`، بترجع error سالب ومش بنكمّل.
+
+#### الـ `unregister_kprobe` في `module_exit`
+
+لو مشيت الـ module من غير ما تشيل الـ kprobe، الـ kernel هيظل بيـexecute الـ breakpoint لكن الـ handler راح — ده بيأدي لـ **kernel panic** مؤكد. الـ `unregister_kprobe()` بيرجع الـ original instruction في مكان الـ breakpoint ويحرر الموارد.
 
 ---
 
-#### الـ`handler_pre`
+### ملاحظات مهمة
 
-ده القلب — بيشتغل **قبل** تنفيذ أول instruction في `pinmux_enable_setting`. الـkprobe بيديك `pt_regs` اللي فيها قيم الـregisters وقت الـcall، فبنسحب الـargument الأول (الـ`setting` pointer) من الـregister المناسب حسب الـarchitecture.
-
-بعد كده بنطبع:
-- اسم الـpin controller device (`dev`).
-- رقم الـfunction selector المطلوب تفعيله.
-- رقم الـgroup selector.
-- اسم الـdevice اللي طلب الـsetting ده (`dev_name`، ممكن يكون اسم driver زي `"spi0"`).
-
-ده مفيد جداً في الـdebugging — تقدر تشوف إيه الـfunctions اللي بتتفعل وبترتيب إيه أثناء الـboot أو لما device بيـprobe.
-
----
-
-#### الـ`struct kprobe kp`
-
-الـ**`symbol_name`** بيخلي الـkernel يحل الـaddress تلقائياً من الـkallsyms، من غير ما تحتاج تعرف الـaddress يدوياً. الـ`pre_handler` و`post_handler` بيتسجلوا هنا كـpointers.
-
----
-
-#### الـ`module_init` — `register_kprobe`
-
-**الـ`register_kprobe`** بيعمل كذا حاجة في خطوة واحدة: بيحل الـsymbol لـaddress، بيعمل **breakpoint** (INT3 على x86، BRK على ARM64) عند أول instruction في الـfunction، وبيسجل الـhandlers. لو رجع قيمة سالبة يبقى فيه مشكلة — الـsymbol مش موجود أو الـkprobes مش enabled في الـkernel.
-
----
-
-#### الـ`module_exit` — `unregister_kprobe`
-
-**لازم** تعمل unregister قبل ما الـmodule يـunload — لو متعملش، الـbreakpoint هيفضل موجود في الـcode لكن الـhandler pointers هتبقى invalid (الـmodule اتفك من الـmemory)، وده هيعمل **kernel panic** أول ما `pinmux_enable_setting` تتنادى. الـ`unregister_kprobe` بيشيل الـbreakpoint ويستنى لحد ما أي handler شغال حالياً يخلص قبل ما يرجع.
-
----
-
-### طريقة البناء والتشغيل
-
-```bash
-# Makefile بسيط
-# obj-m += pinmux_kprobe.o
-
-make -C /lib/modules/$(uname -r)/build M=$(pwd) modules
-
-sudo insmod pinmux_kprobe.ko
-
-# شوف الـoutput
-sudo dmesg | grep "pinmux_enable_setting"
-
-sudo rmmod pinmux_kprobe
-```
-
-**مثال عملي للـoutput** أثناء الـboot أو لما device بيـprobe:
-
-```
-[   2.341]  pinmux_enable_setting called: dev="pinctrl-bcm2835" func_selector=3 group_selector=7 dev_name="fe204000.spi"
-[   2.342]  pinmux_enable_setting called: dev="pinctrl-bcm2835" func_selector=1 group_selector=2 dev_name="fe201000.uart"
-```
-
-يعني الـRaspberry Pi مثلاً بيحول الـpins بتاعة SPI وUART لـfunctions معينة — ودي بالظبط المعلومة اللي `pinmux_enable_setting` بتطبقها.
-
----
-
-### ملاحظة على الـarchitecture
-
-الـ`#ifdef CONFIG_X86_64 / CONFIG_ARM64` ده ضروري لأن قواعد الـcalling convention مختلفة — على x86-64 الـargument الأول في `rdi`، على ARM64 في `x0`. الـkprobes نفسها portable لكن سحب الـarguments من `pt_regs` معتمد على الـarch.
+- **`CONFIG_KPROBES=y`** لازم يكون enabled في الـ kernel config (موجود في كل distro حديثة).
+- **`pinmux_generic_add_function`** بيتنادى بس وقت الـ driver probe، مش في الـ hot path، فمفيش overhead مهم.
+- لو الـ kernel اتبنى بـ `CONFIG_GENERIC_PINMUX_FUNCTIONS=n` مش هتلاقي الـ symbol وهيفشل الـ register.
+- الـ `pinctrl_dev_get_name()` آمنة تتنادى من الـ probe context لأنها بس بتقرأ string من الـ struct من غير locking.
