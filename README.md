@@ -192,6 +192,12 @@ F:	tools/spi/
 - [ ] [spi.h](include/uapi/linux/spi/spi.h.md)
 - [ ] [spidev.h](include/uapi/linux/spi/spidev.h.md)
 
+- [ ] [spi.c](drivers/spi/spi.c.md)
+- [ ] [spi-mem.c](drivers/spi/spi-mem.c.md)
+- [ ] [spi-mux.c](drivers/spi/spi-mux.c.md)
+- [ ] [spi-offload.c](drivers/spi/spi-offload.c.md)
+- [ ] [spidev.c](drivers/spi/spidev.c.md)
+
 ## `IRQ SUBSYSTEM`
 
 ```
@@ -413,7 +419,6 @@ X:	drivers/clk/clkdev.c
 
 - [ ] drivers/clk/clk-devres.c
 - [ ] drivers/clk/clk-bulk.c
-- [ ] drivers/clk/clkdev.c
 - [ ] [clkdev.h](include/linux/clkdev.h.md) - [clkdev.c](drivers/clk/clkdev.c.md)
 
 - [ ] drivers/clk/clk-divider.c
@@ -536,6 +541,13 @@ F:	include/linux/mmc/
 F:	include/uapi/linux/mmc/
 ```
 
+- [ ] include/linux/mmc/card.h
+- [ ] include/linux/mmc/core.h
+- [ ] include/linux/mmc/host.h
+- [ ] include/linux/mmc/mmc.h
+- [ ] include/linux/mmc/pm.h
+- [ ] include/linux/mmc/sd.h
+- [ ] include/linux/mmc/sdio.h
 
 ## `SPI NOR SUBSYSTEM`
 
