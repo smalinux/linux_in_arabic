@@ -150,15 +150,15 @@
     "expandedKeys": []
   },
   "README.md": {
-    "scroll": 86.48809523809524,
+    "scroll": 264.92261904761904,
     "cursor": {
       "from": {
-        "line": 107,
-        "ch": 28
+        "line": 284,
+        "ch": 0
       },
       "to": {
-        "line": 107,
-        "ch": 28
+        "line": 284,
+        "ch": 0
       }
     },
     "expandedKeys": [
@@ -426,7 +426,7 @@
     ]
   },
   "drivers/gpio/gpiolib.c.md": {
-    "scroll": 4190.904017857143,
+    "scroll": 3955.918898809524,
     "cursor": {
       "from": {
         "line": 0,
@@ -471,6 +471,45 @@
       "item-2-206",
       "item-2-221",
       "item-3-224"
+    ]
+  },
+  "drivers/gpio/gpiolib-cdev.h.md": {
+    "scroll": 629.3596678975468,
+    "cursor": {
+      "from": {
+        "line": 629,
+        "ch": 2
+      },
+      "to": {
+        "line": 629,
+        "ch": 14
+      }
+    },
+    "expandedKeys": [
+      "item-2-56",
+      "item-2-26",
+      "item-3-28",
+      "item-3-33",
+      "item-3-119",
+      "item-2-118"
+    ]
+  },
+  "drivers/gpio/gpio-mmio.c.md": {
+    "scroll": 191.80729166666666,
+    "cursor": {
+      "from": {
+        "line": 200,
+        "ch": 0
+      },
+      "to": {
+        "line": 200,
+        "ch": 0
+      }
+    },
+    "expandedKeys": [
+      "item-2-0",
+      "item-3-3",
+      "item-2-18"
     ]
   }
 }

@@ -12,7 +12,7 @@ $ claude --dangerously-skip-permissions
 ```
 
 
-## of - open firmware
+## `OPEN FIRMWARE`
 ```
 OPEN FIRMWARE AND FLATTENED DEVICE TREE
 M:	Rob Herring <robh@kernel.org>
@@ -104,14 +104,14 @@ K:	devm_gpiod_unhinge
 - [ ] [regmap.h](include/linux/regmap.h.md)
 
 - [ ] [gpiolib.c](drivers/gpio/gpiolib.c.md)
-- [ ] drivers/gpio/gpiolib-cdev.h
-- [ ] drivers/gpio/gpiolib.h
-- [ ] drivers/gpio/gpiolib-of.h
-- [ ] drivers/gpio/gpiolib-shared.h
-- [ ] drivers/gpio/gpiolib-sysfs.h
-- [ ] drivers/gpio/gpio-regmap.c
-- [ ] drivers/gpio/gpio-generic.c
-- [ ] drivers/gpio/gpio-mmio.c
+- [ ] [gpiolib-cdev.h](drivers/gpio/gpiolib-cdev.h.md)
+- [ ] [gpiolib-cdev.h](drivers/gpio/gpiolib-cdev.h.md)
+- [ ] [gpiolib-of.h](drivers/gpio/gpiolib-of.h.md)
+- [ ] [gpiolib-shared.h](drivers/gpio/gpiolib-shared.h.md)
+- [ ] [gpiolib-sysfs.h](drivers/gpio/gpiolib-sysfs.h.md)
+- [ ] [gpio-regmap.c](drivers/gpio/gpio-regmap.c.md)
+- [ ] [gpio-generic.c](drivers/gpio/gpio-generic.c.md)
+- [ ] [gpio-mmio.c](drivers/gpio/gpio-mmio.c.md)
 
 
 ## `I2C SUBSYSTEM`
@@ -285,8 +285,7 @@ F:	include/linux/pinctrl/
 
 - [ ] drivers/pinctrl/core.h
 - [ ] drivers/pinctrl/core.c
-- [ ] drivers/pinctrl/pinctrl-utils.c
-- [ ] drivers/pinctrl/pinctrl-utils.h
+- [ ] [pinctrl-utils.c](drivers/pinctrl/pinctrl-utils.c.md)
 - [ ] drivers/pinctrl/pinmux.c
 - [ ] drivers/pinctrl/pinmux.h
 - [ ] drivers/pinctrl/pinconf.c
