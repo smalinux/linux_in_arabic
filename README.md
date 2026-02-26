@@ -541,13 +541,13 @@ F:	include/linux/mmc/
 F:	include/uapi/linux/mmc/
 ```
 
-- [ ] include/linux/mmc/card.h
-- [ ] include/linux/mmc/core.h
-- [ ] include/linux/mmc/host.h
-- [ ] include/linux/mmc/mmc.h
-- [ ] include/linux/mmc/pm.h
-- [ ] include/linux/mmc/sd.h
-- [ ] include/linux/mmc/sdio.h
+- [ ] [card.h](include/linux/mmc/card.h.md)
+- [ ] [core.h](include/linux/mmc/core.h.md)
+- [ ] [host.h](include/linux/mmc/host.h.md)
+- [ ] [mmc.h](include/linux/mmc/mmc.h.md)
+- [ ] [pm.h](include/linux/mmc/pm.h.md)
+- [ ] [sd.h](include/linux/mmc/sd.h.md)
+- [ ] [sdio.h](include/linux/mmc/sdio.h.md) -- [sdio_ids.h](include/linux/mmc/sdio_ids.h.md) -- [sdio_func.h](include/linux/mmc/sdio_func.h.md) -- [sd_uhs2.h](include/linux/mmc/sd_uhs2.h.md) -- [slot-gpio.h](include/linux/mmc/slot-gpio.h.md)
 
 ## `SPI NOR SUBSYSTEM`
 
