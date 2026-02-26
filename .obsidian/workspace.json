@@ -15,7 +15,7 @@
               "state": {
                 "file": "README.md",
                 "mode": "source",
-                "source": true
+                "source": false
               },
               "icon": "lucide-file",
               "title": "README"
@@ -181,6 +181,9 @@
   },
   "active": "87d8bfb909d07b5c",
   "lastOpenFiles": [
+    "drivers/clk/clk-fixed-factor.c.md",
+    "drivers/clk/clk-divider.c.md",
+    "drivers/clk/clk-bulk.c.md",
     "drivers/clk/clk-devres.c.md",
     "include/linux/mmc/slot-gpio.h.md",
     "include/linux/mmc/sd_uhs2.h.md",
@@ -206,10 +209,7 @@
     "drivers/pinctrl/core.c.md",
     "drivers/pinctrl/devicetree.c.md",
     "drivers/pinctrl/pinconf.c.md",
-    "drivers/pinctrl/pinmux.c.md",
-    "drivers/pinctrl/pinctrl-utils.c.md",
     "drivers/pinctrl",
-    "drivers/gpio/gpiolib.c.md",
     "drivers/gpio",
     "drivers/reset",
     "include/linux/reset",

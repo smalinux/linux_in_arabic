@@ -418,12 +418,12 @@ F:	rust/kernel/clk.rs
 X:	drivers/clk/clkdev.c
 ```
 
-- [ ] drivers/clk/clk-devres.c
-- [ ] drivers/clk/clk-bulk.c
+- [ ] [clk-devres.c](drivers/clk/clk-devres.c.md)
+- [ ] [clk-bulk.c](drivers/clk/clk-bulk.c.md)
 - [ ] [clkdev.h](include/linux/clkdev.h.md) - [clkdev.c](drivers/clk/clkdev.c.md)
 
-- [ ] drivers/clk/clk-divider.c
-- [ ] drivers/clk/clk-fixed-factor.c
+- [ ] [clk-divider.c](drivers/clk/clk-divider.c.md)
+- [ ] [clk-fixed-factor.c](drivers/clk/clk-fixed-factor.c.md)
 - [ ] drivers/clk/clk-fixed-rate.c
 - [ ] drivers/clk/clk-gate.c
 - [ ] drivers/clk/clk-multiplier.c
