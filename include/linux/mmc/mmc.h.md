@@ -1,1408 +1,1325 @@
 ## Phase 1: الصورة الكبيرة ببساطة
 
-### الـ Subsystem اللي ينتمي ليه الملف
+### الـ Subsystem
 
-الـ `mmc.h` جزء من **MMC/SD/SDIO Subsystem** في Linux kernel. المسؤول عنه Ulf Hansson، والـ mailing list هو `linux-mmc@vger.kernel.org`. الـ subsystem ده بيغطي كل الملفات في:
+الـ file ده جزء من **MMC/SD/SDIO Subsystem** في Linux kernel — المسؤول عن كل بطاقات الذاكرة والـ eMMC chips اللي جوه الموبايلات واللاب توب والـ embedded systems.
 
-- `drivers/mmc/` — كور وهوست درايفرز
-- `include/linux/mmc/` — الهيدرز
-- `include/uapi/linux/mmc/` — الـ userspace API
+الـ maintainer: Ulf Hansson — الـ mailing list: `linux-mmc@vger.kernel.org`
 
 ---
 
-### الصورة الكبيرة — إيه اللي بيحصل؟
+### الصورة الكبيرة — ليه الملف ده موجود؟
 
-#### تخيل المشكلة دي
-
-عندك موبايل، وجوه **eMMC chip** — ده هو التخزين الداخلي. أو عندك كاميرا وفيها **SD card**. الـ OS محتاج يتكلم مع الـ chip دي عشان يقرأ ويكتب بيانات.
-
-المشكلة إن الـ chip دي بتتكلم بـ **بروتوكول خاص** — مش USB ومش SATA. ده بروتوكول اسمه **MMC (MultiMediaCard protocol)**. بيتضمن:
-- إرسال **commands** (أوامر) رقمية
-- استقبال **responses** (ردود)
-- نقل **data blocks**
-
-بالظبط زي ما في لغة بشرية — محتاج تعرف الكلمات والجمل الصح عشان تتكلم مع الكارت.
-
-#### دور الملف `mmc.h`
-
-الملف ده هو **القاموس** أو **المعجم** اللي بيعرّف:
-
-1. **كل الـ commands** اللي ممكن تبعتها للكارت — زي CMD0 (reset)، CMD17 (اقرأ block واحد)، CMD24 (اكتب block)، إلخ.
-2. **الـ R1 status bits** — لما الكارت يرد، بيبعت 32-bit فيها flags بتقول "حصل error؟"، "الكارت شغال؟"، "جاهز للداتا؟"
-3. **الـ EXT_CSD fields** — العنوان الرقمي لكل إعداد جوه الكارت (زي enable الـ cache، أو ضبط سرعة الباص).
-4. **الـ Card Command Classes (CCC)** — تصنيف الأوامر لـ classes زي read، write، erase، lock.
-5. **الـ speed modes** — HS، HS200، HS400 — كل mode ده بيدي سرعة أكبر.
+تخيل إنك بتكلم حد بلغة مش عارفها — محتاج قاموس. الـ `mmc.h` ده هو **القاموس الرسمي** للغة الـ MMC protocol. كل أمر بتبعته للكارد، وكل رد بتستقبله، وكل register في الكارت — كلها معرّفة هنا كـ macros بأرقامها الرسمية من الـ JEDEC specification.
 
 ---
 
-### القصة الكاملة — رحلة أمر واحد
+### المشكلة اللي بتحلها
 
-تخيل إن الـ kernel عايز يقرأ ملف من الـ eMMC:
+الـ MMC card (أو eMMC اللي جوه تليفونك) هي في الأساس **جهاز مستقل** بيفهم بروتوكول خاص بيه. الـ CPU بيتكلم معاه عن طريق أوامر رقمية — زي مثلاً: "ابعت لي الـ CID"، "إقرأ block رقم 1000"، "غير الـ bus width لـ 8-bit".
 
-```
-Block Driver (block.c)
-       |
-       ↓ يطلب قراءة sector
-MMC Core (core.c)
-       |
-       ↓ يختار الـ command الصح من mmc.h (MMC_READ_SINGLE_BLOCK = 17)
-MMC Host Driver (مثلاً sdhci.c)
-       |
-       ↓ يحوّل الـ command لـ signals على الـ bus
-eMMC Chip
-       |
-       ↓ بيبعت R1 response (status)
-MMC Core يقرأ الـ R1
-       |
-       ↓ بيشيك على R1_READY_FOR_DATA و R1_CURRENT_STATE من mmc.h
-Block Driver يستلم البيانات
-```
+المشكلة: مين اللي بيحفظ إن الأمر رقم `17` معناه "اقرأ block واحد"؟ ومين اللي بيعرف إن الـ bit رقم `31` في الـ R1 response معناه "out of range error"؟
 
-الـ `mmc.h` هو الـ **shared dictionary** اللي كل طبقة في الرحلة دي بتستخدمه.
+**الإجابة: الملف ده.**
+
+بدله كل developer كان هيحفظ أرقام غريبة أو يكتب comments مش واضحة. الملف ده بيجمع كل الـ constants دي في مكان واحد.
 
 ---
 
-### أبرز محتويات الملف
+### القصة الكاملة — رحلة أمر Read بسيط
 
-#### 1. الـ Standard MMC Commands
-
-```c
-#define MMC_GO_IDLE_STATE         0   /* bc  — reset everything */
-#define MMC_SEND_OP_COND          1   /* bcr — negotiate voltage */
-#define MMC_ALL_SEND_CID          2   /* bcr — get card identity */
-#define MMC_READ_SINGLE_BLOCK    17   /* adtc — read one block */
-#define MMC_WRITE_BLOCK          24   /* adtc — write one block */
-#define MMC_ERASE                38   /* ac   — erase blocks */
-#define MMC_SWITCH                6   /* ac   — change EXT_CSD setting */
+```
+تطبيق المستخدم
+     ↓
+block layer (kernel)
+     ↓
+drivers/mmc/core/block.c  ← بيحول request لـ MMC command
+     ↓
+drivers/mmc/core/mmc_ops.c ← بيبني الأمر باستخدام macros من mmc.h
+     ↓
+drivers/mmc/host/sdhci.c   ← بيبعت الأمر على الـ bus الفعلي
+     ↓
+MMC Card Hardware
+     ↓
+R1 Response  ← الـ core بيفسره بالـ R1_* macros من mmc.h
 ```
 
-كل command ليه **نوع**:
-- `bc` = broadcast — بيتبعت لكل الكروت
-- `bcr` = broadcast with response
-- `ac` = addressed command — لكارت معين
-- `adtc` = addressed data transfer — بيشيل داتا
-
-#### 2. الـ R1 Response Bits
-
-```c
-#define R1_OUT_OF_RANGE     (1 << 31)  /* Address out of range */
-#define R1_ADDRESS_ERROR    (1 << 30)  /* Misaligned address */
-#define R1_WP_VIOLATION     (1 << 26)  /* Write protected area */
-#define R1_CARD_IS_LOCKED   (1 << 25)  /* Card is locked */
-#define R1_READY_FOR_DATA   (1 << 8)   /* Card ready to transfer */
-#define R1_CURRENT_STATE(x) ((x & 0x00001E00) >> 9)  /* 4-bit state */
-```
-
-الـ states الممكنة:
-| State | معناه |
-|-------|--------|
-| `R1_STATE_IDLE` (0) | في البداية، الكارت مش متصل |
-| `R1_STATE_TRAN` (4) | Transfer state — جاهز للنقل |
-| `R1_STATE_DATA` (5) | بيبعت داتا |
-| `R1_STATE_PRG` (7) | بيكتب (programming) |
-
-#### 3. الـ EXT_CSD — سجل الإعدادات المتقدمة
-
-الـ **EXT_CSD** هو جدول من 512 byte جوه الكارت — كل byte عنده رقم عنوان معرّف هنا:
-
-```c
-#define EXT_CSD_CACHE_CTRL      33   /* R/W — enable/disable cache */
-#define EXT_CSD_BUS_WIDTH       183  /* R/W — set bus width (1/4/8 bit) */
-#define EXT_CSD_HS_TIMING       185  /* R/W — set speed mode */
-#define EXT_CSD_REV             192  /* RO  — EXT_CSD revision */
-#define EXT_CSD_CARD_TYPE       196  /* RO  — supported speed modes */
-#define EXT_CSD_SEC_CNT         212  /* RO  — total sector count (4 bytes) */
-#define EXT_CSD_RPMB_MULT       168  /* RO  — RPMB partition size */
-```
-
-#### 4. الـ Speed Modes
-
-```c
-#define EXT_CSD_CARD_TYPE_HS_26     (1<<0)  /* 26 MHz  */
-#define EXT_CSD_CARD_TYPE_HS_52     (1<<1)  /* 52 MHz  */
-#define EXT_CSD_CARD_TYPE_DDR_1_8V  (1<<2)  /* 52 MHz DDR @1.8V */
-#define EXT_CSD_CARD_TYPE_HS200_1_8V (1<<4) /* 200 MHz SDR */
-#define EXT_CSD_CARD_TYPE_HS400_1_8V (1<<6) /* 200 MHz DDR */
-```
-
-التطور من 26 MHz → 52 MHz → 200 MHz SDR → 400 MB/s DDR — كل ده محتاج إعدادات مختلفة في الـ EXT_CSD.
-
-#### 5. الـ Command Queue (CQ) — الميزة الحديثة
-
-```c
-#define MMC_QUE_TASK_PARAMS     44   /* queue a task with params */
-#define MMC_QUE_TASK_ADDR       45   /* specify data address */
-#define MMC_EXECUTE_READ_TASK   46   /* execute queued read */
-#define MMC_EXECUTE_WRITE_TASK  47   /* execute queued write */
-#define EXT_CSD_CMDQ_DEPTH      307  /* max queue depth */
-```
-
-الـ **Command Queuing** بيخلي الـ kernel يبعت 32 أمر دفعة واحدة بدل ما يستنى كل أمر يخلص — زي الـ NCQ في SATA.
+في كل خطوة في الرحلة دي، الكود بيرجع لـ `mmc.h` عشان يعرف الأرقام الصح.
 
 ---
 
-### Inline Functions مهمة
+### محتوى الملف — إيه اللي جوّاه فعلاً؟
+
+#### 1. أوامر الـ MMC (Command Set)
+
+الـ MMC standard بيقسم الأوامر لـ **Classes** — كل class بيغطي وظيفة:
+
+| Class | الوظيفة | أمثلة |
+|-------|---------|-------|
+| Class 0 | Basic | `CMD0` reset, `CMD1` init, `CMD7` select |
+| Class 2 | Block Read | `CMD17` read single, `CMD18` read multi |
+| Class 4 | Block Write | `CMD24` write single, `CMD25` write multi |
+| Class 5 | Erase | `CMD35/36/38` erase groups |
+| Class 6 | Write Protect | `CMD28/29/30` |
+| Class 7 | Lock | `CMD42` lock/unlock |
+| Class 11 | Command Queue | `CMD44/45/46/47/48` CMDQ |
 
 ```c
-static inline bool mmc_op_multi(u32 opcode)
-{
-    /* هل الأمر ده multi-block transfer؟ */
-    return opcode == MMC_WRITE_MULTIPLE_BLOCK ||
-           opcode == MMC_READ_MULTIPLE_BLOCK;
-}
+#define MMC_GO_IDLE_STATE        0   /* bc  — broadcast, no response */
+#define MMC_SEND_OP_COND         1   /* bcr — broadcast, R3 response */
+#define MMC_READ_SINGLE_BLOCK   17   /* adtc — addressed data transfer */
+#define MMC_WRITE_BLOCK         24   /* adtc — write one block */
+```
 
-static inline bool mmc_ready_for_data(u32 status)
-{
-    /* بيشيك إن الكارت في TRAN state وجاهز للداتا */
-    return status & R1_READY_FOR_DATA &&
-           R1_CURRENT_STATE(status) == R1_STATE_TRAN;
-}
+#### 2. الـ R1 Response Bits — حالة الكارد
+
+لما بتبعت أمر، الكارد بيرد بـ **R1 status register** — 32 bit كل bit بيقول حاجة:
+
+```c
+#define R1_OUT_OF_RANGE    (1 << 31)  /* طلبت address برا نطاق الكارد */
+#define R1_CARD_IS_LOCKED  (1 << 25)  /* الكارد محمي بـ password */
+#define R1_COM_CRC_ERROR   (1 << 23)  /* الأمر وصل فيه تلف */
+#define R1_ILLEGAL_COMMAND (1 << 22)  /* أمر مش موجود أو مش في الوقت الصح */
+#define R1_READY_FOR_DATA  (1 <<  8)  /* الكارد جاهز يستقبل/يبعت بيانات */
+```
+
+وبيحدد **states** الكارد — الكارد مش بيقبل أوامر معينة غير في state معين:
+
+```c
+#define R1_STATE_IDLE  0  /* بعد الـ reset */
+#define R1_STATE_TRAN  4  /* Transfer state — الحالة الطبيعية للـ r/w */
+#define R1_STATE_PRG   7  /* Programming — الكارد بيكتب جوّاه */
+```
+
+#### 3. الـ EXT_CSD — "قاموس" الكارد
+
+الـ **Extended CSD** هو register بحجم 512 byte — فيه كل إعدادات الكارد وقدراته وحالته. كل byte ليه رقم (offset) وليه صلاحيات (RO/RW/W).
+
+```c
+#define EXT_CSD_HS_TIMING      185  /* R/W — اختار الـ timing mode */
+#define EXT_CSD_BUS_WIDTH      183  /* R/W — اختار عدد الـ data lines */
+#define EXT_CSD_CARD_TYPE      196  /* RO  — الكارد يدعم أنهي سرعات */
+#define EXT_CSD_REV            192  /* RO  — إصدار الـ EXT_CSD نفسه */
+#define EXT_CSD_SEC_CNT        212  /* RO  — إجمالي عدد الـ sectors */
+```
+
+**مثال حقيقي:** لما الـ kernel بيحاول يشغل الكارد بـ HS400 (أسرع mode)، بيقرأ `EXT_CSD_CARD_TYPE` (offset 196) ويشوف لو الـ `EXT_CSD_CARD_TYPE_HS400` bit متحطة — لو آه، يكمل. لو لأ، يرجع لـ HS200 أو أبطأ.
+
+```c
+#define EXT_CSD_CARD_TYPE_HS400_1_8V (1<<6)  /* 200MHz DDR at 1.8V */
+#define EXT_CSD_CARD_TYPE_HS400_1_2V (1<<7)  /* 200MHz DDR at 1.2V */
+#define EXT_CSD_CARD_TYPE_HS400      (EXT_CSD_CARD_TYPE_HS400_1_8V | \
+                                      EXT_CSD_CARD_TYPE_HS400_1_2V)
+```
+
+#### 4. الـ CCC — Card Command Classes
+
+الـ **CSD register** بيحتوي على **CCC field** — 12-bit بكل bit بيقول "الكارد ده بيدعم الـ class دي":
+
+```c
+#define CCC_BLOCK_READ   (1<<2)  /* الكارد يعرف يقرأ blocks */
+#define CCC_BLOCK_WRITE  (1<<4)  /* الكارد يعرف يكتب blocks */
+#define CCC_ERASE        (1<<5)  /* الكارد يعرف يمسح */
+#define CCC_LOCK_CARD    (1<<7)  /* الكارد يعرف يتقفل بـ password */
+```
+
+#### 5. الـ Erase/Trim/Discard Arguments
+
+الـ MMC بيدعم مستويات مختلفة من "المسح":
+
+```c
+#define MMC_ERASE_ARG          0x00000000  /* مسح عادي */
+#define MMC_TRIM_ARG           0x00000001  /* trim — زي TRIM في SSD */
+#define MMC_DISCARD_ARG        0x00000003  /* discard — أسرع من trim */
+#define MMC_SECURE_ERASE_ARG   0x80000000  /* مسح آمن — للبيانات الحساسة */
+```
+
+#### 6. الـ BKOPS — Background Operations
+
+الـ eMMC لما بيكون عنده "تنظيف داخلي" يعمله (زي الـ garbage collection في الـ SSD):
+
+```c
+#define EXT_CSD_BKOPS_SUPPORT  502  /* هل الكارد بيدعم BKOPS */
+#define EXT_CSD_BKOPS_EN       163  /* تفعيل/تعطيل الـ BKOPS */
+#define EXT_CSD_BKOPS_START    164  /* ابدأ BKOPS دلوقتي */
+#define EXT_CSD_URGENT_BKOPS   BIT(0) /* الكارد محتاج BKOPS فوري */
+```
+
+#### 7. الـ RPMB — Replay Protected Memory Block
+
+جزء من الكارد مخصص للتخزين الآمن (بيستخدمه مثلاً TEE/TrustZone):
+
+```c
+#define EXT_CSD_RPMB_MULT  168  /* حجم الـ RPMB partition بالـ 128KB */
+```
+
+#### 8. الـ CMDQ — Command Queuing
+
+زي الـ NCQ في الـ SATA أو الـ NVMe queuing — تقدر تبعت 32 أمر في نفس الوقت:
+
+```c
+#define EXT_CSD_CMDQ_SUPPORT  308  /* هل الكارد بيدعم CMDQ */
+#define EXT_CSD_CMDQ_DEPTH    307  /* أقصى عدد أوامر متزامنة */
+#define MMC_QUE_TASK_PARAMS   44   /* CMD44 — حدد parameters الأمر */
+#define MMC_QUE_TASK_ADDR     45   /* CMD45 — حدد address البيانات */
+#define MMC_EXECUTE_READ_TASK 46   /* CMD46 — نفّذ قراءة */
+#define MMC_EXECUTE_WRITE_TASK 47  /* CMD47 — نفّذ كتابة */
 ```
 
 ---
 
-### الملفات اللي المفروض تعرفها
+### Inline Helper Functions
 
-#### الهيدرز المرتبطة
+الملف فيه 3 functions بسيطة:
+
+```c
+/* هل الأمر ده multi-block transfer؟ */
+static inline bool mmc_op_multi(u32 opcode) { ... }
+
+/* هل الأمر ده tuning sequence؟ */
+static inline bool mmc_op_tuning(u32 opcode) { ... }
+
+/* هل الكارد جاهز فعلاً للبيانات؟ (بيتحقق من حالتين مش حالة واحدة) */
+static inline bool mmc_ready_for_data(u32 status) { ... }
+```
+
+---
+
+### الـ SPI Mode
+
+الـ MMC ممكن يتشغل فوق **SPI bus** بدل الـ native MMC interface — في الحالة دي الـ responses بتختلف:
+
+```c
+#define R1_SPI_IDLE            (1 << 0)  /* الكارد في idle state */
+#define R1_SPI_ILLEGAL_COMMAND (1 << 2)  /* أمر غير قانوني */
+#define MMC_SPI_READ_OCR       58        /* قرأ الـ OCR register في SPI mode */
+```
+
+---
+
+### الملفات ذات الصلة
 
 | الملف | الدور |
 |-------|-------|
-| `include/linux/mmc/mmc.h` | **الملف ده** — commands وprotocol definitions |
-| `include/linux/mmc/host.h` | تعريف `struct mmc_host` و`struct mmc_ios` |
-| `include/linux/mmc/card.h` | تعريف `struct mmc_card`، `struct mmc_csd`، `struct mmc_ext_csd` |
-| `include/linux/mmc/core.h` | تعريف `struct mmc_request`، `struct mmc_command` |
-| `include/linux/mmc/sd.h` | SD-specific commands (مختلف عن MMC) |
-| `include/linux/mmc/sdio.h` | SDIO commands للـ Wi-Fi وبلوتوث |
-
-#### الكور درايفرز
-
-| الملف | الدور |
-|-------|-------|
-| `drivers/mmc/core/mmc.c` | يقرأ EXT_CSD، يضبط الـ timing، يعمل init للكارت |
-| `drivers/mmc/core/mmc_ops.c` | ينفذ الـ MMC commands (مثلاً `mmc_switch()`) |
-| `drivers/mmc/core/core.c` | الـ core scheduler للـ requests |
-| `drivers/mmc/core/block.c` | يربط الـ MMC بـ block device layer |
-
-#### هوست درايفرز (أمثلة)
-
-| الملف | الدور |
-|-------|-------|
-| `drivers/mmc/host/sdhci.c` | الـ standard SDHCI controller |
-| `drivers/mmc/host/dw_mmc.c` | DesignWare MMC controller |
-| `drivers/mmc/host/cqhci-core.c` | Command Queue Host Controller Interface |
+| `include/linux/mmc/mmc.h` | **الملف ده** — MMC protocol constants |
+| `include/linux/mmc/sd.h` | نفس الفكرة لبروتوكول الـ SD cards |
+| `include/linux/mmc/sdio.h` | constants لبروتوكول الـ SDIO (WiFi/BT) |
+| `include/linux/mmc/host.h` | تعريف struct الـ host controller |
+| `include/linux/mmc/card.h` | تعريف struct الـ mmc_card |
+| `include/linux/mmc/core.h` | الـ core API للتعامل مع الكروت |
+| `drivers/mmc/core/mmc.c` | initialization وإدارة الـ MMC cards |
+| `drivers/mmc/core/mmc_ops.c` | تنفيذ الأوامر المعرّفة هنا |
+| `drivers/mmc/core/block.c` | ربط الـ MMC بالـ block device layer |
+| `drivers/mmc/core/core.c` | القلب الرئيسي للـ subsystem |
+| `drivers/mmc/host/sdhci.c` | أشهر host controller driver |
 
 ---
 
-### لماذا الملف ده مهم؟
+### ملخص — الملف ده بيعمل إيه بالضبط؟
 
-كل كود بيتعامل مع MMC في الـ kernel — سواء كان هوست درايفر، كور، أو بلوك لاير — **لازم يعرف** رقم كل command، وشكل الـ response، وعنوان كل إعداد في EXT_CSD. الـ `mmc.h` هو المصدر الوحيد لكل المعلومات دي. من غيره، محدش يقدر يتكلم مع الكارت.
-## Phase 2: شرح الـ MMC Framework
+الملف **لا بيحتوي على logic ولا بيفعل حاجة بنفسه.** ده ملف تعريفات بحت (constants + 3 inline helpers). قيمته في إنه:
 
-### المشكلة اللي الـ Framework ده بيحلها
+1. **ترجمة** الـ JEDEC MMC specification لـ C constants يقدر الكود يستخدمها
+2. **توحيد** اللغة بين كل مكونات الـ MMC subsystem
+3. **مرجع** للـ developers لفهم معنى كل رقم في الـ protocol
 
-تخيل إنك بتكتب driver لـ eMMC chip على board بـ ARM. من غير framework، هتضطر تكتب:
-- كل logic الـ card initialization من الأول (CMD0 → CMD1 → CMD2 → CMD3 ...)
-- كل state machine الـ card
-- كل حاجة خاصة بـ SD vs MMC vs SDIO
-- الـ block layer integration بنفسك
+بدونه، كل driver كان هيكتب الأرقام يدوياً — وبيؤدي لـ bugs وعدم توافق.
+## Phase 2: شرح الـ MMC/SD Framework
 
-ولما تيجي تشتغل على board تاني بـ controller مختلف، هتعيد كتابة نفس الكود من الأول.
+### المشكلة اللي الـ Subsystem بيحلها
 
-**المشكلة الأساسية**: عندنا طبقتين منفصلتين تماماً:
-1. **الـ card protocol** — كلام MMC/SD standard، commands، responses، state machines. ده ثابت بغض النظر عن الـ hardware.
-2. **الـ host controller hardware** — الـ SDHCI register map، الـ DMA setup، الـ clock gating. ده بيتغير من SoC للتاني.
+تخيل إنك بتكتب driver لـ eMMC chip على board معينة. من غير framework، هتضطر تعيد كتابة كل منطق:
+- إزاي تعمل card initialization (CMD0 → CMD1 → CMD2 → CMD3 → CMD7)
+- إزاي تفهم الـ CSD و CID registers
+- إزاي تعمل block read/write
+- إزاي تتعامل مع الـ error states
+- إزاي تضيف support للـ filesystem فوق الكارت
 
-الـ Linux MMC Framework بيفصل بينهم فصل تام.
+وكمان لو عندك SD card driver تاني، هيعيد نفس الكلام من الأول. **الـ MMC/SD Framework** موجود عشان يمنع التكرار ده ويفصل بين:
+
+1. **منطق البروتوكول** — أوامر الكارت، state machine، initialization sequences (هذا مشترك بين كل hardware)
+2. **منطق الـ Hardware** — إزاي الـ controller بيبعت الـ clock وبيستقبل الـ data (ده بيختلف من chip لـ chip)
 
 ---
 
-### الحل — النهج اللي بياخده الـ Kernel
+### الحل — نهج الـ Kernel
 
-الـ kernel قسّم المسؤولية لثلاث طبقات:
+الـ kernel قسّم المشكلة لـ **3 طبقات واضحة**:
 
 ```
-┌─────────────────────────────────────┐
-│         Block / Network Layer       │  ← مستخدم الـ storage
-├─────────────────────────────────────┤
-│         MMC Core (الـ framework)    │  ← المنطق المشترك
-├─────────────────────────────────────┤
-│   Card Driver   │   Host Driver     │  ← التخصص
-│ (mmc/sd/sdio)   │ (sdhci/dw-mmc)   │
-├─────────────────────────────────────┤
-│         Hardware (eMMC / SDIO)      │
-└─────────────────────────────────────┘
+┌─────────────────────────────────────────┐
+│         Block Device Layer              │  ← الـ filesystem بيشوف هنا
+│         (mmc_blk driver)                │
+├─────────────────────────────────────────┤
+│         MMC Core Layer                  │  ← المنطق المشترك كله هنا
+│  (card init, protocol, state machine)   │
+├──────────────┬──────────────────────────┤
+│  Card Ops    │    Host Ops              │
+│  (mmc/sd/    │  (set_ios, request,      │
+│   sdio)      │   get_cd, tuning...)     │
+├──────────────┴──────────────────────────┤
+│         Host Controller Driver          │  ← الـ hardware-specific هنا
+│  (sdhci, dw_mmc, omap_hsmmc, ...)       │
+├─────────────────────────────────────────┤
+│         Actual Hardware (eMMC/SD/SDIO)  │
+└─────────────────────────────────────────┘
 ```
-
-الـ **MMC Core** هو القلب — بيعمل:
-- Card detection وإرسال initialization sequence
-- Protocol negotiation (HS/HS200/HS400/DDR)
-- Power management
-- Error handling وretry logic
-- تسجيل الـ card كـ block device
-
-الـ **Host Driver** بيعمل:
-- تسجيل نفسه مع الـ Core عبر `struct mmc_host`
-- تنفيذ الـ ops (إرسال command، ضبط clock، ضبط voltage)
-
-الـ **Card Driver** (e.g., `mmc_block`) بيعمل:
-- تسجيل نفسه كـ block device
-- ترجمة الـ bio requests لـ MMC commands
 
 ---
 
 ### الـ Big Picture Architecture
 
 ```
-User Space (read/write /dev/mmcblk0)
-              │
-              ▼
-┌─────────────────────────────┐
-│      Block Layer (blk-mq)   │  ← subsystem تاني: بيدير الـ I/O queue
-└────────────┬────────────────┘
-             │  bio requests
-             ▼
-┌─────────────────────────────┐
-│    mmc_block driver         │  ← CONSUMER: يطلب read/write
-│  (drivers/mmc/card/block.c) │
-└────────────┬────────────────┘
-             │  struct mmc_request
-             ▼
-┌──────────────────────────────────────────────────┐
-│                 MMC CORE                          │
-│  ┌────────────────────────────────────────────┐  │
-│  │  mmc_ops / sd_ops / sdio_ops               │  │  ← card-type logic
-│  │  (drivers/mmc/core/mmc.c, sd.c, sdio.c)   │  │
-│  ├────────────────────────────────────────────┤  │
-│  │  core.c — request dispatch, error retry    │  │
-│  │  bus.c  — card registration with sysfs     │  │
-│  └────────────────────────────────────────────┘  │
-└────────────────────┬─────────────────────────────┘
-                     │  mmc_host_ops callbacks
-          ┌──────────┴──────────┐
-          ▼                     ▼
-┌──────────────────┐   ┌──────────────────┐
-│  SDHCI driver    │   │  DW-MMC driver   │  ← PROVIDERS
-│ (sdhci.c)        │   │ (dw_mmc.c)       │
-└────────┬─────────┘   └────────┬─────────┘
-         │                      │
-         ▼                      ▼
-  ┌────────────┐        ┌─────────────┐
-  │ eMMC chip  │        │  SD card    │
-  └────────────┘        └─────────────┘
-```
-
-**الـ Subsystems التانية اللي لازم تعرفها:**
-- **Block Layer (blk-mq)**: بيدير قوايم الـ I/O requests من الـ filesystem. الـ mmc_block بيتسجل فيه كـ block device.
-- **Regulator Framework**: الـ `struct mmc_supply` بتحتوي على `vmmc` و`vqmmc` اللي هما regulator handles بتتحكم في الـ power supply للـ card.
-- **Device Model / sysfs**: كل `mmc_host` و`mmc_card` هي `struct device` كاملة متسجلة في الـ device tree.
-- **DMA Framework**: الـ `struct mmc_data` بتحتوي `struct scatterlist` اللي الـ host driver بيعمل لها DMA mapping.
-
----
-
-### المثال الحقيقي — رحلة الـ read request
-
-على Raspberry Pi 4 (SDHCI controller متصل بـ eMMC):
-
-```
-1. الـ filesystem بتطلب read من /dev/mmcblk0p2
-2. blk-mq بيحول الطلب لـ bio
-3. mmc_block بيحوّل الـ bio لـ struct mmc_request
-   ├── struct mmc_command (CMD18: READ_MULTIPLE_BLOCK)
-   ├── struct mmc_data (scatter list من الـ page cache)
-   └── struct mmc_command stop (CMD12)
-4. MMC Core بيبعت الـ request للـ host ops
-5. SDHCI driver بيكتب في registers الـ controller
-6. الـ controller بيتكلم مع الـ eMMC chip على الـ bus
-7. البيانات بتيجي عبر DMA للـ page cache مباشرة
-8. الـ completion callback بيشغّل
-9. blk-mq بيكمّل الـ bio
+User Space
+    │
+    ▼
+┌──────────────────────────────────────────────────────┐
+│                  VFS / Filesystem                    │
+│              (ext4, fat32, f2fs, ...)                │
+└────────────────────────┬─────────────────────────────┘
+                         │  block I/O requests
+                         ▼
+┌──────────────────────────────────────────────────────┐
+│              Block Layer (bio / blk-mq)              │
+│   الـ subsystem ده مش جزء من MMC لكن بيستخدمه       │
+└────────────────────────┬─────────────────────────────┘
+                         │
+                         ▼
+┌──────────────────────────────────────────────────────┐
+│            mmc_blk (Block Driver for MMC)            │
+│  - يحول block requests لـ mmc_request structs        │
+│  - يتعامل مع partitions (boot0, boot1, RPMB, GP)    │
+└────────────────────────┬─────────────────────────────┘
+                         │  struct mmc_request
+                         ▼
+┌──────────────────────────────────────────────────────┐
+│                    MMC Core                          │
+│                                                      │
+│  ┌─────────────┐  ┌──────────┐  ┌────────────────┐  │
+│  │  mmc_ops    │  │  sd_ops  │  │   sdio_ops     │  │
+│  │ (eMMC init) │  │(SD init) │  │ (SDIO init)    │  │
+│  └─────────────┘  └──────────┘  └────────────────┘  │
+│                                                      │
+│  - Card detection & initialization                   │
+│  - Power management                                  │
+│  - Tuning / re-tuning                                │
+│  - Error recovery                                    │
+│  - Command queuing (CQE)                             │
+└────────────────────────┬─────────────────────────────┘
+                         │  struct mmc_host_ops (callbacks)
+                         ▼
+┌──────────────────────────────────────────────────────┐
+│              Host Controller Driver                  │
+│                                                      │
+│   sdhci.c          dw_mmc.c         omap_hsmmc.c    │
+│   sdhci-pci.c      sdhci-esdhc.c    bcm2835_mmc.c   │
+│                                                      │
+│  - DMA setup                                         │
+│  - Clock management                                  │
+│  - Voltage switching (3.3V ↔ 1.8V)                  │
+│  - Signal timing / tuning hardware                   │
+└────────────────────────┬─────────────────────────────┘
+                         │  physical signals
+                         ▼
+┌──────────────────────────────────────────────────────┐
+│            Physical Card / Chip                      │
+│         (eMMC, SD Card, SDIO WiFi chip, ...)         │
+└──────────────────────────────────────────────────────┘
 ```
 
 ---
 
-### الـ Analogy الحقيقية — شركة شحن دولي
+### التشبيه الواقعي — المطار والطيارة
 
-تخيل شركة شحن دولي زي DHL:
+تخيل **شركة طيران بتشتغل على مطارات مختلفة**:
 
-| الـ Analogy | الـ Kernel Concept |
+| عنصر المطار | المقابل في الـ MMC Framework |
 |---|---|
-| **العميل** (بيطلب شحن) | الـ `mmc_block` driver |
-| **مكتب الـ DHL** (standard interface) | **MMC Core** |
-| **بروتوكول الشحن الدولي** (CN23، ATA carnet) | **MMC/SD protocol** — الـ commands في `mmc.h` |
-| **الطيارة/الشاحنة** (وسيلة النقل الفعلية) | **Host Controller Driver** (SDHCI, DW-MMC) |
-| **المطار/الميناء** (hardware interface) | **الـ physical bus** (SDIO pins، PCIe) |
-| **جواز السفر للبضاعة** (بيانات عن البضاعة) | `struct mmc_card` (CID, CSD, EXT_CSD) |
-| **فاتورة الشحن** | `struct mmc_request` |
-| **تفاصيل الفاتورة** (ماذا، كم، وين) | `struct mmc_command` + `struct mmc_data` |
-| **إمكانيات المطار** (max weight، customs rules) | `struct mmc_host` capabilities (caps, caps2) |
-| **حالة الجو** (بتأثر على الـ timing) | `struct mmc_ios` (clock, voltage, bus width) |
+| **الطيار** | الـ `mmc_blk` driver — بيحدد الـ destination (read/write request) |
+| **برج المراقبة (ATC)** | الـ MMC Core — بيدير كل الـ protocol، بيقرر إيمتى تقلع وإيمتى تنزل |
+| **لغة الطيران الموحدة (ICAO)** | الـ MMC commands (CMD0, CMD1...) — نفس اللغة بغض النظر عن المطار |
+| **المطار نفسه (البنية التحتية)** | الـ Host Controller — SDHCI, DW-MMC, HostController التاني |
+| **الـ Runway + الأجهزة** | الـ struct `mmc_host_ops` — الـ callbacks اللي كل مطار بيعملها بطريقته |
+| **الطيارة** | الـ `mmc_card` struct — بتحمل كل معلومات الكارت (CID, CSD, EXT_CSD) |
+| **جواز السفر / Flight manifest** | الـ CID (Card IDentification) — مين الكارت ده؟ من مين صنعه؟ |
+| **قوانين الجمارك لكل بلد** | الـ quirks — كل كارت ممكن يكون عنده سلوك غريب محتاج handling خاص |
 
-**التعمق في الـ Analogy:**
-
-- لما DHL بتفتح فرع جديد في مدينة جديدة، مش بتغير إجراءات الشحن الدولي — كذلك لما بتضيف host controller جديد، الـ MMC protocol ما بيتغيرش.
-- الطيارة مش محتاجة تعرف إيه اللي جوا الكرتونة — كذلك الـ SDHCI driver مش محتاج يفهم MMC commands، بس يبعتها على الـ wire.
-- لو الطيارة اتأخرت (timeout)، مكتب DHL (Core) هو اللي بيقرر هنعيد الشحن ولا لأ (retry logic).
+**الفكرة الجوهرية**: برج المراقبة (Core) ما بيعرفش تفاصيل كل مطار، لكن بيعرف إزاي يتكلم مع الطيارة بلغة موحدة. وكل مطار (Host Controller) بيعمل نفس الـ interface بطريقته الخاصة.
 
 ---
 
 ### الـ Core Abstraction — الفكرة المحورية
 
-الفكرة المحورية في الـ MMC Framework هي:
+الـ MMC Framework بيدور حول **3 abstractions رئيسية**:
 
-> **الفصل التام بين "الـ protocol" و"الـ transport"**
-
-الـ protocol (إيه الكوماند اللي هنبعته وإيه الـ response المتوقع) ده **ثابت** ومعرّف في الـ MMC/SD specification.
-
-الـ transport (إزاي هنبعت الـ bits على الـ wire) ده **متغير** حسب الـ hardware.
-
-الـ framework بيحقق ده عبر **vtable pattern** — الـ `struct mmc_host_ops`:
+#### 1. `struct mmc_host` — الـ Controller
 
 ```c
-/*
- * The host driver fills this table with its hardware-specific
- * implementations. The Core calls them without knowing the hardware.
- */
-struct mmc_host_ops {
-    /* Send a request to the hardware */
-    void (*request)(struct mmc_host *host, struct mmc_request *req);
-
-    /* Configure bus: clock, voltage, width, timing */
-    void (*set_ios)(struct mmc_host *host, struct mmc_ios *ios);
-
-    /* Is there a card inserted? */
-    int  (*get_cd)(struct mmc_host *host);
-
-    /* Is the card write-protected? */
-    int  (*get_ro)(struct mmc_host *host);
-
-    /* High-speed tuning: hardware-specific signal calibration */
-    int  (*execute_tuning)(struct mmc_host *host, u32 opcode);
-
-    /* ... more callbacks ... */
+struct mmc_host {
+    const struct mmc_host_ops *ops;  /* vtable للـ hardware callbacks */
+    struct mmc_ios ios;              /* الـ bus state الحالي (clock, voltage, width) */
+    struct mmc_card *card;           /* الكارت اللي على الـ bus دلوقتي */
+    unsigned int caps;               /* capabilities: 4-bit, 8-bit, DDR, UHS... */
+    unsigned int f_min, f_max;       /* نطاق الـ clock المسموح بيه */
+    u32 ocr_avail;                   /* الـ voltages المدعومة */
+    /* ... */
 };
 ```
 
-الـ Core بيكلّم الـ hardware دايماً عبر هذه الـ ops فقط — zero direct hardware access.
+الـ `mmc_host` هو **الـ Software representation للـ SDMMC Controller**. كل controller على الـ SoC بيكون له instance منه. الـ host driver بيعمل `alloc` وبيملى الـ `ops`.
 
----
-
-### الـ Central Structs وعلاقاتها
-
-```
-struct mmc_host                        struct mmc_card
-┌─────────────────────────┐           ┌──────────────────────────┐
-│ *parent (struct device) │◄──────────│ *host                    │
-│ ops → mmc_host_ops      │           │ dev (struct device)      │
-│ ios → mmc_ios           │           │ type (MMC/SD/SDIO)       │
-│   ├ clock               │           │ rca (relative address)   │
-│   ├ bus_width           │           │ cid → mmc_cid            │
-│   ├ timing              │           │   ├ manfid               │
-│   └ signal_voltage      │           │   └ prod_name            │
-│ caps / caps2 (bitmasks) │           │ csd → mmc_csd            │
-│ f_min / f_max           │           │   └ capacity             │
-│ *card → mmc_card ───────┼──────────►│ ext_csd → mmc_ext_csd   │
-│ ocr_avail               │           │   ├ hs_max_dtr           │
-│ supply → mmc_supply     │           │   ├ cmdq_support         │
-│   ├ *vmmc (regulator)   │           │   └ cache_size           │
-│   └ *vqmmc (regulator)  │           │ part[] → mmc_part[7]    │
-│ max_blk_size            │           │   (boot0/1, gp0-3, rpmb) │
-│ max_blk_count           │           └──────────────────────────┘
-│ *cqe_ops → mmc_cqe_ops  │
-└─────────────────────────┘
-
-struct mmc_request
-┌────────────────────────┐
-│ *sbc → mmc_command     │  ← CMD23: SET_BLOCK_COUNT (optional)
-│ *cmd → mmc_command     │  ← الـ main command (e.g., CMD18)
-│   ├ opcode             │
-│   ├ arg                │
-│   ├ resp[4]            │  ← 128-bit response buffer
-│   └ flags (RSP type)   │
-│ *data → mmc_data       │  ← بيانات القراءة/الكتابة
-│   ├ blksz              │
-│   ├ blocks             │
-│   ├ *sg (scatterlist)  │  ← DMA scatter/gather list
-│   └ flags (READ/WRITE) │
-│ *stop → mmc_command    │  ← CMD12: STOP_TRANSMISSION
-│ done() callback        │
-└────────────────────────┘
-```
-
----
-
-### ما يملكه الـ Framework (Core) وما يفوّضه للـ Drivers
-
-#### الـ Core بيمتلك ويتحكم فيه:
-
-| المسؤولية | المكان |
-|---|---|
-| **Card initialization sequence** | `drivers/mmc/core/mmc.c` — CMD0→1→2→3→... |
-| **Speed mode negotiation** | بيقرأ `EXT_CSD_CARD_TYPE` ويقارنه بـ `host->caps` |
-| **Tuning trigger** | بيستدعي `host->ops->execute_tuning()` بعد الـ timing switch |
-| **Error retry logic** | بيحاول تاني لو `cmd->error != 0` |
-| **Power sequence** | بيطلب من الـ regulator framework رفع الـ vmmc |
-| **Card detection** | `mmc_detect_change()` → delayed work |
-| **sysfs/uevent** | تسجيل `mmc_card` كـ `struct device` |
-| **Block count negotiation** | بيبعت CMD23 لو `MMC_CAP_CMD23` موجود |
-
-#### الـ Core بيفوّض للـ Host Driver:
-
-| المسؤولية | الـ ops callback |
-|---|---|
-| إرسال command على الـ wire | `->request()` |
-| ضبط الـ clock frequency | `->set_ios()` |
-| ضبط الـ bus width (1/4/8 bit) | `->set_ios()` |
-| voltage switching (3.3V → 1.8V) | `->start_signal_voltage_switch()` |
-| كشف وجود الـ card | `->get_cd()` |
-| كشف الـ write protection | `->get_ro()` |
-| signal tuning للـ HS200/HS400 | `->execute_tuning()` |
-| hardware reset عبر RST_n | `->card_hw_reset()` |
-
-#### الـ Core بيفوّض للـ Card Driver (mmc_block):
-
-| المسؤولية | الطريقة |
-|---|---|
-| تسجيل الـ block device | `register_blkdev()` |
-| ترجمة الـ bio لـ mmc_request | في `mmc_blk_mq_issue_rq()` |
-| الـ partition management | عبر `mmc_part` array |
-
----
-
-### الـ MMC Commands في `mmc.h` — لماذا هي هكذا؟
-
-الـ commands المعرّفة في `mmc.h` مش عشوائية — هي مقسّمة لـ **Command Classes (CCC)**:
-
-```
-┌────────────────────────────────────────────────────────────┐
-│  CSD Register: bits [95:84] = CCC (Command Class bitmask)  │
-│                                                            │
-│  Class 0 (Basic):     CMD0,1,2,3,4,7,9,10,12,13,15       │
-│  Class 2 (Block R):   CMD16,17,18                         │
-│  Class 4 (Block W):   CMD16,24,25,26,27                   │
-│  Class 5 (Erase):     CMD35,36,38                         │
-│  Class 6 (Write Prot):CMD28,29,30                         │
-│  Class 7 (Lock):      CMD42                               │
-│  Class 8 (App):       CMD55,56                            │
-│  Class 10 (Switch):   CMD6                                │
-│  Class 11 (CmdQ):     CMD44,45,46,47,48                  │
-└────────────────────────────────────────────────────────────┘
-```
-
-الـ Core بيقرأ الـ CSD من الـ card ويعرف أي classes مدعومة قبل ما يبعت أي command.
-
----
-
-### الـ EXT_CSD — قلب الـ eMMC Configuration
-
-الـ `EXT_CSD` هو register بحجم **512 byte** موجود داخل الـ eMMC chip. مش موجود في الـ SD standard — eMMC حصري.
-
-الـ Core بيقراه مرة واحدة أثناء الـ initialization بـ CMD8 (SEND_EXT_CSD) ويخزّنه في `mmc_card.ext_csd`.
-
-**أهم الـ fields:**
+#### 2. `struct mmc_card` — الكارت
 
 ```c
-/*
- * EXT_CSD byte 196 — what speeds this card supports
- * The Core compares this with host->caps2 to pick the best mode
- */
-#define EXT_CSD_CARD_TYPE_HS400_1_8V  (1<<6)  /* 200MHz DDR at 1.8V */
-#define EXT_CSD_CARD_TYPE_HS200_1_8V  (1<<4)  /* 200MHz SDR at 1.8V */
-#define EXT_CSD_CARD_TYPE_DDR_1_8V    (1<<2)  /* 52MHz DDR at 1.8V */
-#define EXT_CSD_CARD_TYPE_HS_52       (1<<1)  /* 52MHz */
+struct mmc_card {
+    struct mmc_host *host;     /* على أي controller موصول */
+    unsigned int type;         /* MMC_TYPE_MMC / SD / SDIO */
+    unsigned int rca;          /* Relative Card Address — زي عنوان الكارت */
+    struct mmc_cid cid;        /* Card IDentification — مين صنعه وإيه الـ serial */
+    struct mmc_csd csd;        /* Card Specific Data — السعة والـ timing */
+    struct mmc_ext_csd ext_csd;/* eMMC v4+ — الـ extended registers (512 bytes) */
+    struct mmc_part part[7];   /* physical partitions: boot0/1, RPMB, GP0-3 */
+    /* ... */
+};
+```
 
-/*
- * EXT_CSD byte 185 — current timing mode
- * Written by Core via CMD6 (SWITCH) to change speed
- */
-#define EXT_CSD_TIMING_HS400  3
-#define EXT_CSD_TIMING_HS200  2
-#define EXT_CSD_TIMING_HS     1
+الـ `mmc_card` بيتعمل بعد الـ initialization ويُمثّل الكارت اللي اتشاف على الـ bus.
 
-/*
- * EXT_CSD byte 308 — does this card support Command Queuing?
- * If yes, Core enables CQE path via mmc_cqe_ops
- */
-#define EXT_CSD_CMDQ_SUPPORTED  BIT(0)
+#### 3. `struct mmc_request` — الطلب
+
+```c
+struct mmc_request {
+    struct mmc_command *sbc;   /* optional: SET_BLOCK_COUNT قبل الـ transfer */
+    struct mmc_command *cmd;   /* الأمر الأساسي */
+    struct mmc_data    *data;  /* البيانات المصاحبة (لو في data transfer) */
+    struct mmc_command *stop;  /* STOP_TRANSMISSION بعد الـ transfer */
+    void (*done)(struct mmc_request *); /* callback لما الـ request يخلص */
+};
+```
+
+والـ `mmc_command` بيحمل الأمر نفسه:
+
+```c
+struct mmc_command {
+    u32 opcode;        /* رقم الأمر: CMD17 = read, CMD24 = write, etc. */
+    u32 arg;           /* الـ argument: عنوان الـ block أو أي parameter */
+    u32 resp[4];       /* الـ response من الكارت (R1/R2/R3/R6/R7) */
+    unsigned int flags;/* نوع الـ response المتوقع (MMC_RSP_R1, R2, ...) */
+    int error;         /* نتيجة التنفيذ */
+};
 ```
 
 ---
 
-### الـ Card State Machine
-
-الـ MMC spec بتعرّف states للـ card، والـ Core مسؤول إنه يتابعها:
+### كيف الـ Structs بترتبط ببعض
 
 ```
-                    ┌─────┐
-         Power on   │     │ CMD0
-    ────────────────► IDLE ◄──────────────────────────────┐
-                    └──┬──┘                               │
-                  CMD1 │ (SEND_OP_COND)                   │
-                    ┌──▼──┐                               │
-                    │READY│                               │
-                    └──┬──┘                               │
-                  CMD2 │ (ALL_SEND_CID)                   │
-                    ┌──▼──┐                               │
-                    │IDENT│                               │
-                    └──┬──┘                               │
-                  CMD3 │ (SET_RELATIVE_ADDR)              │
-                    ┌──▼──┐                               │
-         ┌──────────►STBY ◄─────────────────────┐        │
-         │          └──┬──┘                      │        │
-         │        CMD7 │ (SELECT_CARD)           │        │
-         │          ┌──▼──┐                      │        │
-         │    ┌─────►TRAN ◄────────────────────┐ │        │
-         │    │     └──┬──┘  CMD12/error        │ │        │
-         │    │  CMD18 │                        │ │        │
-         │    │     ┌──▼──┐                     │ │        │
-         │    │     │DATA │ ──── error ──────── │─┘        │
-         │    │     └─────┘                     │          │
-         │    │  CMD24/25                        │          │
-         │    │     ┌─────┐                     │          │
-         │    └─────┤ RCV │                     │          │
-         │          └──┬──┘                     │          │
-         │             │ CMD12                  │          │
-         │          ┌──▼──┐                     │          │
-         └──────────┤ PRG │ ─── write done ─────┘          │
-                    └──┬──┘                                 │
-                  CMD15│ (GO_INACTIVE)                      │
-                    ┌──▼──┐                                 │
-                    │ DIS │ ───────────────────────────────►┘
-                    └─────┘
+struct mmc_host
+    │
+    ├──► ops ──► struct mmc_host_ops (vtable)
+    │                 ├── request()          ← بيبعت mmc_request للـ hardware
+    │                 ├── set_ios()          ← بيغير clock/voltage/bus width
+    │                 ├── get_cd()           ← card detected?
+    │                 ├── execute_tuning()   ← calibrate timing
+    │                 └── card_busy()        ← DAT0 still low?
+    │
+    ├──► ios ──► struct mmc_ios
+    │                 ├── clock             ← الـ clock rate الحالي
+    │                 ├── bus_width         ← 1/4/8 bit
+    │                 ├── timing            ← LEGACY/HS/DDR52/HS200/HS400
+    │                 └── signal_voltage    ← 3.3V / 1.8V / 1.2V
+    │
+    └──► card ──► struct mmc_card
+                      ├── host ──────────────────► (back pointer)
+                      ├── cid ──► struct mmc_cid   (manufacturer, serial)
+                      ├── csd ──► struct mmc_csd   (capacity, timing class)
+                      ├── ext_csd ► struct mmc_ext_csd (HS200/HS400 caps, RPMB size)
+                      └── part[] ► struct mmc_part  (boot0, boot1, RPMB, GP0-3)
+```
 
-R1_CURRENT_STATE(status) بيقرأ الـ state من الـ card response
-mmc_ready_for_data() بيتحقق إن الـ card في TRAN state وجاهزة
+```
+مسار الـ I/O Request:
+──────────────────────────────────────────────────────
+
+mmc_blk (block driver)
+    │
+    │  يبني struct mmc_request
+    ▼
+mmc_wait_for_req(host, mrq)     ← Core API
+    │
+    │  يستدعي
+    ▼
+host->ops->request(host, mrq)   ← Hardware callback
+    │
+    │  DMA + hardware registers
+    ▼
+Physical Card
+    │
+    │  response + data
+    ▼
+host driver يستدعي mmc_request_done(host, mrq)
+    │
+    ▼
+mrq->done(mrq)                  ← يرجع للـ mmc_blk
 ```
 
 ---
 
-### الـ R1 Response وكيف الـ Core بيفسّره
+### الـ Command Classes — تفاصيل بروتوكول الـ MMC
 
-كل command بيرجع response. الـ R1 هو الأكثر شيوعاً — 32 bit:
+الأوامر في الملف مقسّمة لـ **classes** حسب الوظيفة، وده تصميم من الـ MMC specification نفسها:
 
+| Class | الوظيفة | أمثلة من الكود |
+|---|---|---|
+| 0 (Basic) | إدارة الـ bus وعنونة الكارت | `MMC_GO_IDLE_STATE (CMD0)`, `MMC_ALL_SEND_CID (CMD2)` |
+| 2 (Block Read) | قراءة البيانات | `MMC_READ_SINGLE_BLOCK (CMD17)`, `MMC_READ_MULTIPLE_BLOCK (CMD18)` |
+| 4 (Block Write) | كتابة البيانات | `MMC_WRITE_BLOCK (CMD24)`, `MMC_WRITE_MULTIPLE_BLOCK (CMD25)` |
+| 5 (Erase) | مسح البيانات | `MMC_ERASE_GROUP_START (CMD35)`, `MMC_ERASE (CMD38)` |
+| 6 (Write Protect) | حماية الكتابة | `MMC_SET_WRITE_PROT (CMD28)` |
+| 10 (Switch) | تغيير الـ mode (HS, DDR, ...) | `MMC_SWITCH (CMD6)` |
+| 11 (CmdQ) | Command Queuing (أوامر متوازية) | `MMC_QUE_TASK_PARAMS (CMD44)`, `MMC_EXECUTE_READ_TASK (CMD46)` |
+
+#### الـ R1 Status Register — إزاي تقرأ حالة الكارت
+
+بعد أي أمر، الكارت بيرد بـ **R1 response** وهو 32-bit status word:
+
+```c
+/* أهم bits في الـ R1 response */
+#define R1_OUT_OF_RANGE     (1 << 31)  /* عنوان برا نطاق الكارت */
+#define R1_ADDRESS_ERROR    (1 << 30)  /* عنوان misaligned */
+#define R1_COM_CRC_ERROR    (1 << 23)  /* CRC error في الأمر */
+#define R1_ILLEGAL_COMMAND  (1 << 22)  /* أمر مش مسموح في الـ state الحالي */
+#define R1_CURRENT_STATE(x) ((x & 0x00001E00) >> 9)  /* 4 bits للـ state */
+#define R1_READY_FOR_DATA   (1 << 8)   /* الكارت جاهز لـ transfer */
 ```
- Bit 31: OUT_OF_RANGE  — العنوان خارج حدود الـ card
- Bit 30: ADDRESS_ERROR — الـ address مش aligned
- Bit 29: BLOCK_LEN_ERROR
- Bit 23: COM_CRC_ERROR — الـ CRC للـ command غلط
- Bit 22: ILLEGAL_COMMAND — الـ command مش مدعوم في الـ state الحالية
- Bits 12:9 — CURRENT_STATE (4 bits: IDLE/READY/IDENT/STBY/TRAN/DATA/RCV/PRG/DIS)
- Bit  8: READY_FOR_DATA
- Bit  7: SWITCH_ERROR — CMD6 switch فشل
 
-/* The Core uses this macro constantly to check card state */
-#define R1_CURRENT_STATE(x)  ((x & 0x00001E00) >> 9)
+الـ `mmc_ready_for_data()` في الملف بيتحقق من bit 8 **و** إن الكارت في state **TRAN** (Transfer State):
 
-/* And this function before any data transfer */
+```c
 static inline bool mmc_ready_for_data(u32 status)
 {
+    /* بعض الكروت بتعمل misreport للـ status bits */
     return status & R1_READY_FOR_DATA &&
            R1_CURRENT_STATE(status) == R1_STATE_TRAN;
 }
 ```
 
+#### الـ Card State Machine
+
+```
+            CMD0
+              │
+              ▼
+         ┌─────────┐
+         │  IDLE   │◄──────────────────────────────────┐
+         └────┬────┘                                   │
+              │ CMD1 (MMC) / ACMD41 (SD) — send OCR    │
+              ▼                                        │
+         ┌─────────┐                                   │
+         │  READY  │                                   │
+         └────┬────┘                                   │
+              │ CMD2 — send CID                        │
+              ▼                                        │
+         ┌─────────┐                                   │
+         │  IDENT  │                                   │
+         └────┬────┘                                   │
+              │ CMD3 — set RCA                         │
+              ▼                                        │
+         ┌─────────┐    CMD7 (deselect)                │
+         │  STBY   │──────────────────────────────────►│
+         └────┬────┘                                   │
+              │ CMD7 (select)                          │
+              ▼                                        │
+         ┌─────────┐    CMD0 or power cycle            │
+         │  TRAN   │──────────────────────────────────►┘
+         └────┬────┘
+         ┌────┘────┐
+    CMD18│         │CMD24/25
+         ▼         ▼
+    ┌─────────┐ ┌─────────┐
+    │  DATA   │ │   RCV   │
+    └─────────┘ └─────────┘
+```
+
 ---
 
-### الـ Bus Width وتأثيره على الـ Performance
+### الـ EXT_CSD — الجوهرة المخفية في eMMC
 
-```
-Bus Width │ Max Throughput (HS) │ Max Throughput (HS400) │ الـ EXT_CSD Setting
-──────────┼─────────────────────┼────────────────────────┼──────────────────────
-1-bit     │  6.5 MB/s           │  N/A                   │ EXT_CSD_BUS_WIDTH_1
-4-bit     │  26 MB/s            │  N/A                   │ EXT_CSD_BUS_WIDTH_4
-8-bit     │  52 MB/s            │  400 MB/s              │ EXT_CSD_BUS_WIDTH_8
-8-bit DDR │  104 MB/s           │  N/A                   │ EXT_CSD_DDR_BUS_WIDTH_8
-```
+**الـ EXT_CSD** register هو 512-byte block من الـ configuration والـ status، موجود **بس في eMMC** (مش في SD). الـ MMC Core بيقرأه بـ CMD8 (`MMC_SEND_EXT_CSD`) بعد الـ initialization.
 
-الـ Core بيختار الأعلى اللي الـ host والـ card بيدعموه معاً:
-- `host->caps & MMC_CAP_8_BIT_DATA` للـ host side
-- `EXT_CSD_CARD_TYPE` للـ card side
+أهم fields موجودة في الملف:
 
----
-
-### الـ Command Queue (CQE) — الـ Optimization المتقدم
-
-الـ eMMC 5.1+ بيدعم **Command Queuing** — بدل ما تبعت command وتستنى، تقدر تبعت لغاية 32 command في نفس الوقت والـ card بتنفذهم internally:
-
-```
-بدون CQE:
-  [CMD] → wait → [RESP] → [DATA] → [CMD] → wait → [RESP] → [DATA]
-
-مع CQE:
-  [CMD1] [CMD2] [CMD3] [CMD4]  →  [DATA1] [DATA3] [DATA2] [DATA4]
-                                   (الـ card بترتبهم internally)
-```
-
-الـ framework بيدعم ده عبر:
 ```c
-struct mmc_cqe_ops {
-    int  (*cqe_enable)(struct mmc_host *host, struct mmc_card *card);
-    int  (*cqe_request)(struct mmc_host *host, struct mmc_request *mrq);
-    void (*cqe_recovery_start)(struct mmc_host *host);
-    void (*cqe_recovery_finish)(struct mmc_host *host);
-    /* ... */
-};
+/* Timing — إيه أعلى speed مدعوم */
+#define EXT_CSD_CARD_TYPE_HS200_1_8V  (1<<4)  /* 200 MHz SDR */
+#define EXT_CSD_CARD_TYPE_HS400_1_8V  (1<<6)  /* 200 MHz DDR */
+#define EXT_CSD_CARD_TYPE_HS400ES     (1<<8)  /* HS400 + Enhanced Strobe */
+
+/* Bus Width — يتكتب بـ CMD6 (MMC_SWITCH) */
+#define EXT_CSD_BUS_WIDTH_1   0
+#define EXT_CSD_BUS_WIDTH_4   1
+#define EXT_CSD_BUS_WIDTH_8   2
+#define EXT_CSD_DDR_BUS_WIDTH_4  5
+#define EXT_CSD_DDR_BUS_WIDTH_8  6
+
+/* Command Queuing */
+#define EXT_CSD_CMDQ_SUPPORT  308  /* هل الكارت يدعم CQ? */
+#define EXT_CSD_CMDQ_DEPTH    307  /* عمق الـ queue (max 32) */
 ```
 
-الـ Core بيفعّله لو `EXT_CSD_CMDQ_SUPPORTED` و`MMC_CAP2_CQE` كلاهما موجودين.
+#### الـ MMC_SWITCH (CMD6) — إزاي بتغير الـ Mode
+
+```c
+/*
+ * MMC_SWITCH argument format:
+ *  [25:24] Access Mode: WRITE_BYTE (0x03) الأكثر استخداماً
+ *  [23:16] Index: رقم الـ byte في EXT_CSD
+ *  [15:08] Value: القيمة الجديدة
+ *  [02:00] Command Set: عادةً 0
+ */
+#define MMC_SWITCH_MODE_WRITE_BYTE  0x03
+```
+
+مثلاً عشان تحوّل الكارت لـ HS200:
+```
+CMD6 arg = (0x03 << 24) | (EXT_CSD_HS_TIMING << 16) | (EXT_CSD_TIMING_HS200 << 8)
+```
+
+---
+
+### إيه اللي الـ Framework بيمتلكه مقابل اللي بيفوّضه
+
+#### الـ Core Framework يمتلك:
+- **Card initialization sequence**: من CMD0 → CMD7 وكل خطواته
+- **Card identification**: قراءة CID, CSD, EXT_CSD وتحليلها
+- **Bus speed negotiation**: اختيار الأعلى speed مشترك بين الـ host والـ card
+- **Power management**: suspend/resume, power-off notification
+- **Tuning logic**: متى تعمل re-tune وكيف تدير الـ tuning state
+- **Error recovery**: retry logic, reset sequences
+- **Command queuing scheduler**: ترتيب الـ CQE requests
+
+#### يُفوّض للـ Host Driver:
+- **الـ DMA setup**: إزاي تعمل scatter-gather DMA
+- **الـ Clock generation**: بتعمل `set_ios()` بالـ clock المطلوب
+- **الـ Voltage switching**: تنفيذ الـ 3.3V → 1.8V switch
+- **الـ Tuning algorithm**: `execute_tuning()` — كل controller عنده طريقته
+- **الـ Card detect**: `get_cd()` — من GPIO ولا من register؟
+- **الـ HS400 sequence**: `prepare_hs400_tuning()`, `hs400_complete()`
+
+---
+
+### نظرة عملية — Lifecycle كارت eMMC على i.MX8
+
+```bash
+# لما الـ kernel يبدأ:
+# 1. الـ imx-esdhc driver يعمل probe
+#    → يستدعي mmc_alloc_host()
+#    → يملى host->ops بـ callbacks تبعه
+#    → يستدعي mmc_add_host()
+
+# 2. الـ MMC Core يبدأ mmc_rescan() في workqueue
+#    → يضغط على الـ power
+#    → يبعت CMD0 (GO_IDLE)
+#    → يبعت CMD1 (SEND_OP_COND) يتعرف إنه eMMC
+#    → يبعت CMD2 يجيب الـ CID → يبني struct mmc_cid
+#    → يبعت CMD3 يديه RCA
+#    → يبعت CMD9 يجيب الـ CSD → يبني struct mmc_csd
+#    → يبعت CMD7 يعمل SELECT
+#    → يبعت CMD8 يجيب الـ EXT_CSD → يبني struct mmc_ext_csd
+
+# 3. الـ Core يقرر الأعلى speed:
+#    → host supports HS400? + card supports HS400? → HS400 sequence
+
+# 4. يعمل mmc_add_card() → يظهر /dev/mmcblk0
+#    → الـ partition table اتقرأت
+#    → /dev/mmcblk0boot0, mmcblk0boot1, mmcblk0rpmb ظهروا
+```
 ## Phase 3: التفاصيل العميقة — الـ Structs والعلاقات
 
+> الملف `include/linux/mmc/mmc.h` هو **header-only** بالكامل — مفيش structs فيه، بس فيه كميّة ضخمة من الـ `#define` macros والـ `static inline` functions اللي بتحدد بروتوكول MMC/eMMC كامل. الفهم الحقيقي بييجي من استيعاب العلاقات بين المجموعات دي.
+
 ---
 
-### 0. الـ Flags والـ Enums والـ Config Options — Cheatsheet
+### 0. الـ Flags، Enums، والـ Config Options — Cheatsheet
 
-#### MMC Card States (R1_STATE_*)
+#### أ. أوامر MMC القياسية (Command Classes)
 
-| Constant | Value | المعنى |
-|---|---|---|
-| `R1_STATE_IDLE` | 0 | الكارت في idle، مش متحدد |
-| `R1_STATE_READY` | 1 | جاهز للـ identification |
-| `R1_STATE_IDENT` | 2 | بيتحدد (identification mode) |
-| `R1_STATE_STBY` | 3 | standby، متحدد بس مش متاختار |
-| `R1_STATE_TRAN` | 4 | **transfer state** — الحالة الطبيعية للـ I/O |
-| `R1_STATE_DATA` | 5 | بيبعت data |
-| `R1_STATE_RCV` | 6 | بياخد data |
-| `R1_STATE_PRG` | 7 | بيبرمج (flash programming) |
-| `R1_STATE_DIS` | 8 | disconnect state |
+| Class | Commands | الوظيفة |
+|-------|----------|---------|
+| 0 (Basic) | CMD0,1,2,3,4,7,9,10,12,13,15 | init, select, status |
+| 1 (Stream Read) | CMD11 | stream read |
+| 2 (Block Read) | CMD16,17,18 | block read |
+| 3 (Stream Write) | CMD20 | stream write |
+| 4 (Block Write) | CMD16,24,25,26,27 | block write |
+| 5 (Erase) | CMD35,36,38 | erase groups |
+| 6 (Write Protect) | CMD28,29,30 | WP blocks |
+| 7 (Lock) | CMD42 | lock/unlock card |
+| 8 (App Spec) | CMD55,56 | app commands |
+| 9 (I/O) | CMD39,40 | fast I/O, IRQ state |
+| 10 (Switch) | CMD6 | high-speed switch |
+| 11 (CmdQ) | CMD44,45,46,47,48 | command queuing |
 
-#### R1 Status Bits (error + status)
+#### ب. أرقام الأوامر المهمة
 
-| Bit | Macro | Type | Clear | المعنى |
-|---|---|---|---|---|
-| 31 | `R1_OUT_OF_RANGE` | er | c | العنوان برا النطاق |
-| 30 | `R1_ADDRESS_ERROR` | erx | c | عنوان غلط |
-| 29 | `R1_BLOCK_LEN_ERROR` | er | c | طول البلوك غلط |
-| 28 | `R1_ERASE_SEQ_ERROR` | er | c | تسلسل مسح غلط |
-| 27 | `R1_ERASE_PARAM` | ex | c | بارامتر مسح غلط |
-| 26 | `R1_WP_VIOLATION` | erx | c | انتهاك write protection |
-| 25 | `R1_CARD_IS_LOCKED` | sx | a | الكارت محلوق |
-| 24 | `R1_LOCK_UNLOCK_FAILED` | erx | c | فشل قفل/فتح |
-| 23 | `R1_COM_CRC_ERROR` | er | b | CRC error في الأمر |
-| 22 | `R1_ILLEGAL_COMMAND` | er | b | أمر غير مسموح |
-| 21 | `R1_CARD_ECC_FAILED` | ex | c | فشل ECC |
-| 20 | `R1_CC_ERROR` | erx | c | خطأ في الـ controller |
-| 19 | `R1_ERROR` | erx | c | خطأ عام |
-| 8 | `R1_READY_FOR_DATA` | sx | a | الكارت جاهز لاستقبال data |
-| 7 | `R1_SWITCH_ERROR` | sx | c | خطأ في CMD6 switch |
-| 6 | `R1_EXCEPTION_EVENT` | sr | a | حدث استثنائي (BKOPS مثلاً) |
-| 5 | `R1_APP_CMD` | sr | c | الأمر الجاي هو ACMD |
+| Macro | رقم | النوع | الرد | الوظيفة |
+|-------|-----|-------|------|---------|
+| `MMC_GO_IDLE_STATE` | 0 | bc | — | reset الكارت |
+| `MMC_SEND_OP_COND` | 1 | bcr | R3 | negotiate voltage/OCR |
+| `MMC_ALL_SEND_CID` | 2 | bcr | R2 | اقرأ الـ CID |
+| `MMC_SET_RELATIVE_ADDR` | 3 | ac | R1 | assign RCA |
+| `MMC_SWITCH` | 6 | ac | R1b | غيّر EXT_CSD byte |
+| `MMC_SELECT_CARD` | 7 | ac | R1 | select/deselect |
+| `MMC_SEND_EXT_CSD` | 8 | adtc | R1 | اقرأ EXT_CSD كامل |
+| `MMC_SEND_CSD` | 9 | ac | R2 | اقرأ CSD register |
+| `MMC_STOP_TRANSMISSION` | 12 | ac | R1b | وقّف transfer |
+| `MMC_SEND_STATUS` | 13 | ac | R1 | poll card state |
+| `MMC_READ_SINGLE_BLOCK` | 17 | adtc | R1 | اقرأ block واحد |
+| `MMC_READ_MULTIPLE_BLOCK` | 18 | adtc | R1 | multi-block read |
+| `MMC_WRITE_BLOCK` | 24 | adtc | R1 | اكتب block واحد |
+| `MMC_WRITE_MULTIPLE_BLOCK` | 25 | adtc | R1 | multi-block write |
+| `MMC_ERASE` | 38 | ac | R1b | نفّذ erase |
+| `MMC_QUE_TASK_PARAMS` | 44 | ac | R1 | CmdQ: set task params |
+| `MMC_EXECUTE_READ_TASK` | 46 | adtc | R1 | CmdQ: execute read |
+| `MMC_EXECUTE_WRITE_TASK` | 47 | adtc | R1 | CmdQ: execute write |
 
-> **Type key**: e=error, s=status, r=set in response, x=set during execution. **Clear key**: a=card state, b=next command, c=read to clear.
+**أنواع الأوامر:**
+- `bc` = broadcast, no response
+- `bcr` = broadcast with response
+- `ac` = addressed command, no data
+- `adtc` = addressed data transfer command
 
-#### EXT_CSD_CARD_TYPE — Speed Modes
+#### ج. بتات الـ R1 Status Register
 
-| Flag | Value | السرعة |
-|---|---|---|
-| `EXT_CSD_CARD_TYPE_HS_26` | bit0 | 26 MHz |
-| `EXT_CSD_CARD_TYPE_HS_52` | bit1 | 52 MHz |
-| `EXT_CSD_CARD_TYPE_DDR_1_8V` | bit2 | 52 MHz DDR @ 1.8V/3V |
-| `EXT_CSD_CARD_TYPE_DDR_1_2V` | bit3 | 52 MHz DDR @ 1.2V |
-| `EXT_CSD_CARD_TYPE_HS200_1_8V` | bit4 | 200 MHz SDR @ 1.8V |
-| `EXT_CSD_CARD_TYPE_HS200_1_2V` | bit5 | 200 MHz SDR @ 1.2V |
-| `EXT_CSD_CARD_TYPE_HS400_1_8V` | bit6 | 200 MHz DDR @ 1.8V |
-| `EXT_CSD_CARD_TYPE_HS400_1_2V` | bit7 | 200 MHz DDR @ 1.2V |
-| `EXT_CSD_CARD_TYPE_HS400ES` | bit8 | HS400 Enhanced Strobe |
+| Bit Macro | Bit | النوع | الوظيفة |
+|-----------|-----|-------|---------|
+| `R1_OUT_OF_RANGE` | 31 | er,c | address خارج النطاق |
+| `R1_ADDRESS_ERROR` | 30 | erx,c | خطأ في العنوان |
+| `R1_BLOCK_LEN_ERROR` | 29 | er,c | block length غلط |
+| `R1_ERASE_SEQ_ERROR` | 28 | er,c | تسلسل erase خاطئ |
+| `R1_WP_VIOLATION` | 26 | erx,c | انتهاك write protection |
+| `R1_CARD_IS_LOCKED` | 25 | sx,a | الكارت مقفول |
+| `R1_LOCK_UNLOCK_FAILED` | 24 | erx,c | فشل lock/unlock |
+| `R1_COM_CRC_ERROR` | 23 | er,b | CRC error في الأمر |
+| `R1_ILLEGAL_COMMAND` | 22 | er,b | أمر غير صالح |
+| `R1_CARD_ECC_FAILED` | 21 | ex,c | ECC failure |
+| `R1_CC_ERROR` | 20 | erx,c | خطأ في card controller |
+| `R1_ERROR` | 19 | erx,c | general error |
+| `R1_READY_FOR_DATA` | 8 | sx,a | الكارت جاهز لبيانات |
+| `R1_SWITCH_ERROR` | 7 | sx,c | فشل MMC_SWITCH |
+| `R1_EXCEPTION_EVENT` | 6 | sr,a | BKOPS/urgent event |
+| `R1_APP_CMD` | 5 | sr,c | الكارت في app mode |
 
-#### Bus Width (EXT_CSD_BUS_WIDTH)
+**أنواع الـ bits:**
+- `e` = error bit, `s` = status bit, `r` = set بعد command مباشرة, `x` = set أثناء execution
+- `a` = cleared حسب card state, `b` = cleared بأمر جديد, `c` = cleared by read
 
-| Constant | Value | المعنى |
-|---|---|---|
+#### د. حالات الكارت (Card States) في R1
+
+| Macro | قيمة | الحالة |
+|-------|------|--------|
+| `R1_STATE_IDLE` | 0 | بعد power-on أو CMD0 |
+| `R1_STATE_READY` | 1 | بعد CMD1 (OCR negotiation) |
+| `R1_STATE_IDENT` | 2 | بعد CMD2 (CID identification) |
+| `R1_STATE_STBY` | 3 | له RCA، مش selected |
+| `R1_STATE_TRAN` | 4 | **transfer state** — نقطة التشغيل الأساسية |
+| `R1_STATE_DATA` | 5 | جاري data transfer |
+| `R1_STATE_RCV` | 6 | جاري استقبال بيانات |
+| `R1_STATE_PRG` | 7 | جاري programming |
+| `R1_STATE_DIS` | 8 | deselected أثناء programming |
+
+#### هـ. EXT_CSD — أهم الـ Byte Offsets
+
+| Macro | Offset | Access | الوظيفة |
+|-------|--------|--------|---------|
+| `EXT_CSD_CMDQ_MODE_EN` | 15 | R/W | تفعيل Command Queuing |
+| `EXT_CSD_CACHE_CTRL` | 33 | R/W | تحكم في الـ cache |
+| `EXT_CSD_POWER_OFF_NOTIFICATION` | 34 | R/W | إشعار قبل power-off |
+| `EXT_CSD_PART_CONFIG` | 179 | R/W | partition access config |
+| `EXT_CSD_BUS_WIDTH` | 183 | R/W | عرض الـ bus |
+| `EXT_CSD_HS_TIMING` | 185 | R/W | high-speed timing mode |
+| `EXT_CSD_REV` | 192 | RO | EXT_CSD revision |
+| `EXT_CSD_CARD_TYPE` | 196 | RO | speed modes المدعومة |
+| `EXT_CSD_SEC_CNT` | 212 | RO | إجمالي الـ sectors (4 bytes) |
+| `EXT_CSD_BKOPS_EN` | 163 | R/W | تفعيل background operations |
+| `EXT_CSD_RST_N_FUNCTION` | 162 | R/W | تحكم في RST_n pin |
+| `EXT_CSD_RPMB_MULT` | 168 | RO | حجم RPMB partition |
+| `EXT_CSD_BOOT_WP` | 173 | R/W | boot partition write protect |
+| `EXT_CSD_CACHE_SIZE` | 249 | RO | حجم cache (4 bytes) |
+| `EXT_CSD_PRE_EOL_INFO` | 267 | RO | pre-end-of-life indicator |
+| `EXT_CSD_DEVICE_LIFE_TIME_EST_TYP_A` | 268 | RO | عمر النوع A |
+| `EXT_CSD_DEVICE_LIFE_TIME_EST_TYP_B` | 269 | RO | عمر النوع B |
+| `EXT_CSD_CMDQ_DEPTH` | 307 | RO | عمق queue |
+| `EXT_CSD_CMDQ_SUPPORT` | 308 | RO | هل CmdQ مدعوم |
+
+#### و. EXT_CSD_CARD_TYPE — أوضاع السرعة
+
+| Bit Macro | Value | السرعة | الجهد |
+|-----------|-------|--------|-------|
+| `EXT_CSD_CARD_TYPE_HS_26` | bit 0 | 26 MHz | — |
+| `EXT_CSD_CARD_TYPE_HS_52` | bit 1 | 52 MHz | — |
+| `EXT_CSD_CARD_TYPE_DDR_1_8V` | bit 2 | 52 MHz DDR | 1.8V أو 3V |
+| `EXT_CSD_CARD_TYPE_DDR_1_2V` | bit 3 | 52 MHz DDR | 1.2V |
+| `EXT_CSD_CARD_TYPE_HS200_1_8V` | bit 4 | 200 MHz SDR | 1.8V |
+| `EXT_CSD_CARD_TYPE_HS200_1_2V` | bit 5 | 200 MHz SDR | 1.2V |
+| `EXT_CSD_CARD_TYPE_HS400_1_8V` | bit 6 | 200 MHz DDR | 1.8V |
+| `EXT_CSD_CARD_TYPE_HS400_1_2V` | bit 7 | 200 MHz DDR | 1.2V |
+| `EXT_CSD_CARD_TYPE_HS400ES` | bit 8 | HS400 Enhanced Strobe | — |
+
+#### ز. EXT_CSD_BUS_WIDTH — قيم عرض الـ Bus
+
+| Macro | قيمة | الوضع |
+|-------|------|-------|
 | `EXT_CSD_BUS_WIDTH_1` | 0 | 1-bit SDR |
 | `EXT_CSD_BUS_WIDTH_4` | 1 | 4-bit SDR |
 | `EXT_CSD_BUS_WIDTH_8` | 2 | 8-bit SDR |
 | `EXT_CSD_DDR_BUS_WIDTH_4` | 5 | 4-bit DDR |
 | `EXT_CSD_DDR_BUS_WIDTH_8` | 6 | 8-bit DDR |
-| `EXT_CSD_BUS_WIDTH_STROBE` | BIT(7) | Enhanced strobe flag |
+| `EXT_CSD_BUS_WIDTH_STROBE` | BIT(7) | Enhanced Strobe (HS400ES) |
 
-#### HS Timing (EXT_CSD_HS_TIMING)
+#### ح. EXT_CSD_HS_TIMING — قيم التوقيت
 
-| Constant | Value |
-|---|---|
-| `EXT_CSD_TIMING_BC` | 0 — backwards compatible |
-| `EXT_CSD_TIMING_HS` | 1 — high speed |
-| `EXT_CSD_TIMING_HS200` | 2 — HS200 |
-| `EXT_CSD_TIMING_HS400` | 3 — HS400 |
+| Macro | قيمة | الوضع |
+|-------|------|-------|
+| `EXT_CSD_TIMING_BC` | 0 | Backwards Compatibility |
+| `EXT_CSD_TIMING_HS` | 1 | High Speed (52 MHz) |
+| `EXT_CSD_TIMING_HS200` | 2 | HS200 (200 MHz SDR) |
+| `EXT_CSD_TIMING_HS400` | 3 | HS400 (200 MHz DDR) |
 
-#### MMC_SWITCH Access Modes
+#### ط. MMC_SWITCH Access Modes
 
-| Constant | Value | المعنى |
-|---|---|---|
-| `MMC_SWITCH_MODE_CMD_SET` | 0x00 | غير الـ command set |
-| `MMC_SWITCH_MODE_SET_BITS` | 0x01 | اضبط bits محددة |
-| `MMC_SWITCH_MODE_CLEAR_BITS` | 0x02 | صفر bits محددة |
-| `MMC_SWITCH_MODE_WRITE_BYTE` | 0x03 | اكتب byte كامل |
+| Macro | قيمة | الوظيفة |
+|-------|------|---------|
+| `MMC_SWITCH_MODE_CMD_SET` | 0x00 | غيّر command set |
+| `MMC_SWITCH_MODE_SET_BITS` | 0x01 | set bits محددة |
+| `MMC_SWITCH_MODE_CLEAR_BITS` | 0x02 | clear bits محددة |
+| `MMC_SWITCH_MODE_WRITE_BYTE` | 0x03 | **اكتب byte كامل** (الأكثر استخداماً) |
 
-#### Erase / Trim / Discard Arguments
+#### ي. Erase/Trim/Discard Arguments
 
-| Constant | Value | المعنى |
-|---|---|---|
-| `MMC_ERASE_ARG` | 0x00000000 | مسح عادي |
-| `MMC_SECURE_ERASE_ARG` | 0x80000000 | مسح آمن |
-| `MMC_TRIM_ARG` | 0x00000001 | trim (mark as unused) |
-| `MMC_DISCARD_ARG` | 0x00000003 | discard (hint to card) |
-| `MMC_SECURE_TRIM1_ARG` | 0x80000001 | secure trim step 1 |
-| `MMC_SECURE_TRIM2_ARG` | 0x80008000 | secure trim step 2 |
+| Macro | قيمة | الوظيفة |
+|-------|------|---------|
+| `MMC_ERASE_ARG` | 0x00000000 | erase عادي |
+| `MMC_SECURE_ERASE_ARG` | 0x80000000 | secure erase |
+| `MMC_TRIM_ARG` | 0x00000001 | trim (hint للـ controller) |
+| `MMC_DISCARD_ARG` | 0x00000003 | discard blocks |
+| `MMC_SECURE_TRIM1_ARG` | 0x80000001 | المرحلة الأولى من secure trim |
+| `MMC_SECURE_TRIM2_ARG` | 0x80008000 | المرحلة الثانية من secure trim |
 
-#### Card Command Classes (CCC)
+#### ك. BKOPS و Exception Events
 
-| Macro | Bit | الأوامر |
-|---|---|---|
-| `CCC_BASIC` | 0 | CMD0,1,2,3,4,7,9,10,12,13,15 |
-| `CCC_STREAM_READ` | 1 | CMD11 |
-| `CCC_BLOCK_READ` | 2 | CMD16,17,18 |
-| `CCC_STREAM_WRITE` | 3 | CMD20 |
-| `CCC_BLOCK_WRITE` | 4 | CMD16,24,25,26,27 |
-| `CCC_ERASE` | 5 | CMD32-39 |
-| `CCC_WRITE_PROT` | 6 | CMD28,29,30 |
-| `CCC_LOCK_CARD` | 7 | CMD16,42 |
-| `CCC_APP_SPEC` | 8 | CMD55,56,ACMD* |
-| `CCC_IO_MODE` | 9 | CMD5,39,40,52,53 |
-| `CCC_SWITCH` | 10 | CMD6,34-37,50 |
+| Macro | الوظيفة |
+|-------|---------|
+| `EXT_CSD_URGENT_BKOPS` | BIT(0) — يجب تنفيذ BKOPS فوراً |
+| `EXT_CSD_DYNCAP_NEEDED` | BIT(1) — dynamic capacity جديد مطلوب |
+| `EXT_CSD_SYSPOOL_EXHAUSTED` | BIT(2) — system resources نفدت |
+| `EXT_CSD_BKOPS_LEVEL_2` | 0x2 — مستوى critical لـ BKOPS |
+| `EXT_CSD_MANUAL_BKOPS_MASK` | 0x01 — manual BKOPS |
+| `EXT_CSD_AUTO_BKOPS_MASK` | 0x02 — automatic BKOPS |
 
-#### مهم جداً — EXT_CSD Fields Index
+#### ل. CSD Structure Versions
 
-| Field | Byte | Access | المعنى |
-|---|---|---|---|
-| `EXT_CSD_CMDQ_MODE_EN` | 15 | R/W | تفعيل Command Queue |
-| `EXT_CSD_FLUSH_CACHE` | 32 | W | flush الـ cache |
-| `EXT_CSD_CACHE_CTRL` | 33 | R/W | تحكم في الـ cache |
-| `EXT_CSD_POWER_OFF_NOTIFICATION` | 34 | R/W | إشعار قبل قطع التيار |
-| `EXT_CSD_PART_CONFIG` | 179 | R/W | إعداد الـ partition النشط |
-| `EXT_CSD_BUS_WIDTH` | 183 | R/W | عرض الـ bus |
-| `EXT_CSD_HS_TIMING` | 185 | R/W | timing mode |
-| `EXT_CSD_REV` | 192 | RO | إصدار الـ EXT_CSD |
-| `EXT_CSD_CARD_TYPE` | 196 | RO | speed modes المدعومة |
-| `EXT_CSD_SEC_CNT` | 212 | RO | إجمالي عدد السيكتورات (4 bytes) |
-| `EXT_CSD_BKOPS_EN` | 163 | R/W | تفعيل background ops |
-| `EXT_CSD_BKOPS_START` | 164 | W | ابدأ background ops |
-| `EXT_CSD_RPMB_MULT` | 168 | RO | حجم الـ RPMB بالـ 128KB |
-| `EXT_CSD_FIRMWARE_VERSION` | 254 | RO | إصدار الـ firmware (8 bytes) |
-| `EXT_CSD_PRE_EOL_INFO` | 267 | RO | مؤشر اقتراب نهاية العمر |
-| `EXT_CSD_CMDQ_DEPTH` | 307 | RO | عمق الـ Command Queue |
-| `EXT_CSD_CMDQ_SUPPORT` | 308 | RO | هل الكارت بيدعم CQ؟ |
+| Macro | قيمة | الـ Spec |
+|-------|------|---------|
+| `CSD_STRUCT_VER_1_0` | 0 | spec 1.0–1.2 |
+| `CSD_STRUCT_VER_1_1` | 1 | spec 1.4–2.2 |
+| `CSD_STRUCT_VER_1_2` | 2 | spec 3.1–4.1 |
+| `CSD_STRUCT_EXT_CSD` | 3 | version في EXT_CSD |
+
+#### م. Power Off Notification Values
+
+| Macro | قيمة | المعنى |
+|-------|------|--------|
+| `EXT_CSD_NO_POWER_NOTIFICATION` | 0 | مفيش إشعار |
+| `EXT_CSD_POWER_ON` | 1 | الكارت شغال |
+| `EXT_CSD_POWER_OFF_SHORT` | 2 | power-off سريع |
+| `EXT_CSD_POWER_OFF_LONG` | 3 | power-off مع flush كامل |
 
 ---
 
-### 1. الـ Structs المهمة
+### 1. الـ Structs المهمة في الملف
 
-#### `struct mmc_command` (في `core.h`)
+الملف `mmc.h` **لا يحتوي على structs**، لكنه يعرّف المعطيات البروتوكولية الخام اللي بتُملأ فيها الـ structs الموجودة في ملفات MMC الأخرى. الـ structs الرئيسية اللي بتستخدم هذه التعريفات هي:
 
-**الغرض**: يمثل أمر MMC/SD واحد بيتبعت للكارت.
-
-| Field | Type | المعنى |
-|---|---|---|
-| `opcode` | `u32` | رقم الأمر (CMD0..CMD60) |
-| `arg` | `u32` | الـ argument 32-bit |
-| `resp[4]` | `u32[4]` | الـ response (يصل لـ 136-bit في R2) |
-| `flags` | `unsigned int` | نوع الـ response + نوع الأمر |
-| `retries` | `unsigned int` | عدد إعادات المحاولة |
-| `error` | `int` | كود الخطأ (errno) |
-| `busy_timeout` | `unsigned int` | timeout لـ busy (ms) |
-| `data` | `*mmc_data` | البيانات المرتبطة بالأمر (لو ADTC) |
-| `mrq` | `*mmc_request` | الـ request الأب |
-| `uhs2_cmd` | `*uhs2_command` | امتداد لبروتوكول UHS-II |
-| `has_ext_addr` | `bool` | SDUC extended address support |
-
-**الـ flags المهمة في `mmc_command.flags`**:
-
-```
-MMC_RSP_PRESENT  bit0  -- في رد
-MMC_RSP_136      bit1  -- رد 136-bit (R2: CID/CSD)
-MMC_RSP_CRC      bit2  -- في CRC في الرد
-MMC_RSP_BUSY     bit3  -- الكارت ممكن يبعت busy
-MMC_RSP_OPCODE   bit4  -- الرد بيحتوي على opcode
-MMC_CMD_AC       (0<<5) -- Addressed Command (no data)
-MMC_CMD_ADTC     (1<<5) -- Addressed Data Transfer Command
-MMC_CMD_BC       (2<<5) -- Broadcast Command (no response)
-MMC_CMD_BCR      (3<<5) -- Broadcast Command with Response
-```
-
-**الـ response types المحددة سلفاً**:
-
+#### `struct mmc_command` (من `include/linux/mmc/core.h`)
 ```c
-MMC_RSP_R1   = PRESENT | CRC | OPCODE          // معظم الأوامر
-MMC_RSP_R1B  = PRESENT | CRC | OPCODE | BUSY   // أوامر بتشغل flash
-MMC_RSP_R2   = PRESENT | 136 | CRC             // CID أو CSD
-MMC_RSP_R3   = PRESENT                          // OCR register
+struct mmc_command {
+    u32         opcode;    /* رقم الأمر — من macros في mmc.h */
+    u32         arg;       /* argument — e.g. MMC_SWITCH_MODE_WRITE_BYTE */
+    u32         resp[4];   /* response — R1 bits يُحلَّل بـ R1_* macros */
+    unsigned int flags;
+    /* ... */
+};
+```
+
+#### `struct mmc_card` (من `include/linux/mmc/card.h`)
+بتخزن:
+- `ext_csd` — struct فيه parsed values من EXT_CSD offsets
+- `csd` — CSD fields
+- `cid` — CID fields
+- `state` — بيتغير حسب R1_STATE_* macros
+
+#### `struct mmc_ios` (من `include/linux/mmc/host.h`)
+بتتحكم في:
+- `bus_width` — بيتعيّن بـ `EXT_CSD_BUS_WIDTH_*` values
+- `timing` — بيتعيّن بـ `EXT_CSD_TIMING_*` values
+
+---
+
+### 2. رسائل ASCII لعلاقات المفاهيم
+
+#### أ. تسلسل بيانات MMC_SWITCH (CMD6)
+
+```
+MMC_SWITCH argument (32-bit):
+┌──────────┬────────────┬────────────┬───────────┬───────────┐
+│ [31:26]  │  [25:24]   │  [23:16]   │  [15:08]  │  [02:00]  │
+│  Always  │ Access     │ EXT_CSD    │  Value    │ Cmd Set   │
+│    0     │  Mode      │  Offset    │  Byte     │           │
+│          │ 0x00..0x03 │  0..511    │  0..255   │           │
+└──────────┴────────────┴────────────┴───────────┴───────────┘
+              ↑                ↑            ↑
+   MMC_SWITCH_MODE_*    EXT_CSD_*      القيمة الجديدة
+```
+
+#### ب. بنية R1 Status Register
+
+```
+R1 Status Register (32-bit):
+Bit: 31  30  29  28  27  26  25  24  23  22  21  20  19  18  17  16
+     ↓   ↓   ↓   ↓   ↓   ↓   ↓   ↓   ↓   ↓   ↓   ↓   ↓   ↓   ↓   ↓
+     OOR AER BLE ESE EP  WPV CIL LUF CCE IC  ECC CCE ERR UN  OVR CID
+
+Bit: 15  14  13  12  11  10   9   8   7   6   5   4   3   2   1   0
+     WES EED ERS  -   -   -   - RFD SWE EXE APC  -   -   -   -   -
+     ↑               ↑           ↑   ↑   ↑   ↑
+   WP Erase      Reserved    Ready Switch Exc App
+   Skip                     4Data Error Event Cmd
+
+Card State (bits 12:9) = R1_STATE_IDLE..R1_STATE_DIS
+```
+
+#### ج. علاقة EXT_CSD بالـ Macros
+
+```
+EXT_CSD (512 bytes)
+┌─────────────────────────────────────────────────┐
+│ Byte 15:  CMDQ_MODE_EN  ← EXT_CSD_CMDQ_MODE_EN │
+│ Byte 33:  CACHE_CTRL    ← EXT_CSD_CACHE_CTRL   │
+│ Byte 163: BKOPS_EN      ← EXT_CSD_BKOPS_EN     │
+│ Byte 179: PART_CONFIG   ← EXT_CSD_PART_CONFIG  │
+│ Byte 183: BUS_WIDTH     ← EXT_CSD_BUS_WIDTH    │
+│ Byte 185: HS_TIMING     ← EXT_CSD_HS_TIMING    │
+│ Byte 192: REV           ← EXT_CSD_REV          │
+│ Byte 196: CARD_TYPE     ← EXT_CSD_CARD_TYPE    │
+│ Byte 212: SEC_CNT[3:0]  ← EXT_CSD_SEC_CNT      │ ← 4 bytes
+│ Byte 249: CACHE_SIZE[3:0]← EXT_CSD_CACHE_SIZE  │ ← 4 bytes
+│ Byte 267: PRE_EOL_INFO  ← EXT_CSD_PRE_EOL_INFO │
+│ Byte 307: CMDQ_DEPTH    ← EXT_CSD_CMDQ_DEPTH   │
+│ Byte 308: CMDQ_SUPPORT  ← EXT_CSD_CMDQ_SUPPORT │
+└─────────────────────────────────────────────────┘
+       ↑ تُقرأ كلها بـ MMC_SEND_EXT_CSD (CMD8)
+       ↑ يُعدَّل كل byte بـ MMC_SWITCH (CMD6)
 ```
 
 ---
 
-#### `struct mmc_data` (في `core.h`)
-
-**الغرض**: يمثل الـ data payload لأمر data-transfer (ADTC).
-
-| Field | Type | المعنى |
-|---|---|---|
-| `timeout_ns` | `unsigned int` | data timeout بالـ nanoseconds |
-| `timeout_clks` | `unsigned int` | data timeout بالـ clock cycles |
-| `blksz` | `unsigned int` | حجم البلوك الواحد بالبايت |
-| `blocks` | `unsigned int` | عدد البلوكات |
-| `blk_addr` | `unsigned int` | عنوان البلوك الابتدائي |
-| `error` | `int` | كود خطأ الـ data |
-| `flags` | `unsigned int` | READ/WRITE + CQE flags |
-| `bytes_xfered` | `unsigned int` | عدد البايتات اللي اتنقلت فعلاً |
-| `stop` | `*mmc_command` | أمر CMD12 لإيقاف التحويل |
-| `mrq` | `*mmc_request` | الـ request الأب |
-| `sg_len` | `unsigned int` | عدد عناصر الـ scatter list |
-| `sg_count` | `int` | عدد عناصر الـ SG المـ mapped |
-| `sg` | `*scatterlist` | الـ I/O scatter-gather list |
-| `host_cookie` | `s32` | private data للـ host controller |
-
-**الـ data flags**:
+### 3. دورة حياة الكارت — Lifecycle Diagram
 
 ```
-MMC_DATA_WRITE    bit8   -- write to card
-MMC_DATA_READ     bit9   -- read from card
-MMC_DATA_QBR      bit10  -- CQE queue barrier
-MMC_DATA_PRIO     bit11  -- CQE high priority request
-MMC_DATA_REL_WR   bit12  -- Reliable Write (power-loss safe)
-MMC_DATA_DAT_TAG  bit13  -- Data Tag (hint for garbage collection)
-MMC_DATA_FORCED_PRG bit14 -- Force immediate program
-```
-
----
-
-#### `struct mmc_request` (في `core.h`)
-
-**الغرض**: يجمع مجموعة من الأوامر في "request" واحد بيتبعت كوحدة.
-
-| Field | Type | المعنى |
-|---|---|---|
-| `sbc` | `*mmc_command` | CMD23 (SET_BLOCK_COUNT) قبل الـ data |
-| `cmd` | `*mmc_command` | الأمر الرئيسي |
-| `data` | `*mmc_data` | الـ data (لو موجودة) |
-| `stop` | `*mmc_command` | CMD12 لإنهاء الـ multiblock |
-| `completion` | `struct completion` | للـ synchronous waiting |
-| `cmd_completion` | `struct completion` | للانتظار بعد الأمر فقط |
-| `done` | function pointer | callback لما الـ request ينتهي |
-| `recovery_notifier` | function pointer | callback لما يحتاج recovery (CQE) |
-| `host` | `*mmc_host` | الـ host اللي شغال عليه |
-| `cap_cmd_during_tfr` | `bool` | يسمح بأوامر تانية أثناء الـ transfer |
-| `tag` | `int` | CQE task ID |
-| `uhs2_cmd` | `uhs2_command` | امتداد UHS-II مضمّن |
-
----
-
-#### `struct mmc_cid` (في `card.h`)
-
-**الغرض**: Card Identification — معلومات هوية الكارت.
-
-| Field | المعنى |
-|---|---|
-| `manfid` | Manufacturer ID (8-bit) |
-| `prod_name[8]` | اسم المنتج (ASCII) |
-| `prv` | Product Revision |
-| `serial` | الرقم التسلسلي (32-bit) |
-| `oemid` | OEM/Application ID |
-| `year` / `month` | تاريخ التصنيع |
-| `hwrev` / `fwrev` | إصدار الـ HW والـ FW |
-
----
-
-#### `struct mmc_csd` (في `card.h`)
-
-**الغرض**: Card Specific Data — خصائص الكارت الجوهرية.
-
-| Field | المعنى |
-|---|---|
-| `structure` | إصدار الـ CSD (0=v1.0, 1=v1.1, 2=v1.2, 3=EXT_CSD) |
-| `mmca_vsn` | إصدار مواصفة MMC |
-| `cmdclass` | الـ Command Classes المدعومة (CCC bitmask) |
-| `taac_clks` / `taac_ns` | Access Time |
-| `c_size` | Device Size |
-| `max_dtr` | Maximum Data Transfer Rate |
-| `erase_size` | وحدة المسح بالسيكتورات |
-| `read_blkbits` / `write_blkbits` | log2 of block size |
-| `capacity` | السعة الكلية (sector_t) |
-| `read_partial` / `write_partial` | هل partial blocks مسموحة؟ |
-| `dsr_imp` | هل الكارت بيعمل DSR؟ |
-
----
-
-#### `struct mmc_ext_csd` (في `card.h`)
-
-**الغرض**: Extended CSD Register — 512 byte من الـ config والـ capabilities في eMMC v4+. الأهم في الـ subsystem.
-
-أهم الـ fields المُفسَّرة:
-
-| Field | المعنى |
-|---|---|
-| `rev` | إصدار الـ EXT_CSD |
-| `part_config` | الـ partition النشط حالياً (ACC_BOOT0/GP/RPMB) |
-| `cache_ctrl` | هل الـ cache مفعّل؟ |
-| `rst_n_function` | إعداد الـ hardware reset pin |
-| `hs_max_dtr` | أقصى data rate في HS mode |
-| `hs200_max_dtr` | أقصى data rate في HS200 |
-| `sectors` | إجمالي عدد السيكتورات |
-| `hc_erase_size` | حجم وحدة المسح الـ HC |
-| `bkops` / `man_bkops_en` / `auto_bkops_en` | Background Operations |
-| `cmdq_en` / `cmdq_support` / `cmdq_depth` | Command Queue |
-| `fwrev[8]` | إصدار الـ firmware |
-| `pre_eol_info` | مؤشر قرب نهاية العمر |
-| `device_life_time_est_typ_a/b` | تقدير العمر المتبقي لكل نوع نانو-flash |
-| `partition_setting_completed` | هل التقسيم اتأكد بشكل دائم؟ |
-| `feature_support` | `MMC_DISCARD_FEATURE` وغيره |
-
----
-
-#### `struct mmc_card` (في `card.h`)
-
-**الغرض**: يمثل كارت MMC/SD/SDIO كامل — الـ struct المحوري في الـ subsystem.
-
-| Field | Type | المعنى |
-|---|---|---|
-| `host` | `*mmc_host` | الـ host controller اللي الكارت متوصل بيه |
-| `dev` | `struct device` | الكارت كـ device في الـ device model |
-| `ocr` | `u32` | Operating Conditions Register |
-| `rca` | `unsigned int` | Relative Card Address |
-| `type` | `unsigned int` | MMC/SD/SDIO/SD_COMBO |
-| `state` | `unsigned int` | حالة الكارت |
-| `quirks` | `unsigned int` | bitmask لـ workarounds للكروت المعيوبة |
-| `erase_size/shift/pref_erase` | — | بارامترات المسح |
-| `raw_cid[4]` / `raw_csd[4]` | `u32[]` | raw registers |
-| `cid` | `struct mmc_cid` | Card ID |
-| `csd` | `struct mmc_csd` | Card Specific Data |
-| `ext_csd` | `struct mmc_ext_csd` | Extended CSD (eMMC فقط) |
-| `scr` / `ssr` / `sw_caps` | — | SD-specific info |
-| `ext_power` / `ext_perf` | `struct sd_ext_reg` | SD Extension Registers |
-| `uhs2_config` | `struct sd_uhs2_config` | UHS-II config |
-| `sdio_funcs` | `unsigned int` | عدد الـ SDIO functions |
-| `cccr` | `struct sdio_cccr` | SDIO Common Card Control |
-| `cis` | `struct sdio_cis` | SDIO Common Information Structure |
-| `sdio_func[7]` | `*sdio_func[]` | الـ SDIO functions (devices) |
-| `part[7]` | `struct mmc_part[]` | الـ physical partitions (boot/GP/RPMB) |
-| `complete_wq` | `*workqueue_struct` | private workqueue للكارت |
-| `mmc_avail_type` | `unsigned int` | تقاطع قدرات الكارت والـ host |
-
----
-
-#### `struct mmc_part` (في `card.h`)
-
-**الغرض**: يمثل partition فيزيائي واحد في الكارت.
-
-| Field | المعنى |
-|---|---|
-| `size` | الحجم بالبايت |
-| `part_cfg` | إعداد الـ partition (ACC value) |
-| `name[20]` | اسم الـ partition |
-| `force_ro` | هل read-only إجبارياً؟ |
-| `area_type` | MAIN/BOOT/GP/RPMB bitmask |
-
----
-
-#### `struct uhs2_command` (في `core.h`)
-
-**الغرض**: امتداد لـ `mmc_command` لبروتوكول UHS-II اللي بيستخدم packet-based interface بدل الـ legacy CMD/DAT lines.
-
-| Field | المعنى |
-|---|---|
-| `header` / `arg` | الـ UHS2 packet header وargument |
-| `payload[2]` | payload للأوامر UHS2-native |
-| `tmode_half_duplex` | هل التحويل half-duplex؟ |
-| `uhs2_resp[20]` | raw response |
-
----
-
-### 2. مخطط العلاقات بين الـ Structs
-
-```
-                    ┌──────────────────────────────────────────┐
-                    │             struct mmc_host               │
-                    │  (host.h — الـ controller hardware)       │
-                    └──────────┬───────────────────────────────┘
-                               │ host->card  (1:1)
-                               ▼
-                    ┌──────────────────────────────────────────┐
-                    │             struct mmc_card               │
-                    │  .host  ──────────────────────────────►  │
-                    │  .dev   (struct device)                   │
-                    │  .cid   (struct mmc_cid)                  │
-                    │  .csd   (struct mmc_csd)                  │
-                    │  .ext_csd (struct mmc_ext_csd) [eMMC]     │
-                    │  .scr / .ssr / .sw_caps  [SD]             │
-                    │  .cccr / .cis            [SDIO]           │
-                    │  .part[7] (struct mmc_part[])             │
-                    │  .sdio_func[7] ──────────────────────►   │
-                    └──────────────────────────────────────────┘
-                         ▲
-                         │ mrq->host
-                    ┌──────────────────────────────────────────┐
-                    │           struct mmc_request              │
-                    │  .sbc  ──► struct mmc_command (CMD23)     │
-                    │  .cmd  ──► struct mmc_command (main CMD)  │
-                    │  .data ──► struct mmc_data                │
-                    │  .stop ──► struct mmc_command (CMD12)     │
-                    │  .completion (struct completion)          │
-                    │  .done()  callback                        │
-                    └──────────────────────────────────────────┘
-                                      │
-                    ┌─────────────────▼────────────────────────┐
-                    │           struct mmc_command              │
-                    │  .opcode / .arg / .resp[4]                │
-                    │  .flags  (RSP type | CMD type)            │
-                    │  .data ──► struct mmc_data                │
-                    │  .uhs2_cmd ──► struct uhs2_command        │
-                    └──────────────────────────────────────────┘
-                                      │
-                    ┌─────────────────▼────────────────────────┐
-                    │            struct mmc_data                │
-                    │  .sg ──► struct scatterlist               │
-                    │  .stop ──► struct mmc_command (CMD12)     │
-                    │  .blksz / .blocks / .flags                │
-                    └──────────────────────────────────────────┘
-
-struct mmc_card ──► struct mmc_part[7]
-                     .area_type: MAIN | BOOT | GP | RPMB
-
-struct mmc_card ──► struct mmc_ext_csd
-                     يحتوي على كل الـ capabilities
-                     (speed, partitions, cmdq, bkops, ...)
-```
-
----
-
-### 3. Lifecycle Diagrams
-
-#### دورة حياة الكارت — من الاكتشاف لغاية الاستخدام
-
-```
-[Power On / Card Insert]
+Power ON / CMD0 (RESET)
          │
          ▼
-  mmc_rescan() triggered
-  (host detects card)
-         │
+   ┌─────────────┐
+   │  IDLE State │  R1_STATE_IDLE = 0
+   └─────────────┘
+         │ CMD1 (SEND_OP_COND) — negotiate OCR/voltage
          ▼
-  CMD0: GO_IDLE_STATE
-  ─── card enters IDLE state ───
-         │
+   ┌─────────────┐
+   │ READY State │  R1_STATE_READY = 1
+   └─────────────┘
+         │ CMD2 (ALL_SEND_CID) — read 128-bit CID
          ▼
-  CMD1 (eMMC) / CMD8 (SD): voltage check
-  ─── card enters READY state ───
-         │
+   ┌─────────────┐
+   │ IDENT State │  R1_STATE_IDENT = 2
+   └─────────────┘
+         │ CMD3 (SET_RELATIVE_ADDR) — assign RCA
          ▼
-  CMD2: ALL_SEND_CID
-  ─── card enters IDENT state ───
-  [struct mmc_cid populated from R2 response]
-         │
+   ┌─────────────┐
+   │ STBY State  │  R1_STATE_STBY = 3  ← deselected
+   └─────────────┘
+         │ CMD7 (SELECT_CARD) — select by RCA
          ▼
-  CMD3: SET_RELATIVE_ADDR (eMMC) / SEND_RELATIVE_ADDR (SD)
-  ─── card.rca assigned, enters STBY state ───
-         │
-         ▼
-  CMD9: SEND_CSD → parse into struct mmc_csd
-  CMD10: SEND_CID (confirm)
-         │
-         ▼
-  CMD7: SELECT_CARD (with card.rca)
-  ─── card enters TRAN state ───
-         │
-         ▼
-  CMD8: SEND_EXT_CSD (eMMC only)
-  [struct mmc_ext_csd populated — 512 bytes]
-         │
-         ▼
-  mmc_init_card():
-    - set bus width (CMD6 → EXT_CSD_BUS_WIDTH)
-    - set timing mode (CMD6 → EXT_CSD_HS_TIMING)
-    - enable cache if supported
-    - enable CMDQ if supported
-    - enumerate partitions → struct mmc_part[]
-         │
-         ▼
-  mmc_add_card():
-    device_add(&card->dev)
-    ─── block driver probes ───
-         │
-         ▼
-  [Ready for I/O]
-  mmc_blk_issue_rq()
-    → struct mmc_request built
-    → mmc_wait_for_req() called
-         │
-         ▼
-  [Card Removed / Power Off]
-  mmc_remove_card():
-    device_del(&card->dev)
-    mmc_card_set_dead()
-    kfree(card)
-```
-
-#### دورة حياة الـ Request
-
-```
-[Block Layer: bio arrives]
-         │
-         ▼
-  mmc_blk_issue_rw_rq()
-    allocate struct mmc_request
-    allocate struct mmc_command (cmd)
-    allocate struct mmc_data
-    set sg list from bio
-         │
-         ▼
-  mmc_wait_for_req(host, mrq)
-         │
-         ├─ mrq->sbc = CMD23 (if reliable write or multi-block)
-         ├─ mrq->cmd = CMD18/CMD25 (read/write multiple)
-         ├─ mrq->data → sg → DMA
-         └─ mrq->stop = CMD12 (stop transmission)
-         │
-         ▼
-  host->ops->request(host, mrq)   ← host driver takes over
-         │
-         ▼
-  [DMA transfer completes]
-  mmc_request_done(host, mrq)
-    → mrq->done(mrq) callback
-    → complete(&mrq->completion)
-         │
-         ▼
-  [Error handling if cmd->error or data->error]
-  check R1 status bits:
-    R1_OUT_OF_RANGE → -ERANGE
-    R1_COM_CRC_ERROR → -EILSEQ
-    timeout → -ETIMEDOUT
-         │
-         ▼
-  [Request freed, next request]
+   ┌─────────────┐
+   │ TRAN State  │  R1_STATE_TRAN = 4  ← نقطة التشغيل الطبيعية
+   └─────────────┘
+    │         │         │           │
+    ▼         ▼         ▼           ▼
+ CMD8      CMD6      CMD17/18    CMD24/25
+SEND_    SWITCH    READ_BLOCK  WRITE_BLOCK
+EXT_CSD  (R/W)
+    │         │         │           │
+    │         │    DATA State    RCV State
+    │         │    R1_STATE=5   R1_STATE=6
+    │         │         │           │
+    │         │    CMD12 STOP   CMD12 STOP
+    │         │         │           │
+    │         │         └─────┬─────┘
+    │         │               ▼
+    │         │          TRAN State ← (back)
+    │         │
+    │    (write to NAND)
+    │         │
+    │    PRG State (R1_STATE_PRG = 7)
+    │         │
+    │    poll CMD13 until R1_READY_FOR_DATA
+    │         │
+    │    TRAN State ← (back)
+    │
+    ▼
+ parse EXT_CSD bytes
+    │
+    ├─ EXT_CSD_CARD_TYPE[196] → choose speed mode
+    ├─ EXT_CSD_BUS_WIDTH[183] → set via CMD6
+    ├─ EXT_CSD_HS_TIMING[185] → set via CMD6
+    └─ EXT_CSD_CMDQ_SUPPORT[308] → enable CmdQ if supported
 ```
 
 ---
 
 ### 4. Call Flow Diagrams
 
-#### CMD6 — MMC_SWITCH (تغيير Bus Width مثلاً)
+#### أ. تسلسل تهيئة الكارت (Initialization Flow)
 
 ```
-mmc_set_bus_width(card, MMC_BUS_WIDTH_8)
+mmc_init_card()
   │
-  ▼
-mmc_switch(card, EXT_CSD_CMD_SET_NORMAL,
-           EXT_CSD_BUS_WIDTH,
-           EXT_CSD_BUS_WIDTH_8,
-           card->ext_csd.generic_cmd6_time)
+  ├─► CMD0 (MMC_GO_IDLE_STATE)
+  │     → card resets
   │
-  ├─ build mmc_command:
-  │    opcode = MMC_SWITCH (6)
-  │    arg    = [access=WRITE_BYTE][index=183][value=2][cmdset=0]
-  │    flags  = MMC_RSP_R1B | MMC_CMD_AC
+  ├─► CMD1 (MMC_SEND_OP_COND, arg=OCR)
+  │     → R3 response: OCR register
+  │     → check MMC_CARD_BUSY bit (bit31)
+  │     → loop until card not busy
   │
-  ▼
-mmc_wait_for_cmd(host, cmd, retries)
+  ├─► CMD2 (MMC_ALL_SEND_CID)
+  │     → R2 response: 128-bit CID
+  │     → parse: manufacturer, product name, serial
   │
-  ▼
-host->ops->request(host, mrq)
+  ├─► CMD3 (MMC_SET_RELATIVE_ADDR)
+  │     → R1 response: assigned RCA
   │
-  ▼ [hardware sends CMD6 on CMD line]
+  ├─► CMD9 (MMC_SEND_CSD, arg=RCA<<16)
+  │     → R2 response: CSD register
+  │     → parse: capacity, block size, speed
+  │     → check CSD_STRUCT_VER_* for EXT_CSD support
   │
-  ▼ [card responds R1b — may pull DAT0 low (busy)]
+  ├─► CMD7 (MMC_SELECT_CARD, arg=RCA<<16)
+  │     → R1: card enters TRAN state
   │
-  ▼ [host waits for DAT0 to go high = card done]
-  │
-  ▼
-check cmd->resp[0] for R1_SWITCH_ERROR (bit7)
-  │
-  ▼
-mmc_set_timing(host, MMC_TIMING_MMC_HS)
-host->ops->set_ios(host, &host->ios)
+  └─► CMD8 (MMC_SEND_EXT_CSD)
+        → adtc: 512-byte data transfer
+        → parse all EXT_CSD_* offsets
+        → determine: CARD_TYPE, CMDQ_SUPPORT, etc.
 ```
 
-#### Read I/O Flow — HS200
+#### ب. تسلسل رفع السرعة (Speed Upgrade Flow)
 
 ```
-submit_bio(READ, sector=X, len=512K)
+mmc_select_timing()
   │
-  ▼
-mmc_blk_issue_rw_rq()
+  ├─ Read EXT_CSD_CARD_TYPE[196]
+  │   ├─ EXT_CSD_CARD_TYPE_HS400? → go HS400 path
+  │   ├─ EXT_CSD_CARD_TYPE_HS200? → go HS200 path
+  │   └─ EXT_CSD_CARD_TYPE_HS?    → go HS path
   │
-  ├─ mrq.sbc: CMD23 arg=[blocks=1024 | REL_WR_off]
-  ├─ mrq.cmd: CMD18 (READ_MULTIPLE_BLOCK) arg=X
-  ├─ mrq.data: flags=MMC_DATA_READ, blocks=1024, blksz=512
-  │             sg → kernel pages
-  └─ mrq.stop: CMD12 (STOP_TRANSMISSION)
+  ├─► CMD6 (MMC_SWITCH)
+  │     arg = [MMC_SWITCH_MODE_WRITE_BYTE << 24]
+  │           | [EXT_CSD_HS_TIMING << 16]
+  │           | [EXT_CSD_TIMING_HS200 << 8]
+  │     → R1b: wait for programming done
+  │     → check R1_SWITCH_ERROR bit
   │
-  ▼
-mmc_wait_for_req(host, mrq)
+  ├─► CMD6 (MMC_SWITCH) — set bus width
+  │     arg uses EXT_CSD_BUS_WIDTH[183]
+  │     value = EXT_CSD_BUS_WIDTH_8 or EXT_CSD_DDR_BUS_WIDTH_8
   │
-  ▼
-host->ops->request(host, mrq)
+  ├─► mmc_execute_tuning()  [HS200/HS400]
+  │     → CMD21 (MMC_SEND_TUNING_BLOCK_HS200)
+  │     → adjust tap delays until no errors
   │
-  ├── [host sends CMD23 → card ACKs with R1]
-  ├── [host sends CMD18 → card ACKs with R1]
-  ├── [card starts streaming data on DAT[7:0]]
-  ├── [ADMA/SDMA fills sg pages via DMA]
-  └── [host auto-sends CMD12 after last block]
-  │
-  ▼
-mmc_request_done()
-  mrq->done(mrq)
-  complete(&mrq->completion)
-  │
-  ▼
-blk_mq_complete_request()
+  └─► CMD13 (MMC_SEND_STATUS)
+        → R1: verify R1_SWITCH_ERROR is 0
+        → verify R1_CURRENT_STATE == R1_STATE_TRAN
 ```
 
-#### BKOPS Flow
+#### ج. تسلسل قراءة بيانات (Read Flow)
 
 ```
-[card sets R1_EXCEPTION_EVENT in status response]
+mmc_read_blocks(card, buf, sector, count)
   │
-  ▼
-mmc_check_bkops(card)
+  ├─ count > 1 ?
+  │   ├─ YES → CMD18 (MMC_READ_MULTIPLE_BLOCK)
+  │   └─ NO  → CMD17 (MMC_READ_SINGLE_BLOCK)
   │
-  ├─ CMD13: SEND_STATUS → check R1_EXCEPTION_EVENT
-  ├─ CMD8: SEND_EXT_CSD → read byte 54 (EXP_EVENTS_STATUS)
-  └─ if EXT_CSD_URGENT_BKOPS set:
-       │
-       ▼
-     mmc_start_bkops(card, is_synchronous)
-       │
-       ├─ CMD6: EXT_CSD_BKOPS_START = 1
-       └─ if synchronous: wait for card to finish
-          (poll CMD13 until R1_READY_FOR_DATA)
+  ├─► Send command
+  │     arg = sector address (byte-addressed for <2GB, sector for ≥2GB)
+  │     response = R1
+  │     check: R1_OUT_OF_RANGE, R1_ADDRESS_ERROR, R1_BLOCK_LEN_ERROR
+  │
+  ├─► DMA/PIO data transfer
+  │     card enters R1_STATE_DATA
+  │
+  ├─► [if multi-block] CMD12 (MMC_STOP_TRANSMISSION)
+  │     → R1b: wait for card to finish
+  │
+  └─► CMD13 (MMC_SEND_STATUS)
+        → poll until mmc_ready_for_data(status) == true
+          i.e.: R1_READY_FOR_DATA && R1_STATE_TRAN
 ```
 
-#### Command Queue (CQE) Flow
+#### د. تسلسل Command Queue (CmdQ Flow)
 
 ```
-[Block layer: N requests queued]
+cmdq_issue_task(tag, sector, count, is_write)
   │
-  ▼
-cqhci_request() — CQE host driver
+  ├─► CMD44 (MMC_QUE_TASK_PARAMS)
+  │     arg[20:16] = task_id
+  │     arg[30] = is_write
+  │     arg[15:0] = block_count
+  │     → R1
   │
-  ├─ CMD44: QUE_TASK_PARAMS [task_id, block_count, flags]
-  ├─ CMD45: QUE_TASK_ADDR  [sector address]
-  │     (repeat for each task up to cmdq_depth)
+  ├─► CMD45 (MMC_QUE_TASK_ADDR)
+  │     arg[31:0] = sector_address
+  │     → R1
   │
-  ├─ CMD46/47: EXECUTE_READ/WRITE_TASK [task_id]
-  │     ← data transfer on DAT lines
+  ├─► CMD46/47 (EXECUTE_READ/WRITE_TASK)
+  │     arg[20:16] = task_id
+  │     → R1 + data transfer
   │
-  └─ [card may reorder execution internally]
+  └─► [if abort needed] CMD48 (MMC_CMDQ_TASK_MGMT)
+        arg[20:16] = task_id
+        → R1b
+```
+
+#### هـ. تسلسل Erase/Trim
+
+```
+mmc_erase(card, from, nr, arg)
   │
-  ▼
-[Completion interrupt per task]
-cqhci_irq()
+  ├─► CMD35 (MMC_ERASE_GROUP_START)
+  │     arg = start_sector
+  │     → R1
   │
-  ├─ read task completion status
-  ├─ call mmc_cqe_request_done(host, mrq)
-  └─ mrq->done(mrq) or mrq->recovery_notifier(mrq)
+  ├─► CMD36 (MMC_ERASE_GROUP_END)
+  │     arg = end_sector
+  │     → R1
+  │
+  └─► CMD38 (MMC_ERASE)
+        arg = one of:
+          MMC_ERASE_ARG          → normal erase
+          MMC_TRIM_ARG           → trim (map as free)
+          MMC_DISCARD_ARG        → discard (lazy free)
+          MMC_SECURE_ERASE_ARG   → crypto erase
+          MMC_SECURE_TRIM1_ARG   → secure trim phase 1
+          MMC_SECURE_TRIM2_ARG   → secure trim phase 2
+        → R1b (long busy)
+        → poll CMD13 until TRAN state
 ```
 
 ---
 
-### 5. Locking Strategy
+### 5. استراتيجية الـ Locking
 
-الـ `mmc.h` نفسه header-only بيحتوي على constants وstatic inlines — مفيش locks فيه مباشرة. لكن الـ locking في الـ MMC subsystem بييجي من الـ structs المرتبطة:
+الملف `mmc.h` نفسه **لا يعرّف locks**، لكنه يُقدّم المعلومات اللازمة لفهم ليه الـ locking ضروري في الـ MMC subsystem.
 
-#### الـ Locks الرئيسية في MMC Layer
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│  struct mmc_host (في host.h)                                 │
-│                                                             │
-│  .lock (spinlock_t)                                         │
-│    ↳ يحمي: ios state, clock, bus state,                     │
-│            كل تعديل على host->ios                           │
-│    ↳ يُمسك: من host driver في الـ interrupt context         │
-│                                                             │
-│  .slot.lock (mutex — في بعض implementations)               │
-│    ↳ يحمي: card detection state                             │
-│                                                             │
-│  claim_host / release_host (via mmc_claim_host)             │
-│    ↳ هو mutex بيضمن إن مستخدم واحد بس يبعت requests        │
-│    ↳ ممنوع يتمسك من interrupt context                       │
-└─────────────────────────────────────────────────────────────┘
-```
-
-#### ترتيب الـ Locks (Lock Ordering)
+#### أ. ليه Locking ضروري؟
 
 ```
-mmc_claim_host()          ← الأعلى (blocking, can sleep)
-  └─ host->lock            ← spinlock سريع
-       └─ [hardware access]
-
-NEVER: host->lock ثم mmc_claim_host()  ← deadlock!
+Multi-threaded access scenario:
+┌──────────────┐    ┌──────────────┐    ┌──────────────┐
+│  Block Layer  │    │  RPMB Driver │    │  SDIO Driver │
+│ (read/write) │    │  (security)  │    │  (WiFi/BT)   │
+└──────┬───────┘    └──────┬───────┘    └──────┬───────┘
+       │                   │                   │
+       └───────────────────┴───────────────────┘
+                           │
+                    ┌──────▼──────┐
+                    │  MMC Host   │  ← one physical bus
+                    │  Controller │    يسمح بأمر واحد فقط
+                    └─────────────┘
 ```
 
-#### الـ Context والـ Sleep
+الكارت في أي وقت يكون في حالة واحدة فقط (IDLE/TRAN/DATA/...) — لازم يكون فيه lock يمنع الـ concurrent access.
+
+#### ب. تسلسل الـ Locks في MMC Core
 
 ```
-mmc_wait_for_req()
-  ├── يستدعي host->ops->request() → IRQ context لو non-blocking
-  ├── يستعمل wait_for_completion() → يتعطل (can sleep)
-  └── يُستخدم فقط من process context (mmc_claim_host مُمسوك)
+struct mmc_host.lock (spinlock)
+  └─ يحمي: ios state, clock, power state
+       ↓ (يُطلق قبل command)
 
-mmc_request_done()        ← يتستدعى من interrupt context (host IRQ)
-  ├── يشغّل mrq->done()    ← يجب أن يكون atomic-safe
-  └── complete(&mrq->completion) ← يصحّي الـ waiter
+struct mmc_host.claim_mutex أو mmc_bus_get()
+  └─ يحمي: ownership of the bus
+       ↓ (يُأخذ أولاً)
+
+Per-command: R1b response + polling CMD13
+  └─ card-level serialization
+     (الكارت نفسه يرفض أوامر جديدة وهو في PRG state)
 ```
 
-#### ما تحميه كل lock في السياق الكامل
+#### ج. ترتيب الـ Locks (Lock Ordering)
 
-| Lock | ما يحميه | Context |
-|---|---|---|
-| `host->lock` (spinlock) | `host->ios`, clock/bus state, queue head | IRQ + process |
-| `mmc_claim_host()` (mutex/semaphore) | الـ host كاملاً — يمنع concurrent requests | process only |
-| `card->ext_csd` fields | يُقرأ بعد init فقط (read-mostly, no lock needed) | process |
-| `host->claimed` flag | يُحدَّث تحت `host->lock` | IRQ + process |
+```
+مهم: لازم تاخد الـ locks بالترتيب ده عشان تتجنب deadlock
 
-#### ملاحظة على الـ R1 Status و Locking
+1. mmc_host->claim_mutex     (أعلى مستوى — bus ownership)
+       ↓
+2. mmc_host->lock  (spinlock — ios/power state)
+       ↓
+3. card->ext_csd state (implicit — under bus ownership)
 
-الـ status bits في `R1` (المُعرَّفة في `mmc.h`) بييجوا في response للأمر — مفيش lock بيحمي parsing الـ response لأنه بييحصل بعد ما الأمر يخلص وقبل ما الـ lock يتفك. الـ `mmc_ready_for_data()` inline function بتتقرأ من `cmd->resp[0]` اللي بيكون read-only بعد ما الـ hardware يكتبه.
+عكس الترتيب ده = deadlock محتمل
+```
 
+#### د. EXT_CSD Write Protection Strategy
+
+```
+EXT_CSD_BOOT_WP[173] بيتحكم في 4 أوضاع:
+
+┌──────────────────────────────────────────┐
+│  EXT_CSD_BOOT_WP_B_PWR_WP_EN  (0x01)    │ ← power-cycle WP (مؤقت)
+│  EXT_CSD_BOOT_WP_B_PERM_WP_EN (0x04)    │ ← permanent WP (دائم! لا رجعة)
+│  EXT_CSD_BOOT_WP_B_PWR_WP_DIS (0x40)    │ ← disable power WP
+│  EXT_CSD_BOOT_WP_B_PERM_WP_DIS (0x10)   │ ← disable perm WP (مرة واحدة)
+└──────────────────────────────────────────┘
+
+تحذير: PERM_WP_EN بيُحرق OTP bits في الكارت — مش reversible!
+Kernel بيتحقق من الـ flags دي قبل أي write لـ boot partition.
+```
+
+#### هـ. RPMB Security Locking
+
+```
+RPMB (Replay Protected Memory Block):
+  EXT_CSD_PART_CONFIG_ACC_RPMB = 0x3
+
+للوصول لـ RPMB:
+1. خذ bus lock
+2. CMD6: switch partition to RPMB (EXT_CSD_PART_CONFIG = 0x3)
+3. نفّذ RPMB frame (HMAC-SHA256 signed)
+4. CMD6: switch back to user partition
+5. حرر bus lock
+
+الـ lock هنا مش بس ضد race condition — ده security protocol
+لأن الـ RPMB بيعد الـ write counter ويرفض replay attacks
+```
+
+---
+
+### 6. الـ Inline Functions
+
+#### `mmc_op_multi(u32 opcode)`
 ```c
-/* safe to call without lock — resp[] is written by HW, then read-only */
+/* Returns true if opcode is a multi-block operation */
+static inline bool mmc_op_multi(u32 opcode)
+{
+    return opcode == MMC_WRITE_MULTIPLE_BLOCK ||  /* CMD25 */
+           opcode == MMC_READ_MULTIPLE_BLOCK;     /* CMD18 */
+}
+```
+**بتُستخدم لـ:** تحديد هل لازم CMD12 (STOP_TRANSMISSION) بعد الأمر ولا لا.
+
+#### `mmc_op_tuning(u32 opcode)`
+```c
+/* Returns true if opcode is a tuning command */
+static inline bool mmc_op_tuning(u32 opcode)
+{
+    return opcode == MMC_SEND_TUNING_BLOCK ||         /* CMD19 — HS200 */
+           opcode == MMC_SEND_TUNING_BLOCK_HS200;     /* CMD21 — HS200 alt */
+}
+```
+**بتُستخدم لـ:** تخطي الـ error checking العادي لأن tuning commands بتُرسل بيانات عشوائية مقصودة.
+
+#### `mmc_ready_for_data(u32 status)`
+```c
+/* Returns true only when card is truly ready for data in TRAN state */
 static inline bool mmc_ready_for_data(u32 status)
 {
     return status & R1_READY_FOR_DATA &&
            R1_CURRENT_STATE(status) == R1_STATE_TRAN;
 }
 ```
+**تحذير مهم:** بعض الكروت بتضرب بشكل خاطئ في الـ status bits — ولكده الـ kernel بيتحقق من **الاتنين معاً**: الـ ready bit والـ state field.
+
+```
+R1_CURRENT_STATE(x) = (x & 0x00001E00) >> 9  ← 4 bits فقط
+```
+
+---
+
+### 7. ملخص — خريطة المعرفة الكاملة
+
+```
+mmc.h
+  │
+  ├─── MMC Commands (CMD0..CMD48)
+  │         ↓
+  │    struct mmc_command.opcode  (في core.h)
+  │
+  ├─── R1 Status Bits (R1_*)
+  │         ↓
+  │    struct mmc_command.resp[0]  → يُحلَّل بعد كل أمر
+  │         ↓
+  │    mmc_ready_for_data()  → polling loop
+  │
+  ├─── EXT_CSD Offsets (EXT_CSD_*)
+  │         ↓
+  │    CMD8 (SEND_EXT_CSD) → 512 bytes
+  │         ↓
+  │    struct mmc_ext_csd  (في card.h) → parsed fields
+  │         ↓
+  │    CMD6 (SWITCH) + MMC_SWITCH_MODE_* → write changes back
+  │
+  ├─── Card Type Bits (EXT_CSD_CARD_TYPE_*)
+  │         ↓
+  │    struct mmc_ios.timing  → EXT_CSD_TIMING_*
+  │    struct mmc_ios.bus_width → EXT_CSD_BUS_WIDTH_*
+  │
+  ├─── Erase Args (MMC_*_ARG)
+  │         ↓
+  │    CMD35/36/38 sequence
+  │
+  └─── CCC Bits (CCC_*)
+            ↓
+       struct mmc_card.csd.cmdclass → feature detection
+```
 ## Phase 4: شرح الـ Functions
 
+> **الملف:** `include/linux/mmc/mmc.h`
+> الملف ده header بحت — مفيهوش functions كتير، أغلب محتواه macros وconstants. الـ functions الموجودة هي `static inline` utilities بتشتغل على الـ MMC command opcodes وstatus registers. الشرح هيتناول كل function بالتفصيل، وكل macro group بالسياق.
+
 ---
 
-### ملخص الـ Functions والـ Macros — Cheatsheet
+### جدول الـ Functions والـ Macros — Cheatsheet
 
-#### Inline Functions
-
-| Function | Signature | الغرض |
+| الاسم | النوع | الغرض |
 |---|---|---|
-| `mmc_op_multi` | `bool mmc_op_multi(u32 opcode)` | يتحقق إذا كان الـ opcode عملية multi-block |
-| `mmc_op_tuning` | `bool mmc_op_tuning(u32 opcode)` | يتحقق إذا كان الـ opcode عملية tuning |
-| `mmc_ready_for_data` | `bool mmc_ready_for_data(u32 status)` | يتحقق إذا كانت الكارت جاهزة لاستقبال/إرسال بيانات |
-
-#### Utility Macros
-
-| Macro | الغرض |
-|---|---|
-| `R1_STATUS(x)` | يستخلص بتات الـ error status من الـ R1 response |
-| `R1_CURRENT_STATE(x)` | يستخلص الـ current state (4 bits) من الـ R1 response |
-| `mmc_driver_type_mask(n)` | يبني الـ bitmask الخاص بـ driver strength رقم n |
+| `mmc_op_multi()` | `static inline bool` | بتشيك لو الـ opcode هو multi-block read/write |
+| `mmc_op_tuning()` | `static inline bool` | بتشيك لو الـ opcode هو tuning command |
+| `mmc_ready_for_data()` | `static inline bool` | بتشيك لو الكارت جاهز لاستقبال data (TRAN state + R1_READY_FOR_DATA) |
+| `mmc_driver_type_mask(n)` | `macro` | بتوّلد mask للـ driver strength type رقم n |
+| `R1_STATUS(x)` | `macro` | بتعزل error/status bits من الـ R1 response |
+| `R1_CURRENT_STATE(x)` | `macro` | بتستخرج الـ card state الحالية (4 bits) من الـ R1 response |
 
 ---
 
-### تصنيف المحتوى
+### ### Group 1: Command Opcode Helpers
 
-الملف `mmc.h` هو **header-only** — ما فيهوش functions قابلة للـ link بمعنى الكلمة، كل حاجة فيه إما:
-1. **`#define` macros** — command indices, register bit fields, EXT_CSD offsets.
-2. **`static inline` functions** — ثلاث functions بسيطة مدمجة في كل translation unit تستخدمها.
-
-الـ grouping هيكون:
-- **Group 1**: Command Opcode Helpers — `mmc_op_multi`, `mmc_op_tuning`
-- **Group 2**: Status & State Helpers — `mmc_ready_for_data`, `R1_STATUS`, `R1_CURRENT_STATE`
-- **Group 3**: Utility Macros — `mmc_driver_type_mask`
+الـ group ده بيوفر abstractions فوق الـ raw command numbers. الـ MMC protocol بيستخدم opcodes (CMDn) مرقمة، والـ host driver محتاج يعرف يصنّف الـ opcode قبل ما يبعت الـ request عشان يحدد behavior زي الـ multi-block mode أو الـ tuning sequence.
 
 ---
 
-### Group 1: Command Opcode Helpers
-
-الـ MMC core layer بيحتاج يعرف طبيعة الـ command اللي بيبعته — هل هو multi-block transfer أو tuning sequence؟ السبب إن لكل نوع معالجة مختلفة في الـ host controller وفي الـ error recovery path.
-
----
-
-#### `mmc_op_multi`
+#### `mmc_op_multi()`
 
 ```c
 static inline bool mmc_op_multi(u32 opcode)
@@ -1412,23 +1329,27 @@ static inline bool mmc_op_multi(u32 opcode)
 }
 ```
 
-**بتعمل إيه:**
-بتشيك إذا كان الـ `opcode` هو `CMD18` (READ_MULTIPLE_BLOCK) أو `CMD25` (WRITE_MULTIPLE_BLOCK). الـ multi-block commands بتحتاج `CMD12` (STOP_TRANSMISSION) أو مكانيزم الـ `SET_BLOCK_COUNT` (CMD23) عشان تنهيها، وبيتعامل معاها الـ host driver بشكل مختلف في الـ DMA setup.
+**ايه اللي بتعمله:**
+بتشيك لو الـ opcode هو CMD18 (`MMC_READ_MULTIPLE_BLOCK`) أو CMD25 (`MMC_WRITE_MULTIPLE_BLOCK`). ده مهم لأن الـ multi-block transfers بتتطلب `MMC_STOP_TRANSMISSION` (CMD12) في الآخر أو `MMC_SET_BLOCK_COUNT` (CMD23) قبلها، بخلاف الـ single-block commands.
 
 **Parameters:**
-- `opcode` — الـ command index بالـ `u32`، بيجي من `struct mmc_command::opcode`.
+- `opcode` — الـ `u32` اللي بيحمل رقم الـ MMC command
 
 **Return value:**
-- `true` لو الـ opcode هو multi-block read أو write.
-- `false` في أي حالة تانية.
+- `true` لو الـ opcode هو read/write multiple block
+- `false` في أي حالة تانية
 
 **Key details:**
-- **No locking** — pure inline predicate، safe to call from any context.
-- **Caller context:** بيتم استدعاؤها من `mmc_blk_rw_rq_prep()` وفي الـ host driver لتحديد هل محتاج `CMD12` أو لا، وكمان من `mmc_request_done()` في error recovery.
+- لا locking، لا side effects — pure predicate
+- بتتستخدم في الـ `mmc_request` path قبل إرسال الـ command عشان يقرر الـ host driver يضيف STOP_TRANSMISSION ولا لأ
+- الـ `MMC_SEND_TUNING_BLOCK` (CMD19) عنده نفس رقم `MMC_BUS_TEST_W` في التعريفات، ده intentional overlap في الـ spec لأن HS200 tuning مختلف
+
+**Who calls it:**
+`mmc_blk_mq_issue_rq()` وغيرها في `drivers/mmc/core/block.c` لتحديد نوع الـ transfer قبل issue.
 
 ---
 
-#### `mmc_op_tuning`
+#### `mmc_op_tuning()`
 
 ```c
 static inline bool mmc_op_tuning(u32 opcode)
@@ -1438,31 +1359,33 @@ static inline bool mmc_op_tuning(u32 opcode)
 }
 ```
 
-**بتعمل إيه:**
-بتشيك إذا كان الـ command هو tuning sequence — إما `CMD19` (SEND_TUNING_BLOCK) المستخدم في HS200، أو `CMD21` (SEND_TUNING_BLOCK_HS200). الـ tuning procedure بيعملها الـ host controller عشان يحدد الـ sampling point الأمثل للـ clock في الـ high-speed modes.
-
-**ملاحظة مهمة:** `CMD19` معرف مرتين في الملف — مرة كـ `MMC_BUS_TEST_W` ومرة كـ `MMC_SEND_TUNING_BLOCK`. ده مقصود — نفس الـ opcode number لكن في سياق مختلف (bus test vs. tuning)، والـ context بيحدد المعنى.
+**ايه اللي بتعمله:**
+بتحدد لو الـ command هو tuning command — إما CMD19 (`MMC_SEND_TUNING_BLOCK`) لـ SDR50/SDR104، أو CMD21 (`MMC_SEND_TUNING_BLOCK_HS200`) لـ eMMC HS200. الـ tuning commands ليها data phase خاصة — بترجع fixed 64/128-byte pattern والـ host controller بيستخدمها لمعايرة الـ sampling point.
 
 **Parameters:**
-- `opcode` — الـ command index بالـ `u32`.
+- `opcode` — رقم الـ command
 
 **Return value:**
-- `true` لو كانت tuning command.
-- `false` غير ذلك.
+- `true` لو هو tuning command
+- `false` غير كده
 
 **Key details:**
-- **No locking** — pure predicate.
-- **Caller context:** بيتم استدعاؤها من الـ host driver tuning callback (مثلاً `sdhci_execute_tuning()`) وفي `mmc_execute_tuning()` في الـ core، عشان يتعامل مع الـ data direction والـ response type بشكل صح.
+- الـ tuning sequence بتترسل بدون DMA في الغالب — الـ host controller بيتعامل معاها internally
+- لازم الـ host controller يدعم `MMC_CAP_HW_RESET` و tuning capability
+- الـ caller بيستخدم الـ return عشان يعطّل features زي الـ `sdhci_send_tuning()` في حالة الـ tuning requests عشان ميبعتش STOP_TRANSMISSION
+
+**Who calls it:**
+`mmc_execute_tuning()` في `drivers/mmc/core/mmc.c` وكمان الـ SDHCI host driver في `drivers/mmc/host/sdhci.c`.
 
 ---
 
-### Group 2: Status & State Helpers
+### ### Group 2: Card Status Helpers (R1 Response)
 
-الـ MMC R1 response هو 32-bit register بيحتوي على error bits وstate bits. الـ macros والـ inline functions دي بتسهل استخراج المعلومات منه بشكل type-safe.
+الـ R1 response هي 32-bit card status بيرجعها الكارت بعد كل command. فيها error bits وstatus bits وcard state machine. الـ group ده بيوفر helpers عشان تفسر الـ R1 بشكل صحيح.
 
 ---
 
-#### `mmc_ready_for_data`
+#### `mmc_ready_for_data()`
 
 ```c
 static inline bool mmc_ready_for_data(u32 status)
@@ -1476,27 +1399,32 @@ static inline bool mmc_ready_for_data(u32 status)
 }
 ```
 
-**بتعمل إيه:**
-بتتحقق من إن الكارت في الحالة الصح لاستقبال data transfer command. بتجمع بين شرطين: إن الـ `READY_FOR_DATA` bit (bit 8) set، وإن الكارت في الـ `TRAN` state (state 4). الـ comment في الكود بيشرح السبب: بعض الكروت بتعمل mishandle للـ status bits، فالـ double check ضروري.
-
-**الـ State Machine:**
-```
-IDLE → READY → IDENT → STBY → TRAN → DATA/RCV/PRG → TRAN
-                                ↑_________________________|
-```
-الكارت لازم تكون في `TRAN` state عشان تقبل read/write command جديد.
+**ايه اللي بتعمله:**
+بتتحقق إن الكارت جاهز لاستقبال أو إرسال data. الشرط المزدوج ده مهم لأن بعض الكروت بتعمل `R1_READY_FOR_DATA` set حتى لما تكون في state مش TRAN، وده behavior خاطئ من الكارت بس موجود في الواقع. الـ function بتتجنب الوقوع في الفخ ده بفرض التحقق من الحالتين مع بعض.
 
 **Parameters:**
-- `status` — الـ 32-bit R1 response المقروء من CMD13 (SEND_STATUS) أو من أي command response.
+- `status` — الـ 32-bit R1 status word المستخرج من الـ MMC response
 
 **Return value:**
-- `true` لو الكارت ready for data في الـ TRAN state.
-- `false` لو مش ready (مثلاً: لسه شغالة PRG state، أو busy).
+- `true` لو `R1_READY_FOR_DATA` set وكمان الكارت في `R1_STATE_TRAN` (state=4)
+- `false` لو أي شرط منهم مش متحقق
 
 **Key details:**
-- **No locking.**
-- **Error paths:** لو رجعت `false`، الـ caller عادةً بيدخل polling loop ببعت CMD13 مرة تانية بعد delay.
-- **Caller context:** بيتم استدعاؤها من `mmc_poll_for_busy()` وفي الـ block layer بعد write operations لضمان إن الكارت خلصت البرمجة.
+- `R1_READY_FOR_DATA` = bit 8 في الـ R1 response
+- `R1_CURRENT_STATE(x)` = `(x & 0x00001E00) >> 9` — بتعطي 4-bit state value
+- `R1_STATE_TRAN` = 4 — ده الـ Transfer state اللي الكارت بيكون فيه جاهز للـ data transfer
+- لو الكارت في `R1_STATE_PRG` (programming) أو `R1_STATE_RCV` (receiving)، الـ function بترجع false حتى لو `R1_READY_FOR_DATA` set
+
+**Pseudocode flow:**
+```
+mmc_ready_for_data(status):
+    ready_bit  = (status >> 8) & 1         // R1_READY_FOR_DATA
+    card_state = (status >> 9) & 0xF       // R1_CURRENT_STATE
+    return (ready_bit == 1) AND (card_state == 4)  // 4 = TRAN
+```
+
+**Who calls it:**
+`mmc_poll_for_busy()` في `drivers/mmc/core/mmc_ops.c` بتـ poll الكارت بعد operations زي erase أو SWITCH عشان تتأكد إن الكارت رجع ready. كمان بتتستخدم في الـ data transfer completion path.
 
 ---
 
@@ -1506,47 +1434,40 @@ IDLE → READY → IDENT → STBY → TRAN → DATA/RCV/PRG → TRAN
 #define R1_STATUS(x)  (x & 0xFFF9A000)
 ```
 
-**بيعمل إيه:**
-بيعمل mask على الـ R1 response ويستخرج بتات الـ error/status فقط، بيحذف الـ state field وبتات الـ flags التانية. الـ mask `0xFFF9A000` بيحتوي على كل الـ error bits من bit 13 لفوق (ما عدا الـ state bits من 9 لـ 12).
+**ايه اللي بيعمله:**
+بيعزل bits الـ error والـ status من الـ R1 response بـ masking. الـ mask `0xFFF9A000` بيحتفظ بالـ bits اللي هي error indicators (bits 13-31 بس مش كلهم) ويشيل الـ bits الخاصة بالـ state والـ ready flags.
 
-**Parameters:**
-- `x` — الـ 32-bit R1 response.
-
-**Return value:**
-- الـ masked value — لو صفر يعني ما فيش errors في الـ status bits المعيّنة.
+**Key details:**
+- بيتستخدم للتحقق السريع إن مفيش error في الـ R1 response
+- لو `R1_STATUS(status) != 0`، فيه error أو warning محتاج investigation
+- الـ bits المحتفظ بيها تشمل: `R1_OUT_OF_RANGE`, `R1_ADDRESS_ERROR`, `R1_BLOCK_LEN_ERROR`, `R1_ERASE_SEQ_ERROR`, وغيرها
 
 ---
 
 #### `R1_CURRENT_STATE(x)` — Macro
 
 ```c
-#define R1_CURRENT_STATE(x)  ((x & 0x00001E00) >> 9)
+#define R1_CURRENT_STATE(x)  ((x & 0x00001E00) >> 9)  /* sx, b (4 bits) */
 ```
 
-**بيعمل إيه:**
-بيستخرج الـ 4-bit current state field من الـ R1 response (bits 12:9). القيم المحتملة:
+**ايه اللي بيعمله:**
+بيستخرج الـ 4-bit card state من bits [12:9] في الـ R1. الـ state machine للـ MMC card بتتحرك بين الـ states دي:
 
 | Value | State | المعنى |
 |---|---|---|
-| 0 | `R1_STATE_IDLE` | Idle state |
-| 1 | `R1_STATE_READY` | Ready state |
-| 2 | `R1_STATE_IDENT` | Identification state |
-| 3 | `R1_STATE_STBY` | Standby state |
-| 4 | `R1_STATE_TRAN` | Transfer state — الحالة الطبيعية للعمل |
-| 5 | `R1_STATE_DATA` | Sending data state |
-| 6 | `R1_STATE_RCV` | Receiving data state |
-| 7 | `R1_STATE_PRG` | Programming state — الكارت بتكتب في الـ flash |
-| 8 | `R1_STATE_DIS` | Disconnect state |
-
-**Parameters:**
-- `x` — الـ 32-bit R1 response.
-
-**Return value:**
-- Integer من 0 لـ 15 يمثل الـ current state.
+| 0 | `R1_STATE_IDLE` | بعد power-up أو CMD0 |
+| 1 | `R1_STATE_READY` | بعد CMD1 (OCR accepted) |
+| 2 | `R1_STATE_IDENT` | Identification mode |
+| 3 | `R1_STATE_STBY` | Standby — مش selected |
+| 4 | `R1_STATE_TRAN` | Transfer — جاهز للـ data |
+| 5 | `R1_STATE_DATA` | بيبعت data |
+| 6 | `R1_STATE_RCV` | بيستقبل data |
+| 7 | `R1_STATE_PRG` | Programming/busy |
+| 8 | `R1_STATE_DIS` | Disconnect |
 
 ---
 
-### Group 3: Utility Macros
+### ### Group 3: Driver Type Mask Macro
 
 ---
 
@@ -1556,1379 +1477,1596 @@ IDLE → READY → IDENT → STBY → TRAN → DATA/RCV/PRG → TRAN
 #define mmc_driver_type_mask(n)  (1 << (n))
 ```
 
-**بيعمل إيه:**
-بيبني الـ bitmask الخاص بـ driver strength type رقم n. الـ eMMC spec بيحدد أربع driver strengths:
-
-| n | Type | المعنى |
-|---|---|---|
-| 0 | Type B | Default (50 ohm) |
-| 1 | Type A | 33 ohm |
-| 2 | Type C | 66 ohm |
-| 3 | Type D | 100 ohm |
-
-بيتم استخدام الـ mask في المقارنة مع `EXT_CSD_DRIVER_STRENGTH` field (byte 197) من الـ EXT_CSD عشان تعرف هل الكارت بتدعم الـ driver strength المطلوب.
+**ايه اللي بيعمله:**
+بيولّد bitmask للـ driver strength type رقم `n`. الـ eMMC spec بتعرّف 4 driver strength types (Type 0–3) موجودة في `EXT_CSD_DRIVER_STRENGTH` (offset 197). الـ host بيستخدم الـ mask ده لمطابقة الـ driver type المدعوم من الكارت مع اللي بيدعمه الـ host controller.
 
 **Parameters:**
-- `n` — رقم الـ driver strength type (0-3).
+- `n` — رقم الـ driver type (0 إلى 3 عادةً)
 
 **Return value:**
-- الـ bitmask المناسب: `1`, `2`, `4`, أو `8`.
+- `(1 << n)` — integer bitmask
 
-**Caller context:** بيتم استخدامه في `mmc_select_hs400es()` وفي الـ tuning-related code لاختيار الـ driver strength المناسب للـ host.
-
----
-
-### ملاحظات على الـ R1 Error Bits
-
-الـ R1 response بيحتوي على bits كتير بتدل على errors مختلفة، دي أهمها:
-
-| Bit | Macro | النوع | وقت الـ clear |
-|---|---|---|---|
-| 31 | `R1_OUT_OF_RANGE` | er,c | clear by read |
-| 30 | `R1_ADDRESS_ERROR` | erx,c | clear by read |
-| 29 | `R1_BLOCK_LEN_ERROR` | er,c | clear by read |
-| 23 | `R1_COM_CRC_ERROR` | er,b | يتكلير مع أول command valid |
-| 22 | `R1_ILLEGAL_COMMAND` | er,b | يتكلير مع أول command valid |
-| 21 | `R1_CARD_ECC_FAILED` | ex,c | clear by read |
-| 20 | `R1_CC_ERROR` | erx,c | clear by read |
-| 19 | `R1_ERROR` | erx,c | general error |
-| 7 | `R1_SWITCH_ERROR` | sx,c | يظهر بعد CMD6 |
-| 6 | `R1_EXCEPTION_EVENT` | sr,a | exceptional event pending |
-
-**أنواع الـ bits:**
-- **e**: error bit — يدل على error حصل.
-- **s**: status bit — يدل على حالة.
-- **r**: يتعبّى في الـ actual command response.
-- **x**: يتعبّى أثناء execution — الـ host لازم يـ poll بـ CMD13.
+**Key details:**
+- Type 0: 50 ohm pull-up، الـ default
+- Type 1: 33 ohm — أقوى drive
+- Type 2: 66 ohm — أضعف drive
+- Type 3: 100 ohm — الأضعف
+- بيتستخدم في `mmc_select_driver_type()` في `drivers/mmc/core/mmc.c` لتحديد أنسب driver type بناءً على قدرات الكارت والـ host
 
 ---
 
-### ملاحظة على الـ SPI Mode
+### ### Group 4: Command Classes Overview
 
-في SPI mode، الـ R1 format مختلف تماماً — byte واحد بدل 32 bits:
+الـ header بيعرّف الـ MMC commands مقسّمة لـ classes حسب الـ MMC spec v4.x. ده مهم للـ driver لأن الـ `CSD` بيحتوي على `CCC` field (Card Command Classes) اللي بيقول إيه الـ classes المدعومة من الكارت.
 
-| Bit | Macro | المعنى |
+| Class | Macro | Commands الرئيسية |
 |---|---|---|
-| 0 | `R1_SPI_IDLE` | Card is in idle state |
-| 2 | `R1_SPI_ILLEGAL_COMMAND` | Illegal command |
-| 3 | `R1_SPI_COM_CRC` | CRC error |
-| 6 | `R1_SPI_PARAMETER` | Parameter error |
-
-الـ R2 byte (للـ SEND_STATUS فقط في SPI) بيحتوي على تفاصيل زيادة مثل `R2_SPI_CARD_LOCKED` و`R2_SPI_WP_VIOLATION`. الـ inline functions الثلاثة في الملف بتشتغل مع الـ native mode فقط — مش SPI.
+| 0 — Basic | `CCC_BASIC` | CMD0,1,2,3,4,7,9,10,12,13,15 |
+| 1 — Stream Read | `CCC_STREAM_READ` | CMD11 |
+| 2 — Block Read | `CCC_BLOCK_READ` | CMD16,17,18 |
+| 3 — Stream Write | `CCC_STREAM_WRITE` | CMD20 |
+| 4 — Block Write | `CCC_BLOCK_WRITE` | CMD16,24,25,26,27 |
+| 5 — Erase | `CCC_ERASE` | CMD35,36,38 |
+| 6 — Write Protect | `CCC_WRITE_PROT` | CMD28,29,30 |
+| 7 — Lock Card | `CCC_LOCK_CARD` | CMD42 |
+| 8 — App Specific | `CCC_APP_SPEC` | CMD55,56 |
+| 9 — I/O Mode | `CCC_IO_MODE` | CMD39,40 |
+| 10 — Switch | `CCC_SWITCH` | CMD6 |
+| 11 — Command Queue | — | CMD44,45,46,47,48 |
 
 ---
 
-### الـ EXT_CSD — Extended Card Specific Data
+### ### Group 5: EXT_CSD Field Index — Reference
 
-الـ EXT_CSD هو register بحجم 512 bytes بيتقرأ بـ CMD8 (SEND_EXT_CSD). الـ header بيحدد offsets لأهم الـ fields:
+الـ `EXT_CSD` هو 512-byte register في الكارت بيتقرأ بـ CMD8. كل byte فيه له offset معرّف بـ macro. ده أهم الـ fields:
 
-| Field | Offset | Access | الغرض |
+| Macro | Offset | Access | الوظيفة |
 |---|---|---|---|
-| `EXT_CSD_REV` | 192 | RO | EXT_CSD revision |
-| `EXT_CSD_CARD_TYPE` | 196 | RO | Supported speed modes |
-| `EXT_CSD_HS_TIMING` | 185 | R/W | الـ timing mode الحالي |
-| `EXT_CSD_BUS_WIDTH` | 183 | R/W | عرض الـ bus |
-| `EXT_CSD_PART_CONFIG` | 179 | R/W | Active partition |
-| `EXT_CSD_CMDQ_SUPPORT` | 308 | RO | هل Command Queue مدعومة |
 | `EXT_CSD_CMDQ_MODE_EN` | 15 | R/W | تفعيل Command Queue |
-| `EXT_CSD_CACHE_CTRL` | 33 | R/W | تفعيل الـ cache |
+| `EXT_CSD_FLUSH_CACHE` | 32 | W | تفريغ الـ cache إلى الـ media |
+| `EXT_CSD_CACHE_CTRL` | 33 | R/W | تفعيل/تعطيل الـ cache |
+| `EXT_CSD_POWER_OFF_NOTIFICATION` | 34 | R/W | إشعار الكارت بالـ power off |
+| `EXT_CSD_PART_CONFIG` | 179 | R/W | اختيار الـ partition النشطة |
+| `EXT_CSD_BUS_WIDTH` | 183 | R/W | تحديد عرض الـ bus |
+| `EXT_CSD_HS_TIMING` | 185 | R/W | تحديد timing mode (HS/HS200/HS400) |
+| `EXT_CSD_REV` | 192 | RO | إصدار الـ EXT_CSD spec |
+| `EXT_CSD_CARD_TYPE` | 196 | RO | الـ speed modes المدعومة |
 | `EXT_CSD_SEC_CNT` | 212 | RO | عدد الـ sectors (4 bytes) |
 | `EXT_CSD_BKOPS_EN` | 163 | R/W | تفعيل Background Operations |
+| `EXT_CSD_RST_N_FUNCTION` | 162 | R/W | تفعيل RST_n pin |
 | `EXT_CSD_RPMB_MULT` | 168 | RO | حجم الـ RPMB partition |
+| `EXT_CSD_ERASE_GROUP_DEF` | 175 | R/W | استخدام HC erase group size |
+| `EXT_CSD_HC_ERASE_GRP_SIZE` | 224 | RO | حجم الـ HC erase group |
+| `EXT_CSD_CMDQ_DEPTH` | 307 | RO | عمق الـ command queue (max tasks) |
+| `EXT_CSD_CMDQ_SUPPORT` | 308 | RO | دعم الـ CMDQ |
+| `EXT_CSD_PRE_EOL_INFO` | 267 | RO | مؤشر اقتراب نهاية العمر |
+| `EXT_CSD_DEVICE_LIFE_TIME_EST_TYP_A` | 268 | RO | تقدير عمر الـ MLC cells |
+| `EXT_CSD_DEVICE_LIFE_TIME_EST_TYP_B` | 269 | RO | تقدير عمر الـ TLC/SLC cells |
+| `EXT_CSD_FIRMWARE_VERSION` | 254 | RO | firmware version (8 bytes) |
 
-تعديل الـ EXT_CSD بيتم عبر CMD6 (MMC_SWITCH) باستخدام الـ access modes:
+---
+
+### ### Group 6: Card Type Speed Modes
+
+الـ `EXT_CSD_CARD_TYPE` (offset 196) بيحدد الـ speed modes اللي الكارت بيدعمها. الـ kernel بيـ read القيمة دي وبيعمل AND مع قدرات الـ host عشان يختار أعلى mode مدعوم.
 
 ```c
-/* MMC_SWITCH argument format:
- * [25:24] = access mode (WRITE_BYTE = 0x03)
- * [23:16] = EXT_CSD byte index
- * [15:08] = value
- * [02:00] = command set (0 = normal)
- */
-#define MMC_SWITCH_MODE_WRITE_BYTE  0x03
+/* التسلسل الهرمي للـ speed modes من الأبطأ للأسرع */
+EXT_CSD_CARD_TYPE_HS_26        // 26 MHz SDR
+EXT_CSD_CARD_TYPE_HS_52        // 52 MHz SDR
+EXT_CSD_CARD_TYPE_DDR_52       // 52 MHz DDR (1.8V أو 1.2V)
+EXT_CSD_CARD_TYPE_HS200        // 200 MHz SDR (HS200)
+EXT_CSD_CARD_TYPE_HS400        // 200 MHz DDR (HS400)
+EXT_CSD_CARD_TYPE_HS400ES      // HS400 + Enhanced Strobe
+```
+
+**ASCII diagram — negotiation flow:**
+
+```
+Host capabilities
+        |
+        v
+   AND with EXT_CSD_CARD_TYPE
+        |
+        v
+   ┌────────────────────────────────┐
+   │  HS400ES supported by both?   │──yes──> Select HS400ES
+   └────────────────────────────────┘
+        |no
+        v
+   ┌─────────────────────────────┐
+   │  HS400 supported by both?  │──yes──> Select HS400
+   └─────────────────────────────┘
+        |no
+        v
+   ┌──────────────────────────────┐
+   │  HS200 supported by both?  │──yes──> Select HS200
+   └──────────────────────────────┘
+        |no
+        v
+   ┌─────────────────────────────────┐
+   │  DDR52 supported by both?   │──yes──> Select DDR52
+   └─────────────────────────────────┘
+        |no
+        v
+        HS52 or HS26
 ```
 
 ---
 
-### الـ Erase/Trim/Discard Arguments
+### ### Group 7: MMC_SWITCH Access Modes
 
-| Macro | Value | الغرض |
+الـ `MMC_SWITCH` (CMD6) هو أهم command في الـ eMMC management — بيغير أي byte في الـ EXT_CSD. الـ access mode بيتحدد في bits [25:24] من الـ argument.
+
+| Macro | Value | المعنى |
 |---|---|---|
-| `MMC_ERASE_ARG` | 0x00000000 | Erase عادي |
-| `MMC_SECURE_ERASE_ARG` | 0x80000000 | Secure erase (overwrite then erase) |
-| `MMC_TRIM_ARG` | 0x00000001 | Trim — إخبار الكارت بالـ unused blocks |
-| `MMC_DISCARD_ARG` | 0x00000003 | Discard — أسرع من Trim، ما بيضمنش الـ physical erase |
-| `MMC_SECURE_TRIM1_ARG` | 0x80000001 | المرحلة الأولى من الـ secure trim |
-| `MMC_SECURE_TRIM2_ARG` | 0x80008000 | المرحلة التانية من الـ secure trim |
+| `MMC_SWITCH_MODE_CMD_SET` | 0x00 | تغيير الـ command set (deprecated عملياً) |
+| `MMC_SWITCH_MODE_SET_BITS` | 0x01 | set الـ bits اللي قيمتها 1 في الـ value |
+| `MMC_SWITCH_MODE_CLEAR_BITS` | 0x02 | clear الـ bits اللي قيمتها 1 في الـ value |
+| `MMC_SWITCH_MODE_WRITE_BYTE` | 0x03 | كتابة الـ byte كامل بالقيمة المطلوبة |
 
-الـ `MMC_SECURE_ARGS` mask (0x80000000) بيستخدم للتحقق إذا كانت العملية secure أم لا.
-الـ `MMC_TRIM_OR_DISCARD_ARGS` mask (0x00008003) بيستخدم للتمييز بين العمليات الـ trim/discard من الـ erase العادي.
+**مثال — تفعيل الـ cache عبر CMD6:**
+```c
+/* Write 1 to EXT_CSD_CACHE_CTRL[0] */
+mmc_switch(card,
+           EXT_CSD_CMD_SET_NORMAL,
+           EXT_CSD_CACHE_CTRL,
+           1,                          /* value */
+           card->ext_csd.generic_cmd6_time);
+/*
+ * mmc_switch internally builds CMD6 argument:
+ * arg = (MMC_SWITCH_MODE_WRITE_BYTE << 24) |
+ *       (EXT_CSD_CACHE_CTRL << 16)         |
+ *       (1 << 8)                            |
+ *       EXT_CSD_CMD_SET_NORMAL
+ */
+```
+
+---
+
+### ### Group 8: Erase/Trim/Discard Arguments
+
+الـ eMMC بيدعم أنواع مختلفة من الـ erase operations، كلها بتتبعت كـ argument لـ CMD38:
+
+| Macro | Value | الوظيفة |
+|---|---|---|
+| `MMC_ERASE_ARG` | `0x00000000` | Conventional erase — NAND erase |
+| `MMC_TRIM_ARG` | `0x00000001` | Trim — mark blocks as unused (TRIM) |
+| `MMC_DISCARD_ARG` | `0x00000003` | Discard — hint for GC, data may survive |
+| `MMC_SECURE_ERASE_ARG` | `0x80000000` | Secure erase — cryptographic wipe |
+| `MMC_SECURE_TRIM1_ARG` | `0x80000001` | Secure trim phase 1 |
+| `MMC_SECURE_TRIM2_ARG` | `0x80008000` | Secure trim phase 2 |
+| `MMC_SECURE_ARGS` | `0x80000000` | Mask للتحقق من الـ secure flag |
+| `MMC_TRIM_OR_DISCARD_ARGS` | `0x00008003` | Mask للتمييز بين trim وdiscard |
+
+**Key details:**
+- الـ `MMC_SECURE_ARGS` mask بيتستخدم للتحقق لو الـ erase argument هو secure operation قبل السماح بيه
+- الـ `SEC_FEATURE_SUPPORT` في `EXT_CSD` لازم يكون set قبل استخدام الـ secure variants
+- `MMC_DISCARD_ARG` مختلف عن `TRIM` — الـ discard مش guaranteed يمسح الداتا
+
+---
+
+### ### Group 9: BKOPS و Command Queue Flags
+
+**الـ Background Operations (BKOPS):**
+الـ eMMC controller الداخلي بتاع الكارت بيعمل garbage collection وwear leveling في الخلفية. الـ kernel يقدر يتحكم فيها:
+
+```c
+EXT_CSD_BKOPS_SUPPORT   // 502: الكارت بيدعم BKOPS
+EXT_CSD_BKOPS_EN        // 163: تفعيل manual BKOPS
+EXT_CSD_AUTO_BKOPS_MASK // 0x02: تفعيل automatic BKOPS
+EXT_CSD_BKOPS_START     // 164: إطلاق BKOPS manually (W)
+EXT_CSD_BKOPS_STATUS    // 246: مستوى urgency (0-3)
+EXT_CSD_BKOPS_LEVEL_2   // 0x2: مستوى critical — لازم يتعالج فوراً
+```
+
+**الـ Command Queue (CMDQ):**
+ميزة eMMC 5.1 بتسمح بـ queue حتى 32 request في نفس الوقت:
+
+```c
+EXT_CSD_CMDQ_SUPPORT    // 308: الكارت بيدعم CMDQ
+EXT_CSD_CMDQ_DEPTH      // 307: عمق الـ queue (max - 1)
+EXT_CSD_CMDQ_DEPTH_MASK // GENMASK(4,0) — 5 bits للعمق
+EXT_CSD_CMDQ_MODE_EN    // 15:  تفعيل/تعطيل CMDQ
+EXT_CSD_CMDQ_MODE_ENABLED // BIT(0) — bit تفعيل الـ CMDQ
+EXT_CSD_CMDQ_SUPPORTED  // BIT(0) — bit الدعم في EXT_CSD[308]
+```
+
+---
+
+### ### Group 10: Power Management Constants
+
+```c
+EXT_CSD_NO_POWER_NOTIFICATION  // 0: مش بيبعت notification
+EXT_CSD_POWER_ON               // 1: الكارت powered on ومتهيئ
+EXT_CSD_POWER_OFF_SHORT        // 2: power off قصير (<= POWER_OFF_LONG_TIME)
+EXT_CSD_POWER_OFF_LONG         // 3: power off طويل
+```
+
+الـ kernel بيكتب القيمة دي في `EXT_CSD_POWER_OFF_NOTIFICATION` قبل ما يقطع الطاقة عن الكارت عشان يديه وقت يعمل internal flush. لو الكارت شافه `EXT_CSD_POWER_OFF_LONG`، بيعمل full flush للـ write buffer وبيحفظ state.
+
+---
+
+### ### Group 11: SPI Mode Status Bits
+
+لما الـ MMC/SD بيشتغل على SPI بدل native mode، الـ R1 response بيتغير لـ single byte بدل 32 bits، والـ R2 ممكن يتبعه:
+
+| Macro | Bit | المعنى |
+|---|---|---|
+| `R1_SPI_IDLE` | bit 0 | الكارت في idle state |
+| `R1_SPI_ERASE_RESET` | bit 1 | erase sequence interrupted |
+| `R1_SPI_ILLEGAL_COMMAND` | bit 2 | command غير معروف |
+| `R1_SPI_COM_CRC` | bit 3 | CRC error في الـ command |
+| `R1_SPI_ERASE_SEQ` | bit 4 | خطأ في تسلسل الـ erase |
+| `R1_SPI_ADDRESS` | bit 5 | address error |
+| `R1_SPI_PARAMETER` | bit 6 | parameter error |
+| `R2_SPI_CARD_LOCKED` | bit 8 | الكارت مقفول |
+| `R2_SPI_WP_VIOLATION` | bit 13 | write protect violation |
+| `R2_SPI_OUT_OF_RANGE` | bit 15 | address out of range / CSD overwrite |
+
+**ملاحظة:** في SPI mode، bit 7 دايماً zero، والـ R2 byte يجي بعد R1 في response لـ `MMC_SEND_STATUS` بس.
 ## Phase 5: دليل الـ Debugging الشامل
 
 ---
 
 ### Software Level
 
-#### 1. مدخلات الـ debugfs المتعلقة بـ MMC
+#### 1. الـ debugfs entries
 
-الـ MMC subsystem بيعرض معلومات تفصيلية تحت `/sys/kernel/debug/mmc*`:
+الـ MMC subsystem بيعرض معلومات كتير عن طريق debugfs، عادةً تحت `/sys/kernel/debug/mmc0/` (أو `mmc1`, `mmc2` إلخ حسب الـ host).
+
+| المسار | المحتوى |
+|--------|---------|
+| `/sys/kernel/debug/mmc0/ios` | الـ I/O settings الحالية (clock, bus_width, timing, voltage) |
+| `/sys/kernel/debug/mmc0/err_stats` | إحصائيات الأخطاء مقسّمة حسب نوعها (CMD timeout, CRC, ADMA…) |
+| `/sys/kernel/debug/mmc0/ext_csd` | raw dump للـ EXT_CSD كامل (512 بايت) |
+| `/sys/kernel/debug/mmc0/clock` | الـ clock الفعلي اللي بيستخدمه الـ host |
+| `/sys/kernel/debug/mmc0/regs` | register dump للـ host controller (لو الـ driver دعمه) |
 
 ```bash
-# اعرف كل الـ MMC hosts الموجودة
-ls /sys/kernel/debug/
+# اقرأ الـ ios الحالي
+cat /sys/kernel/debug/mmc0/ios
 
-# اقرأ الـ EXT_CSD كامل (512 byte) — الأهم في debugging
-cat /sys/kernel/debug/mmc0/mmc0:0001/ext_csd
+# اقرأ err_stats لمعرفة نوع الأخطاء
+cat /sys/kernel/debug/mmc0/err_stats
 
-# مثال: استخرج byte رقم 196 (EXT_CSD_CARD_TYPE)
-hexdump -C /sys/kernel/debug/mmc0/mmc0:0001/ext_csd | awk 'NR==13'
+# dump كامل للـ EXT_CSD
+cat /sys/kernel/debug/mmc0/ext_csd
 ```
 
-**أهم الـ bytes في EXT_CSD للـ debugging:**
+**مثال output للـ ios:**
+```
+clock:          200000000 Hz
+actual clock:   200000000 Hz
+vdd:            21 (3.3 ~ 3.4 V)
+bus mode:       2 (push-pull)
+chip select:    0 (don't care)
+power mode:     2 (on)
+bus width:      3 (8 bits)
+timing spec:    10 (mmc HS400)
+signal voltage: 1 (1.80 V)
+driver type:    0 (driver type B)
+```
 
-| Byte | الاسم | القيمة المتوقعة | ما يعنيه |
-|------|-------|-----------------|----------|
-| 192 | `EXT_CSD_REV` | 5–8 | إصدار الـ spec |
-| 196 | `EXT_CSD_CARD_TYPE` | 0xFF → HS400ES | أقصى سرعة مدعومة |
-| 185 | `EXT_CSD_HS_TIMING` | 0=BC, 1=HS, 2=HS200, 3=HS400 | الـ timing الحالي |
-| 183 | `EXT_CSD_BUS_WIDTH` | 0=1bit, 1=4bit, 2=8bit, 6=DDR8 | عرض الـ bus |
-| 179 | `EXT_CSD_PART_CONFIG` | 3 bits low | الـ partition النشطة |
-| 246 | `EXT_CSD_BKOPS_STATUS` | 0=لا يحتاج, 2=عاجل | حالة الـ background ops |
-| 267 | `EXT_CSD_PRE_EOL_INFO` | 1=طبيعي, 3=urgent | عمر الـ NAND |
-| 268 | `EXT_CSD_DEVICE_LIFE_TIME_EST_TYP_A` | 1–10 (×10%) | استهلاك النوع A |
-| 269 | `EXT_CSD_DEVICE_LIFE_TIME_EST_TYP_B` | 1–10 (×10%) | استهلاك النوع B |
+**تفسير الـ output:** الكارت شغال بـ HS400 على 200 MHz، 8-bit bus، 1.8V — ده الـ mode الأسرع لـ eMMC.
+
+---
+
+#### 2. الـ sysfs entries
+
+| المسار | المحتوى |
+|--------|---------|
+| `/sys/bus/mmc/devices/mmc0:0001/` | directory الكارت الأول على host 0 |
+| `/sys/bus/mmc/devices/mmc0:0001/cid` | الـ Card Identification Register |
+| `/sys/bus/mmc/devices/mmc0:0001/csd` | الـ Card Specific Data |
+| `/sys/bus/mmc/devices/mmc0:0001/date` | تاريخ التصنيع (من الـ CID) |
+| `/sys/bus/mmc/devices/mmc0:0001/fwrev` | firmware revision |
+| `/sys/bus/mmc/devices/mmc0:0001/hwrev` | hardware revision |
+| `/sys/bus/mmc/devices/mmc0:0001/manfid` | manufacturer ID |
+| `/sys/bus/mmc/devices/mmc0:0001/name` | اسم المنتج |
+| `/sys/bus/mmc/devices/mmc0:0001/oemid` | OEM ID |
+| `/sys/bus/mmc/devices/mmc0:0001/preferred_erase_size` | حجم الـ erase الأمثل |
+| `/sys/bus/mmc/devices/mmc0:0001/serial` | الرقم التسلسلي |
+| `/sys/bus/mmc/devices/mmc0:0001/type` | نوع الكارت (MMC/SD/SDIO) |
+| `/sys/class/block/mmcblk0/queue/rotational` | يجب أن يكون 0 لـ eMMC |
+| `/sys/class/block/mmcblk0/queue/discard_max_bytes` | الـ discard/TRIM support |
 
 ```bash
-# طريقة سريعة لقراءة byte معين من EXT_CSD
-EXT_CSD=/sys/kernel/debug/mmc0/mmc0:0001/ext_csd
-python3 -c "
-data = open('$EXT_CSD','rb').read()
-print(f'CARD_TYPE (196): 0x{data[196]:02x}')
-print(f'HS_TIMING (185): 0x{data[185]:02x}')
-print(f'BUS_WIDTH (183): 0x{data[183]:02x}')
-print(f'REV       (192): 0x{data[192]:02x}')
-print(f'PRE_EOL   (267): 0x{data[267]:02x}')
-print(f'LIFE_A    (268): 0x{data[268]:02x}')
-print(f'LIFE_B    (269): 0x{data[269]:02x}')
-"
+# اعرض معلومات الكارت
+for f in /sys/bus/mmc/devices/mmc0:0001/*; do
+    echo "$(basename $f): $(cat $f 2>/dev/null)";
+done
+
+# تحقق من الـ erase size
+cat /sys/bus/mmc/devices/mmc0:0001/preferred_erase_size
 ```
 
 ---
 
-#### 2. مدخلات الـ sysfs
+#### 3. الـ ftrace — tracepoints وأحداث المراقبة
+
+الـ MMC subsystem فيه tracepoints جاهزة تحت `mmc`:
 
 ```bash
-# معلومات الكارت الأساسية
-cat /sys/class/mmc_host/mmc0/mmc0:0001/cid        # Card IDentification
-cat /sys/class/mmc_host/mmc0/mmc0:0001/csd        # Card Specific Data
-cat /sys/class/mmc_host/mmc0/mmc0:0001/date        # تاريخ التصنيع
-cat /sys/class/mmc_host/mmc0/mmc0:0001/fwrev       # firmware version
-cat /sys/class/mmc_host/mmc0/mmc0:0001/hwrev       # hardware revision
-cat /sys/class/mmc_host/mmc0/mmc0:0001/manfid      # Manufacturer ID
-cat /sys/class/mmc_host/mmc0/mmc0:0001/name        # اسم الكارت
-cat /sys/class/mmc_host/mmc0/mmc0:0001/oemid       # OEM ID
-cat /sys/class/mmc_host/mmc0/mmc0:0001/serial      # الرقم التسلسلي
-cat /sys/class/mmc_host/mmc0/mmc0:0001/type        # MMC أو SD
+# اعرض كل الـ tracepoints المتاحة
+ls /sys/kernel/debug/tracing/events/mmc/
 
-# معلومات الـ block device
-cat /sys/class/mmc_host/mmc0/mmc0:0001/block/mmcblk0/size   # الحجم بـ 512-byte sectors
-cat /sys/class/mmc_host/mmc0/mmc0:0001/preferred_erase_size # مضاعفات الـ erase group
+# أهم الـ events:
+# mmc_request_start  - بداية كل request
+# mmc_request_done   - نهاية كل request مع الـ error code
+# mmc_cmd_rw_start   - بداية تنفيذ أمر
+# mmc_cmd_rw_end     - نهاية تنفيذ أمر
+# mmc_blk_rw_start   - block read/write start
+# mmc_blk_rw_end     - block read/write end
 
-# حالة الـ host controller
-cat /sys/class/mmc_host/mmc0/ios              # الـ I/O settings الحالية (clock, vdd, timing)
+# فعّل كل أحداث الـ MMC
+echo 1 > /sys/kernel/debug/tracing/events/mmc/enable
+
+# أو event محدد
+echo 1 > /sys/kernel/debug/tracing/events/mmc/mmc_request_done/enable
+
+# شغّل الـ tracing
+echo 1 > /sys/kernel/debug/tracing/tracing_on
+
+# اقرأ النتائج
+cat /sys/kernel/debug/tracing/trace
+
+# وقف الـ tracing
+echo 0 > /sys/kernel/debug/tracing/tracing_on
+echo 0 > /sys/kernel/debug/tracing/events/mmc/enable
 ```
 
----
-
-#### 3. الـ ftrace — tracepoints وأحداث الـ MMC
-
-```bash
-# اعرض كل events المتعلقة بـ MMC
-ls /sys/kernel/tracing/events/mmc/
-
-# Events الأهم:
-# mmc_request_start   — بداية كل طلب
-# mmc_request_done    — نهاية الطلب مع النتيجة
-# mmc_cmd_rw_start    — إرسال command
-# mmc_blk_rw_start    — بداية block I/O
-# mmc_blk_rw_end      — نهاية block I/O
-
-# فعّل تتبع كل عمليات MMC
-cd /sys/kernel/tracing
-echo 1 > events/mmc/enable
-echo 1 > tracing_on
-cat trace_pipe &
-# شغّل العملية المشبوهة هنا
-echo 0 > tracing_on
-
-# تتبع command محدد (مثلاً CMD6 = MMC_SWITCH)
-echo 'opcode==6' > events/mmc/mmc_cmd_rw_start/filter
-echo 1 > events/mmc/mmc_cmd_rw_start/enable
-echo 1 > tracing_on
-
-# تتبع الـ errors فقط
-echo 'error!=0' > events/mmc/mmc_request_done/filter
-echo 1 > events/mmc/mmc_request_done/enable
-
-# مثال output للتفسير:
-# mmc0: start struct mmc_request[<addr>]: cmd_opcode=18 cmd_arg=0x800 ...
-# → CMD18 = MMC_READ_MULTIPLE_BLOCK من عنوان sector 0x800
+**مثال output:**
 ```
+kworker/0:1H-282  [000] ....  123.456789: mmc_request_start: mmc0: start struct mmc_request[0x...]: cmd_opcode=25 cmd_arg=0x00200000 cmd_flags=0x95 cmd_retries=0 stop_opcode=12 sbc_opcode=23
+kworker/0:1H-282  [000] ....  123.457890: mmc_request_done: mmc0: end struct mmc_request[0x...]: cmd_opcode=25 cmd_err=0 cmd_resp=0x900 stop_opcode=12 stop_err=0
+```
+
+**تفسير:** `cmd_opcode=25` ده `MMC_WRITE_MULTIPLE_BLOCK`، `cmd_err=0` يعني نجح، `cmd_resp=0x900` يعني الكارت في state TRAN (bits 11:9 = 4).
 
 ---
 
 #### 4. الـ printk والـ dynamic debug
 
 ```bash
-# فعّل dynamic debug لكل ملفات MMC core
-echo 'file drivers/mmc/core/*.c +p' > /sys/kernel/debug/dynamic_debug/control
-
-# فعّل debug لـ MMC block layer
-echo 'file drivers/mmc/core/block.c +p' > /sys/kernel/debug/dynamic_debug/control
-
-# فعّل debug لعمليات الـ switch (CMD6)
-echo 'file drivers/mmc/core/mmc_ops.c +p' > /sys/kernel/debug/dynamic_debug/control
-
-# فعّل debug للـ host controller (مثلاً sdhci)
-echo 'file drivers/mmc/host/sdhci.c +p' > /sys/kernel/debug/dynamic_debug/control
-
-# فعّل كل شيء في MMC دفعة واحدة
+# فعّل الـ dynamic debug لكل الـ MMC core
 echo 'module mmc_core +p' > /sys/kernel/debug/dynamic_debug/control
 
-# أعلى مستوى verbosity للـ kernel log
-dmesg -n 8
-# أو في kernel cmdline: loglevel=8 mmc_core.use_spi_crc=1
+# أو لـ file محددة
+echo 'file drivers/mmc/core/mmc.c +p' > /sys/kernel/debug/dynamic_debug/control
+
+# فعّل debug للـ block driver
+echo 'module mmc_block +p' > /sys/kernel/debug/dynamic_debug/control
+
+# وقف الـ debug
+echo 'module mmc_core -p' > /sys/kernel/debug/dynamic_debug/control
+
+# رفع الـ loglevel للـ kernel مؤقتاً (7 = DEBUG)
+echo 7 > /proc/sys/kernel/printk
+
+# أو عن طريق dmesg
+dmesg -n 7
 ```
+
+**لتتبع الـ EXT_CSD commands تحديداً:**
+```bash
+echo 'func mmc_send_ext_csd +pflmt' > /sys/kernel/debug/dynamic_debug/control
+```
+
+الـ flags: `p` = print، `f` = function name، `l` = line number، `m` = module، `t` = thread ID.
 
 ---
 
-#### 5. خيارات الـ Kconfig للـ debugging
+#### 5. الـ kernel config options للـ debugging
 
-| CONFIG | الوظيفة |
-|--------|---------|
-| `CONFIG_MMC_DEBUG` | يفعّل pr_debug() في كل MMC core |
-| `CONFIG_MMC_UNSAFE_RESUME` | يساعد في تشخيص مشاكل resume |
-| `CONFIG_MMC_CLKGATE` | debugging لـ clock gating |
-| `CONFIG_FAIL_MMC_REQUEST` | fault injection لتوليد errors اصطناعية |
-| `CONFIG_DEBUG_FS` | لازم لـ debugfs entries |
-| `CONFIG_DYNAMIC_DEBUG` | لازم لـ dynamic debug |
-| `CONFIG_TRACING` | لازم لـ ftrace |
-| `CONFIG_MMC_BLOCK_MINORS` | تحكم في عدد الـ minor numbers |
-| `CONFIG_UBSAN` | يكشف undefined behavior في الـ bit manipulation |
+| الـ Config | الوصف |
+|-----------|-------|
+| `CONFIG_MMC_DEBUG` | يفعّل الـ debug messages في الـ MMC subsystem كلها |
+| `CONFIG_MMC_UNSAFE_RESUME` | للـ testing فقط — استئناف بدون فحص الكارت |
+| `CONFIG_FAIL_MMC_REQUEST` | fault injection لاختبار error handling |
+| `CONFIG_DEBUG_FS` | لازم مفعّل عشان debugfs يشتغل |
+| `CONFIG_DYNAMIC_DEBUG` | يفعّل الـ pr_debug() و dev_dbg() |
+| `CONFIG_TRACING` | لازم للـ ftrace events |
+| `CONFIG_MMC_BLOCK_BOUNCE` | bounce buffers — disable لو بتشخص DMA مشاكل |
+| `CONFIG_BLK_DEV_THROTTLING` | لو بتشخص مشاكل في الـ I/O throughput |
 
 ```bash
 # تحقق من الـ config الحالي
-zcat /proc/config.gz | grep -E 'CONFIG_MMC|CONFIG_FAIL_MMC'
+grep -E 'CONFIG_MMC|CONFIG_FAIL_MMC' /boot/config-$(uname -r)
+
+# أو من الـ kernel config المدمج
+zcat /proc/config.gz | grep -E 'CONFIG_MMC'
 ```
 
 ---
 
-#### 6. أدوات خاصة بالـ MMC subsystem
+#### 6. أدوات الـ subsystem المتخصصة
 
 ```bash
-# mmc-utils — الأداة الرسمية لـ eMMC
-# اقرأ EXT_CSD بشكل مقروء
+# mmc-utils — الأداة الأساسية لـ eMMC
+# اقرأ الـ EXT_CSD كاملاً وفسّره
 mmc extcsd read /dev/mmcblk0
 
-# اقرأ حالة الـ BKOPS
-mmc bkops-enable /dev/mmcblk0
-
-# اعرف معلومات الكارت
+# اعرض معلومات الكارت
 mmc info /dev/mmcblk0
 
-# شغّل sanitize
-mmc sanitize /dev/mmcblk0
-
-# اقرأ General Purpose Partition info
-mmc extcsd read /dev/mmcblk0 | grep -A2 'EXT_CSD'
-
-# mmcli (إن كان موجوداً في distro)
-mmcli -m 0
-
-# فحص الـ RPMB (Replay Protected Memory Block)
+# قرأ الـ RPMB key
 mmc rpmb read-counter /dev/mmcblk0rpmb
 
-# فحص الـ write protect
+# فحص الـ BKOPS status
+mmc bkops-en /dev/mmcblk0  # تفعيل manual BKOPS
+
+# فحص حالة الـ write protection
 mmc writeprotect boot get /dev/mmcblk0
+
+# تفعيل الـ cache
+mmc cache enable /dev/mmcblk0
+
+# اقرأ الـ life time estimation
+mmc extcsd read /dev/mmcblk0 | grep -A1 "Life Time"
+
+# أداة mmcli (لو متوفرة)
+# iostat لمراقبة الـ throughput
+iostat -x mmcblk0 1
+
+# blktrace للـ block-level tracing
+blktrace -d /dev/mmcblk0 -o - | blkparse -i -
 ```
 
 ---
 
-#### 7. جدول رسائل الـ error الشائعة
+#### 7. جدول رسائل الخطأ الشائعة
 
-| رسالة في dmesg | السبب | الحل |
-|----------------|-------|------|
-| `mmc0: error -110 whilst initialising MMC card` | timeout أثناء init (R1_READY_FOR_DATA لم يرتفع) | افحص الـ clock وتوصيل الـ VCC |
-| `mmc0: CMD6 failed` | فشل MMC_SWITCH — غالباً R1_SWITCH_ERROR | اقرأ EXT_CSD[185] بعد الأمر مباشرة |
-| `mmc0: response CRC error` | R1_COM_CRC_ERROR — ضوضاء على الـ CMD line | افحص impedance matching وطول الـ trace |
-| `mmc0: card status error` | R1_ERROR bit مرفوع | أرسل CMD13 واقرأ الـ status كامل |
-| `mmc0: card is busy` | R1_READY_FOR_DATA=0 أو state≠TRAN | انتظر وأعد المحاولة — قد يكون programming طويل |
-| `mmc0: Timeout waiting for hardware interrupt` | الـ host controller لم يرسل interrupt | افحص الـ IRQ mapping والـ clock gate |
-| `mmc0: tuning execution failed` | فشل HS200/HS400 tuning | خفّض السرعة مؤقتاً، افحص الـ signal integrity |
-| `mmc0: card does not support the aggressive power saving mode` | الكارت رفض POWER_OFF_NOTIFICATION | طبيعي — الـ kernel يتجاهله |
-| `mmc0: BKOPS error -5` | فشل EXT_CSD_BKOPS_START | الكارت مشغول — أعد المحاولة لاحقاً |
-| `mmc0: Unhandled bounce limit` | مشكلة DMA alignment | افحص الـ dma-mapping config |
-| `mmc0: card claims to support voltages below defined range` | الـ OCR غير منطقي | افحص الـ voltage regulator |
+| رسالة الـ Kernel Log | المعنى | الحل |
+|---------------------|--------|------|
+| `mmc0: error -110 whilst initialising MMC card` | timeout أثناء init — الكارت مش بيرد | تحقق من الكهرباء والـ clock، افحص hardware |
+| `mmc0: CMD13 failed` | فشل قراءة الـ status register | غالباً مشكلة CRC أو signal integrity |
+| `mmc0: Timeout waiting for hardware interrupt` | الـ host controller ما بعتش الـ interrupt | تحقق من الـ IRQ config والـ DMA |
+| `mmc0: tuning execution failed` | فشل الـ tuning لـ HS200/HS400 | جرب تخفيض السرعة، افحص الـ impedance |
+| `mmc0: Too large page read, retrying` | الـ page size أكبر من المتوقع | عادةً يُحل تلقائياً بـ retry |
+| `mmc0: Card stuck in programming state!` | الكارت stuck في state PRG | power cycle للكارت، قد يكون damaged |
+| `mmc0: Switch failed, status 0x...` | فشل `MMC_SWITCH` (CMD6) | افحص الـ EXT_CSD byte المستهدف، تحقق من timing |
+| `mmc0: BKOPS handling failed` | فشل بدء الـ background operations | قد يكون الكارت مشغول، أعد المحاولة |
+| `mmc0: cache flush error -5` | فشل flush الـ cache | I/O error، افحص الكارت بـ `fsck` |
+| `mmc0: error -84 transferring data` | `EILSEQ` — خطأ CRC في البيانات | مشكلة signal integrity، افحص الـ bus |
+| `mmc0: Reset called for DL error` | خطأ في data link | افحص الـ DMA config وحدود الذاكرة |
+| `mmc0: ADMA error` | خطأ في الـ ADMA descriptor table | تحقق من الـ DMA addresses والـ alignment |
+| `mmc0: req failed (CMD25): -110` | timeout في الـ write multiple blocks | بطيء جداً، زود الـ timeout أو افحص الكارت |
+| `mmc0: card status error 0x...` | خطأ في الـ R1 response | فك bits الـ R1 وارجع للجدول أدناه |
+
+**فك رموز الـ R1 status:**
+```c
+/* الـ bits المهمة في R1 response */
+R1_OUT_OF_RANGE    = bit31  // الـ address خارج النطاق
+R1_ADDRESS_ERROR   = bit30  // خطأ في الـ alignment
+R1_BLOCK_LEN_ERROR = bit29  // حجم الـ block غلط
+R1_COM_CRC_ERROR   = bit23  // CRC خاطئ في الـ command
+R1_ILLEGAL_COMMAND = bit22  // الأمر مش مدعوم في الـ state الحالي
+R1_CARD_ECC_FAILED = bit21  // فشل الـ ECC الداخلي
+```
+
+```bash
+# فك أي R1 status value
+STATUS=0x00900
+echo "Current state: $(( ($STATUS & 0x1E00) >> 9 ))"
+# 4 = TRAN (Transfer) — الـ state الطبيعي لعمليات القراءة/الكتابة
+```
 
 ---
 
-#### 8. أماكن استراتيجية لـ dump_stack() و WARN_ON()
+#### 8. نقاط استراتيجية لـ dump_stack() وـ WARN_ON()
 
 ```c
-/* في mmc_ops.c — بعد CMD6 (MMC_SWITCH) */
-int mmc_switch(struct mmc_card *card, u8 set, u8 index, u8 value,
-               unsigned int timeout_ms)
+/* في drivers/mmc/core/mmc.c — بعد فشل MMC_SWITCH */
+static int mmc_switch(struct mmc_card *card, u8 set, u8 index, u8 value,
+                      unsigned int timeout_ms)
 {
-    u32 status;
     int err = __mmc_switch(card, set, index, value, timeout_ms,
-                           MMC_TIMING_LEGACY, true, true, true);
-
-    /* نقطة استراتيجية: تحقق من R1_SWITCH_ERROR */
-    WARN_ON(err == -EBADMSG);  /* يطبع stack إن فشل الـ switch */
+                           MMC_SEND_STATUS, true, true);
+    /* نقطة مناسبة لـ WARN_ON */
+    WARN_ON(err && err != -EBADMSG);
     return err;
 }
 
-/* في core/mmc.c — عند تغيير الـ timing */
-static int mmc_select_hs400(struct mmc_card *card)
-{
-    /* تحقق أن الكارت يدعم HS400 فعلاً */
-    WARN_ON(!(card->mmc_avail_type & EXT_CSD_CARD_TYPE_HS400));
-    /* ... */
+/* في mmc_init_card — بعد قراءة EXT_CSD */
+if (WARN_ON(card->ext_csd.rev < 3))
+    return -EINVAL;  /* كارت قديم جداً */
+
+/* تحقق من الـ state قبل أي command */
+WARN_ON(R1_CURRENT_STATE(status) != R1_STATE_TRAN);
+
+/* في الـ error path لـ tuning */
+if (err) {
+    dev_err(mmc_dev(host), "tuning failed: %d\n", err);
+    dump_stack();  /* مهم لمعرفة من طلب الـ tuning */
 }
 
-/* في core/block.c — عند تلقي R1_ERROR */
-static int mmc_blk_err_check(struct mmc_card *card,
-                              struct mmc_async_req *areq)
-{
-    u32 status = brq->stop.resp[0];  /* R1 response */
-    if (status & R1_ERROR) {
-        dev_err(&card->dev, "R1_ERROR: status=0x%08x\n", status);
-        dump_stack();  /* اطبع الـ call stack */
-    }
-    WARN_ON(R1_CURRENT_STATE(status) == R1_STATE_PRG &&
-            (status & R1_READY_FOR_DATA));
-}
+/* فحص الـ clock range */
+WARN_ON(host->ios.clock > host->f_max);
+WARN_ON(host->ios.clock && host->ios.clock < host->f_min);
 ```
 
 ---
 
 ### Hardware Level
 
-#### 1. التحقق من مطابقة الـ hardware state للـ kernel state
-
-الـ kernel يتتبع الحالة في `struct mmc_card` و `struct mmc_host`. للتحقق:
+#### 1. التحقق من أن الـ hardware state مطابق للـ kernel state
 
 ```bash
-# الحالة التي يعتقدها الـ kernel
-cat /sys/class/mmc_host/mmc0/ios
-# مثال output:
-# clock:          200000000 Hz     ← الـ clock الحالي
-# vdd:            21 (3.3 ~ 3.4 V)
-# bus mode:       2 (push-pull)
-# chip select:    0 (don't care)
-# power mode:     2 (on)
-# bus width:      3 (8 bits)       ← 0=1bit, 1=4bit, 2=8bit, 3=ddr
-# timing spec:    9 (mmc HS400)    ← مطابق لـ EXT_CSD_TIMING_HS400=3
+# تحقق من الـ clock الفعلي
+cat /sys/kernel/debug/mmc0/ios | grep "actual clock"
 
-# قارن مع EXT_CSD الحقيقي
-mmc extcsd read /dev/mmcblk0 | grep -E 'HS_TIMING|BUS_WIDTH|CARD_TYPE'
+# تحقق من الـ bus width في الـ EXT_CSD (byte 183)
+mmc extcsd read /dev/mmcblk0 | grep "BUS_WIDTH"
+# يجب أن يطابق ما في /sys/kernel/debug/mmc0/ios
+
+# تحقق من الـ timing mode
+mmc extcsd read /dev/mmcblk0 | grep "HS_TIMING"
+# 0=BC, 1=HS, 2=HS200, 3=HS400
+
+# قارن الـ card type مع الـ timing المستخدم
+mmc extcsd read /dev/mmcblk0 | grep "CARD_TYPE"
+# Bit0=HS26, Bit1=HS52, Bit2=DDR52@1.8V, Bit4=HS200, Bit6=HS400
 ```
 
-#### مقارنة الـ R1 states:
+**جدول التطابق المطلوب:**
 
-```
-kernel يعتقد: R1_STATE_TRAN (4)
-الكارت الحقيقي: أرسل CMD13 واقرأ bits [12:9]
-
-CMD13 → R1[12:9] = current state
-    0 = Idle     → مشكلة في initialization
-    1 = Ready    → لم يكتمل الـ OCR negotiation
-    2 = Ident    → لم يكتمل الـ CID read
-    3 = Stby     → لم يتم SELECT_CARD (CMD7)
-    4 = Tran     ← الحالة الطبيعية للـ data transfer
-    5 = Data     → الكارت لا يزال يرسل بيانات
-    6 = Rcv      → الكارت لا يزال يستقبل
-    7 = Prg      → الكارت يبرمج (program) الـ NAND
-    8 = Dis      → deselected
-```
+| الـ EXT_CSD HS_TIMING | الـ ios timing المتوقع | الـ bus width |
+|----------------------|----------------------|--------------|
+| 0 (BC) | `MMC_TIMING_LEGACY` | 1/4/8 bit |
+| 1 (HS) | `MMC_TIMING_MMC_HS` | 4/8 bit |
+| 2 (HS200) | `MMC_TIMING_MMC_HS200` | 4/8 bit |
+| 3 (HS400) | `MMC_TIMING_MMC_HS400` | 8 bit فقط |
 
 ---
 
-#### 2. Register Dump عبر devmem2
+#### 2. تقنيات الـ Register Dump
 
 ```bash
-# مثال لـ SDHCI controller على عنوان 0xFE340000 (Raspberry Pi)
-# اقرأ SDHCI registers الأساسية
+# devmem2 — لقراءة registers الـ host controller مباشرة
+# أولاً احصل على base address من device tree أو dmesg
+dmesg | grep -i "sdhci\|mmc" | grep "mapped\|base"
 
-# Present State Register (offset 0x24)
-devmem2 0xFE340024 w
-# bits: [20]=CMD_INHIBIT_DAT, [19]=DAT_LINE_ACTIVE, [0]=CMD_INHIBIT
+# مثال لـ SDHCI controller على عنوان 0xFE340000
+devmem2 0xFE340000 w   # Present State Register
+devmem2 0xFE340004 w   # Host Control Register
+devmem2 0xFE340024 w   # Normal Interrupt Status
 
-# Host Control 1 (offset 0x28)
-devmem2 0xFE340028 b
-# bit[1]=4BIT_BUS, bit[2]=HS_ENABLE, bit[5]=8BIT_BUS
+# استخدام /dev/mem مع dd (للأنظمة القديمة)
+dd if=/dev/mem bs=4 count=1 skip=$((0xFE340000/4)) 2>/dev/null | xxd
 
-# Clock Control (offset 0x2C)
-devmem2 0xFE34002C w
-# bits[15:8]=SDCLK_FREQ, bit[2]=SD_CLK_EN, bit[0]=INTERNAL_CLK_EN
+# io command (من package ioport)
+io -4 -r 0xFE340000
 
-# Error Interrupt Status (offset 0x32)
-devmem2 0xFE340032 w
-# bit[4]=CURRENT_LIMIT_ERR, bit[3]=DATA_END_BIT_ERR
-# bit[2]=DATA_CRC_ERR, bit[1]=DATA_TIMEOUT_ERR
-# bit[0]=CMD_TIMEOUT_ERR
+# لو الـ driver عنده regmap يمكن القراءة عن طريق debugfs
+ls /sys/kernel/debug/regmap/
+cat /sys/kernel/debug/regmap/fe340000.mmc/registers
+```
 
-# طريقة بديلة — io utility
-io -4 -r 0xFE340024   # قراءة 32-bit register
+**الـ SDHCI registers الأهم للـ debugging:**
+
+| Register | Offset | الأهمية |
+|---------|--------|---------|
+| Present State | 0x24 | هل الكارت موجود؟ هل البيانات جاهزة؟ |
+| Normal Int Status | 0x30 | آخر interrupt حصل |
+| Error Int Status | 0x32 | الأخطاء المكتشفة |
+| Clock Control | 0x2C | الـ clock المضبوط |
+| Capabilities | 0x40 | ما يدعمه الـ controller |
+
+---
+
+#### 3. Logic Analyzer / Oscilloscope Tips
+
+**نقاط القياس على الـ eMMC:**
+
+```
+eMMC Pinout (BGA-153):
+  CLK  → قس هنا التردد والـ duty cycle
+  CMD  → قس الـ command/response timing
+  DAT0-7 → قس عرض الـ bus والـ eye diagram
+  RST_n  → تأكد أنها high أثناء التشغيل
+
+ASCII: eMMC Bus Timing
+         ___     ___     ___
+CLK  ___|   |___|   |___|   |___
+         ___________
+CMD  ___|     CMD13    |________
+                  _____________
+DAT0 ____________| R1 response |__
+```
+
+```
+نصائح للـ Logic Analyzer:
+- Sample rate: 4× الـ clock على الأقل (HS400 = 200MHz → 800MHz sample rate)
+- HS200: DDR على الـ CMD، SDR على الـ DATA
+- HS400: DDR على الـ DATA أيضاً، استخدم الـ strobe (DS) للـ sampling
+- فعّل الـ protocol decoder لـ eMMC/SD لو متوفر
+- ابحث عن CRC errors في نهاية كل data block (16-bit CRC per data line)
+```
+
+**Oscilloscope:**
+```bash
+# ما تقيسه:
+# 1. Rise/Fall time على CLK — يجب < 20% من الـ clock period
+# 2. Signal voltage levels — 1.8V ±5% لـ HS200/HS400
+# 3. Vref stability — ripple < 50mV
+# 4. Power supply noise أثناء write operations
 ```
 
 ---
 
-#### 3. Logic Analyzer / Oscilloscope نصائح
+#### 4. مشاكل الـ Hardware الشائعة وأنماطها في الـ kernel log
 
-**الـ eMMC bus له 6 إشارات جوهرية:**
-
-```
-CMD  — bidirectional command/response
-CLK  — unidirectional clock من الـ host
-DAT0-DAT7 — bidirectional data (8-bit mode)
-```
-
-**إعدادات الـ Logic Analyzer:**
-
-```
-Protocol:    eMMC/MMC
-Clock edge:  Rising edge (data sampled)
-Voltage:     1.8V (HS200/HS400) أو 3.3V (legacy)
-Sample rate: ≥ 4× الـ clock الفعلي
-             - HS400: 200MHz DDR → sample بـ 1.6GHz+
-             - HS200: 200MHz SDR → sample بـ 800MHz+
-             - HS52:  52MHz      → sample بـ 208MHz+
-```
-
-**ما تبحث عنه:**
-
-```
-1. CMD response timing:
-   - R1: 48 bits بعد آخر bit في الـ command
-   - R1b (busy): CMD line ترتفع بعد انتهاء الـ programming
-
-2. CRC errors:
-   - الـ CRC7 في نهاية كل command/response
-   - الـ CRC16 في نهاية كل data block
-
-3. HS400 strobe:
-   - DS (Data Strobe) line — الكارت يرسلها أثناء قراءة البيانات
-   - غيابها = مشكلة في EXT_CSD_BUS_WIDTH_STROBE
-
-4. Tuning pattern (HS200):
-   - CMD21: الـ host يرسله ويستقبل 128 bytes كـ tuning block
-   - الـ pattern المتوقع معروف — أي انحراف = signal integrity problem
-```
-
----
-
-#### 4. مشاكل الـ hardware الشائعة وأنماطها في dmesg
-
-| المشكلة | النمط في dmesg | التشخيص |
-|---------|----------------|---------|
-| ضعف الـ VCC | `mmc0: error -110 whilst initialising` عند cold boot | قس الـ VCC بـ oscilloscope أثناء power-up sequence |
-| تداخل الـ clock | `mmc0: response CRC error` عشوائي | افحص الـ PCB trace length — يجب ≤ 50mm لـ HS200 |
-| مشكلة الـ pull-up على CMD | `mmc0: card does not respond to voltage select` | قس مقاومة الـ pull-up — يجب 10kΩ–50kΩ |
-| flash NAND متعب | `mmc_read_ext_csd: PRE_EOL_INFO=3` | استبدل الـ eMMC — `LIFE_A/B` = 10 → 90%+ استهلاك |
-| حرارة مرتفعة | `mmc0: CMD timeout` متكرر تحت حمل | قس درجة حرارة الـ eMMC — TJ_MAX عادة 85°C |
-| layout مشكلة | tuning فاشل دائماً | أقصر الـ PCB traces أو أضف series resistor (10-22Ω) |
-
----
-
-#### 5. Device Tree Debugging
+| المشكلة | Pattern في dmesg | السبب الغالب |
+|--------|-----------------|-------------|
+| Voltage switching failure | `mmc0: Signal voltage switch failed` | مشكلة في الـ PMIC أو LDO |
+| Clock instability | `mmc0: tuning execution failed` متكرر | الـ PCB trace طويل أو غير مطابق |
+| Data corruption | `mmc0: error -84` + `Buffer I/O error` | CRC error — افحص الـ eye diagram |
+| Card not detected | `mmc0: no card present` | GPIO مش متصل، أو الـ card detect pin |
+| Power issue | `mmc0: error -110 initialising` | الـ Vcc أو Vccq غير مستقر |
+| eMMC worn out | `mmc0: error -5 transferring data` | الـ NAND blocks كلها bad |
+| Bus contention | `mmc0: Got data interrupt 0x02000000` | مشكلة في الـ pull-up resistors |
 
 ```bash
-# تحقق من الـ DT المُحمَّل فعلاً
-cat /proc/device-tree/mmc@fe340000/bus-width     # يجب = <8> لـ eMMC
-cat /proc/device-tree/mmc@fe340000/mmc-hs200-1_8v # وجود الـ property = HS200 مفعّل
-cat /proc/device-tree/mmc@fe340000/mmc-hs400-1_8v # وجود الـ property = HS400 مفعّل
-cat /proc/device-tree/mmc@fe340000/max-frequency   # أقصى clock مسموح
+# تحقق من الأخطاء المتكررة
+dmesg | grep -c "mmc0: error"
 
-# فك تشفير الـ clock value
-xxd /proc/device-tree/mmc@fe340000/max-frequency
-# 0x0BEBC200 = 200000000 = 200MHz
+# اعرض pattern الأخطاء مع timestamp
+dmesg -T | grep "mmc0: error" | head -20
 
-# تحقق من الـ vmmc/vqmmc regulators
-ls /proc/device-tree/mmc@fe340000/ | grep -E 'vmmc|vqmmc|reset'
-
-# قارن مع الـ kernel log
-dmesg | grep mmc0 | head -30
-# mmc0: new HS400 MMC card at address 0001
-# → الـ kernel اختار HS400 = الـ DT يدعمه والكارت يدعمه
-
-# إن أردت تعطيل HS400 مؤقتاً لـ debugging بدون إعادة compile
-# أضف في kernel cmdline:
-# sdhci.debug_quirks2=0x20   (SDHCI_QUIRK2_NO_1_8_V)
-# أو
-# mmc_core.use_spi_crc=1
+# تحقق من الـ BKOPS status (مهم لصحة الكارت)
+mmc extcsd read /dev/mmcblk0 | grep -A2 "BKOPS_STATUS"
+# 0=No ops needed, 1=Non-critical, 2=Performance impacted, 3=Critical!
 ```
 
-**مثال DT صحيح لـ eMMC HS400:**
+---
+
+#### 5. الـ Device Tree Debugging
+
+```bash
+# اعرض الـ DT node للـ MMC
+cat /proc/device-tree/mmc@fe320000/compatible
+# يجب أن يطابق الـ driver
+
+# اعرض كل properties للـ MMC node
+ls /proc/device-tree/mmc@fe320000/
+
+# تحقق من الـ clock references
+cat /proc/device-tree/mmc@fe320000/clocks | xxd
+
+# تحقق من bus-width في الـ DT
+cat /proc/device-tree/mmc@fe320000/bus-width | xxd
+# يجب أن يكون 8 لـ eMMC
+
+# اعرض الـ DT من dtc
+dtc -I fs /proc/device-tree 2>/dev/null | grep -A 30 "mmc@"
+```
+
+**الـ properties المهمة في الـ DT للـ eMMC:**
 
 ```dts
+/* مثال DT node لـ eMMC */
 &mmc0 {
-    bus-width = <8>;          /* 8-bit bus = EXT_CSD_BUS_WIDTH_8 */
-    mmc-hs200-1_8v;           /* يفعّل EXT_CSD_CARD_TYPE_HS200_1_8V */
-    mmc-hs400-1_8v;           /* يفعّل EXT_CSD_CARD_TYPE_HS400_1_8V */
-    mmc-hs400-enhanced-strobe;/* يفعّل EXT_CSD_BUS_WIDTH_STROBE */
-    vmmc-supply = <&vcc3v3>;  /* 3.3V للـ eMMC core */
-    vqmmc-supply = <&vcc1v8>; /* 1.8V لـ I/O */
-    max-frequency = <200000000>;
-    non-removable;            /* eMMC مُلحم = لا يُنزع */
-    no-sdio;
-    no-sd;
+    compatible = "vendor,mmc-v5";
+    reg = <0xFE340000 0x1000>;
+    clocks = <&clk_mmc>;
+    bus-width = <8>;            /* لازم 8 لـ HS400 */
+    max-frequency = <200000000>; /* 200MHz لـ HS400 */
+    non-removable;              /* eMMC مش بتُشال */
+    mmc-hs400-1_8v;            /* دعم HS400 على 1.8V */
+    mmc-hs200-1_8v;            /* دعم HS200 على 1.8V */
+    mmc-ddr-1_8v;              /* دعم DDR52 على 1.8V */
+    no-sdio;                   /* disable SDIO detection */
+    no-sd;                     /* disable SD card detection */
+    cap-mmc-highspeed;         /* دعم HS52 */
+    vmmc-supply = <&vcc_emmc>; /* تحقق أن الـ regulator صح */
+    vqmmc-supply = <&vcc1v8>;  /* Vccq = 1.8V */
 };
+```
+
+```bash
+# تحقق من أن الـ DT compatible موجود في الـ driver
+grep -r "vendor,mmc-v5" /sys/bus/platform/drivers/
+
+# تحقق من الـ regulator
+cat /sys/class/regulator/regulator.X/voltage
+# يجب أن يكون 3300000 لـ Vcc و 1800000 لـ Vccq في HS200/HS400
+
+# تحقق من الـ pinctrl state
+cat /sys/kernel/debug/pinctrl/pinctrl-handles
 ```
 
 ---
 
 ### Practical Commands
 
-#### سكريبت شامل لأول تشخيص
+#### جاهز للنسخ — تشخيص شامل
 
 ```bash
 #!/bin/bash
-# eMMC Quick Diagnosis Script
+# eMMC Full Debug Script
 
-CARD=/dev/mmcblk0
-MMC_SYS=/sys/class/mmc_host/mmc0/mmc0:0001
-DBG=/sys/kernel/debug/mmc0/mmc0:0001
+DEV=/dev/mmcblk0
+HOST=mmc0
+DEBUGFS=/sys/kernel/debug
 
-echo "=== eMMC Info ==="
-mmc info $CARD 2>/dev/null || echo "mmc-utils not installed"
+echo "=== MMC Host IOS ==="
+cat $DEBUGFS/$HOST/ios
 
-echo ""
-echo "=== sysfs: Card Identity ==="
-for f in name manfid date fwrev type; do
-    echo "$f: $(cat $MMC_SYS/$f 2>/dev/null)"
+echo "=== Error Statistics ==="
+cat $DEBUGFS/$HOST/err_stats
+
+echo "=== Card Info ==="
+for f in /sys/bus/mmc/devices/$HOST:0001/{manfid,name,serial,date,fwrev,type}; do
+    echo "$(basename $f): $(cat $f 2>/dev/null)"
 done
 
-echo ""
-echo "=== sysfs: I/O State ==="
-cat /sys/class/mmc_host/mmc0/ios 2>/dev/null
+echo "=== EXT_CSD Key Fields ==="
+mmc extcsd read $DEV 2>/dev/null | grep -E \
+    "LIFE_TIME|EOL|BKOPS|CACHE|HS_TIMING|BUS_WIDTH|CMDQ|FIRMWARE"
 
-echo ""
-echo "=== EXT_CSD Critical Bytes ==="
-if [ -f "$DBG/ext_csd" ]; then
-    python3 - <<'PYEOF'
-import sys
-data = open('/sys/kernel/debug/mmc0/mmc0:0001/ext_csd','rb').read()
-fields = {
-    192: ('EXT_CSD_REV',         'Spec version'),
-    196: ('EXT_CSD_CARD_TYPE',   'Speed capability'),
-    185: ('EXT_CSD_HS_TIMING',   'Current timing: 0=BC 1=HS 2=HS200 3=HS400'),
-    183: ('EXT_CSD_BUS_WIDTH',   'Bus width: 0=1b 1=4b 2=8b 6=DDR8'),
-    179: ('EXT_CSD_PART_CONFIG', 'Active partition'),
-    246: ('EXT_CSD_BKOPS_STATUS','0=ok 1=non-urgent 2=urgent'),
-    267: ('EXT_CSD_PRE_EOL_INFO','1=normal 2=warning 3=urgent'),
-    268: ('LIFE_EST_TYPE_A',     'Type A wear ×10%'),
-    269: ('LIFE_EST_TYPE_B',     'Type B wear ×10%'),
-    307: ('EXT_CSD_CMDQ_DEPTH',  'CmdQ depth'),
-    308: ('EXT_CSD_CMDQ_SUPPORT','0=no 1=yes'),
-}
-for idx, (name, desc) in sorted(fields.items()):
-    val = data[idx]
-    print(f'  [{idx:3d}] {name:<35s} = 0x{val:02x} ({val:3d})  # {desc}')
-PYEOF
-else
-    echo "debugfs not mounted. Try: mount -t debugfs none /sys/kernel/debug"
-fi
+echo "=== Block Device Queue ==="
+cat /sys/class/block/mmcblk0/queue/rotational
+cat /sys/class/block/mmcblk0/queue/discard_max_bytes
 
-echo ""
-echo "=== Recent MMC errors in dmesg ==="
-dmesg | grep -iE 'mmc.*error|mmc.*fail|mmc.*timeout|mmc.*CRC' | tail -20
-
-echo ""
-echo "=== BKOPS & Health ==="
-mmc extcsd read $CARD 2>/dev/null | grep -E 'BKOPS|EOL|LIFE|FIRMWARE' || \
-    echo "Run: apt install mmc-utils"
+echo "=== Recent Errors ==="
+dmesg | grep -i "mmc\|mmcblk" | tail -20
 ```
-
----
-
-#### تفعيل الـ ftrace لتتبع I/O بالتفصيل
 
 ```bash
-#!/bin/bash
-# MMC full I/O trace
-
-TR=/sys/kernel/tracing
-echo nop > $TR/current_tracer
-echo 0 > $TR/tracing_on
-
-# فعّل events المهمة
-for ev in mmc_request_start mmc_request_done mmc_cmd_rw_start mmc_blk_rw_start; do
-    echo 1 > $TR/events/mmc/$ev/enable 2>/dev/null && echo "enabled: $ev"
-done
-
-# زود حجم الـ buffer
-echo 65536 > $TR/buffer_size_kb
-
-echo 1 > $TR/tracing_on
-echo "Tracing for 5 seconds..."
-sleep 5
-echo 0 > $TR/tracing_on
-
-# اعرض النتائج
-cat $TR/trace | grep -v "^#" | head -100
-```
-
-**مثال output وتفسيره:**
-
-```
-# مثال trace output:
-# kworker/0:2-47  [000] .... 1234.567890: mmc_request_start: mmc0: start struct mmc_request[0x...]:
-#   cmd_opcode=18(READ_MULTIPLE_BLOCK) cmd_arg=0x00100000 cmd_flags=0x45 cmd_retries=0 stop_opcode=12(STOP_TRANSMISSION)
-#
-# التفسير:
-# CMD18 = MMC_READ_MULTIPLE_BLOCK
-# arg=0x00100000 = sector 0x800 = sector 2048 = 1MB offset
-# بعد 0.3ms:
-# mmc_request_done: cmd_opcode=18 cmd_err=0 → نجح بدون error
-```
-
----
-
-#### قراءة R1 response مباشرة بـ CMD13
-
-```bash
-# أرسل CMD13 (SEND_STATUS) واقرأ R1 مباشرة
-# مع mmc-utils
-mmc status get /dev/mmcblk0
-
-# أو عبر سكريبت يفسّر الـ R1
-python3 - <<'EOF'
-# افرض أن R1 = 0x00000900 (حالة طبيعية)
-# استبدل بالقيمة الحقيقية من mmc status get
-
-R1 = 0x00000900
-
-bits = {
-    31: "R1_OUT_OF_RANGE",
-    30: "R1_ADDRESS_ERROR",
-    29: "R1_BLOCK_LEN_ERROR",
-    28: "R1_ERASE_SEQ_ERROR",
-    27: "R1_ERASE_PARAM",
-    26: "R1_WP_VIOLATION",
-    25: "R1_CARD_IS_LOCKED",
-    24: "R1_LOCK_UNLOCK_FAILED",
-    23: "R1_COM_CRC_ERROR",
-    22: "R1_ILLEGAL_COMMAND",
-    21: "R1_CARD_ECC_FAILED",
-    20: "R1_CC_ERROR",
-    19: "R1_ERROR",
-    18: "R1_UNDERRUN",
-    17: "R1_OVERRUN",
-    16: "R1_CID_CSD_OVERWRITE",
-    15: "R1_WP_ERASE_SKIP",
-    14: "R1_CARD_ECC_DISABLED",
-    13: "R1_ERASE_RESET",
-    8:  "R1_READY_FOR_DATA",
-    7:  "R1_SWITCH_ERROR",
-    6:  "R1_EXCEPTION_EVENT",
-    5:  "R1_APP_CMD",
-}
-
-states = {0:"IDLE",1:"READY",2:"IDENT",3:"STBY",4:"TRAN",
-          5:"DATA",6:"RCV",7:"PRG",8:"DIS"}
-
-state = (R1 >> 9) & 0xF
-print(f"R1 = 0x{R1:08x}")
-print(f"Current State: {state} = {states.get(state, 'UNKNOWN')}")
-print(f"Ready for data: {bool(R1 & (1<<8))}")
-print("\nError bits set:")
-for bit, name in bits.items():
-    if bit not in (8,7,6,5) and (R1 & (1 << bit)):
-        print(f"  !! {name} (bit {bit})")
-EOF
-```
-
----
-
-#### تشخيص مشكلة tuning فاشل
-
-```bash
-# 1. افحص الـ timing الحالي
-cat /sys/class/mmc_host/mmc0/ios | grep timing
-
-# 2. فعّل verbose logging للـ tuning
-echo 'func mmc_execute_tuning +p' > /sys/kernel/debug/dynamic_debug/control
-
-# 3. أعد تهيئة الكارت
-echo 1 > /sys/class/mmc_host/mmc0/mmc0:0001/remove
+# تفعيل الـ full MMC tracing لثانية واحدة
+echo 1 > /sys/kernel/debug/tracing/events/mmc/enable
+echo 1 > /sys/kernel/debug/tracing/tracing_on
 sleep 1
-echo 1 > /sys/class/mmc_host/mmc0/rescan
+echo 0 > /sys/kernel/debug/tracing/tracing_on
+cat /sys/kernel/debug/tracing/trace | grep -E "cmd_opcode|cmd_err" | head -30
+echo 0 > /sys/kernel/debug/tracing/events/mmc/enable
+```
 
-# 4. راقب الـ kernel log
-dmesg -w | grep -E 'tuning|timing|HS200|HS400'
+```bash
+# اختبار الـ read/write throughput
+# Read test
+dd if=/dev/mmcblk0 of=/dev/null bs=1M count=512 iflag=direct 2>&1 | tail -1
 
-# 5. إن فشل HS400 — جرّب إجبار HS200
-# في /etc/modprobe.d/mmc.conf:
-# options sdhci debug_quirks2=0x40  (SDHCI_QUIRK2_NO_HS400)
+# Write test (خطير — هيمسح البيانات)
+# dd if=/dev/zero of=/dev/mmcblk0 bs=1M count=512 oflag=direct 2>&1 | tail -1
+
+# باستخدام fio
+fio --name=read_test --filename=/dev/mmcblk0 --rw=read \
+    --bs=512k --numjobs=1 --size=512m --direct=1 --group_reporting
+```
+
+```bash
+# فحص الـ CRC errors بشكل مستمر
+watch -n 1 'cat /sys/kernel/debug/mmc0/err_stats | grep -E "CRC|Timeout"'
+```
+
+```bash
+# تفسير الـ R1 status response
+decode_r1() {
+    local status=$1
+    echo "R1 Status: 0x$(printf '%08X' $status)"
+    [ $((status & (1<<31))) -ne 0 ] && echo "  ERROR: OUT_OF_RANGE"
+    [ $((status & (1<<30))) -ne 0 ] && echo "  ERROR: ADDRESS_ERROR"
+    [ $((status & (1<<29))) -ne 0 ] && echo "  ERROR: BLOCK_LEN_ERROR"
+    [ $((status & (1<<23))) -ne 0 ] && echo "  ERROR: COM_CRC_ERROR"
+    [ $((status & (1<<22))) -ne 0 ] && echo "  ERROR: ILLEGAL_COMMAND"
+    [ $((status & (1<<21))) -ne 0 ] && echo "  ERROR: CARD_ECC_FAILED"
+    [ $((status & (1<<20))) -ne 0 ] && echo "  ERROR: CC_ERROR"
+    [ $((status & (1<<19))) -ne 0 ] && echo "  ERROR: GENERAL_ERROR"
+    local state=$(( (status & 0x1E00) >> 9 ))
+    local states=("IDLE" "READY" "IDENT" "STBY" "TRAN" "DATA" "RCV" "PRG" "DIS")
+    echo "  State: ${states[$state]}"
+    [ $((status & (1<<8))) -ne 0 ] && echo "  READY_FOR_DATA: yes"
+    [ $((status & (1<<7))) -ne 0 ] && echo "  WARNING: SWITCH_ERROR"
+}
+
+# استخدام
+decode_r1 0x00000900  # TRAN state, ready for data
+```
+
+```bash
+# تحقق من life time estimation
+mmc extcsd read /dev/mmcblk0 | grep -E "PRE_EOL|LIFE_TIME"
+# PRE_EOL_INFO:
+#   0x00: Not defined
+#   0x01: Normal (< 80% life used)
+#   0x02: Warning (80-90% life used)
+#   0x03: Urgent (> 90% life used — استبدل الكارت!)
+#
+# DEVICE_LIFE_TIME_EST_TYP_A/B:
+#   0x00: Not defined
+#   0x01: 0-10% used
+#   0x02: 10-20% used
+#   ...
+#   0x0A: 90-100% used
+#   0x0B: exceeded maximum estimated life time!
 ```
 ## Phase 6: سيناريوهات من الحياة العملية
 
 ---
 
-### السيناريو 1: eMMC على RK3562 — بورد صناعي بيرفض يبوت
+### السيناريو 1: eMMC مش بيبوت على RK3562 — Industrial Gateway
 
 #### العنوان
-**Industrial Gateway على RK3562 — الـ eMMC مش بيبوت بعد تحديث الـ firmware**
+**eMMC KIOXIA HS400** بيفشل في initialization بسبب voltage mismatch على industrial gateway
 
 #### السياق
-شركة بتبني industrial gateway بيشغّل Linux على RK3562. الـ eMMC الـ 32GB موصّل على SDMMC2. بعد تحديث الـ firmware عن طريق OTA، الجهاز وقف في البوت وبدأ يطلع kernel panic.
+شركة بتعمل industrial gateway مبني على **RK3562**، الـ eMMC هو KIOXIA 32GB HS400ES. البورد بتبوت من SPI NOR في المصنع، لكن بعد نقل الـ rootfs على الـ eMMC، الجهاز بيقف والـ kernel log بيطبع:
+
+```
+mmc0: error -110 whilst initialising MMC card
+mmc0: CMD6 failed with status 0x00000080
+```
 
 #### المشكلة
-الـ kernel بيطلع:
+الـ status `0x00000080` معناه:
 
-```
-mmc1: error -110 whilst initialising MMC card
-mmc1: CMD1 timeout
+```c
+#define R1_SWITCH_ERROR  (1 << 7)  /* sx, c */
 ```
 
-**الـ CMD1** هو `MMC_SEND_OP_COND = 1`، وده أول command بعد `MMC_GO_IDLE_STATE = 0`. الـ timeout بيدل إن الكارت مش بيرد.
+الـ driver بيبعت `MMC_SWITCH` (CMD6) عشان يدخل HS400، لكن الكارت بيرد بـ `R1_SWITCH_ERROR` — يعني قبل الـ command لكن فشل في التنفيذ.
 
 #### التحليل
-في `mmc.h`:
-```c
-#define MMC_GO_IDLE_STATE   0   /* bc                          */
-#define MMC_SEND_OP_COND    1   /* bcr  [31:0] OCR         R3  */
-```
-
-الـ `MMC_SEND_OP_COND` بيتبعت مع **OCR** في bits [31:0]. الـ host driver بيحدد voltage range في الـ OCR argument. لو الـ OTA كتب EXT_CSD[`EXT_CSD_POWER_CLASS` = 187] بقيمة غلط، الكارت ممكن يرفض يعمل initialization بالـ voltage الحالي.
-
-الـ sequence الصح:
-1. `CMD0` → Reset
-2. `CMD1` → Host يبعت OCR مع voltage window
-3. الكارت يرد بـ R3 وبيتحقق من `MMC_CARD_BUSY = 0x80000000`
+الـ MMC_SWITCH argument format موثّق في الملف:
 
 ```c
-#define MMC_CARD_BUSY   0x80000000  /* Card Power up status bit */
-```
-
-لو الكارت مش بيرفع الـ bit ده في الـ R3 response خلال timeout، الـ driver بيعتبره ميت.
-
-#### الحل
-```bash
-# تحقق من EXT_CSD بعد ما الكارت يرجع يشتغل من بيئة rescue
-mmc extcsd read /dev/mmcblk0 | grep -A2 "POWER_CLASS"
-
-# تأكد إن الـ OTA script مش بيغير EXT_CSD[187] بقيمة عالية
-# الكود في scripts/ota_update.sh:
-# mmc switch 0 3 187 0  <-- تأكد القيمة 0 مش قيمة تانية
-```
-
-في الـ OTA script، كان في bug بيكتب `EXT_CSD_POWER_CLASS` بقيمة `0x0F` بدل `0x00`:
-```c
-/* Wrong: high power class that card doesn't support at 1.8V */
-/* ext_csd[EXT_CSD_POWER_CLASS] = 0x0F; */
-
-/* Correct: let card use default power class */
-ext_csd[EXT_CSD_POWER_CLASS] = 0x00;
-```
-
-#### الدرس المستفاد
-**الـ `MMC_CARD_BUSY` bit** في الـ R3 response هو أول علامة على إن الكارت جاهز. أي OTA يلمس EXT_CSD لازم يتحقق من `EXT_CSD_PWR_CL_52_360` و`EXT_CSD_PWR_CL_52_195` قبل ما يكتب `POWER_CLASS`.
-
----
-
-### السيناريو 2: Android TV Box على Allwinner H616 — تشغيل بطيء جداً
-
-#### العنوان
-**Android TV Box على H616 — الـ eMMC شغّال بـ 26MHz بدل 200MHz**
-
-#### السياق
-منتج Android TV box بيستخدم Allwinner H616 مع eMMC 5.1 سعة 64GB. المستخدمين بيشكوا إن الجهاز بطيء جداً في تحميل التطبيقات. الـ spec بيقول المفروض يشتغل بـ HS400.
-
-#### المشكلة
-```bash
-$ cat /sys/kernel/debug/mmc0/ios
-clock:          26000000 Hz
-bus mode:       push-pull
-chip select:    don't care
-power mode:     on
-bus width:      1 bits
-timing spec:    legacy
-```
-
-الجهاز شغّال بـ **legacy mode** على 26MHz بـ bus width 1 bit — أبطأ mode ممكن.
-
-#### التحليل
-الـ kernel بيقرأ `EXT_CSD_CARD_TYPE` (byte 196) عشان يحدد أعلى speed mode مدعوم. في `mmc.h`:
-
-```c
-#define EXT_CSD_CARD_TYPE           196     /* RO */
-
-#define EXT_CSD_CARD_TYPE_HS_26     (1<<0)  /* Card can run at 26MHz */
-#define EXT_CSD_CARD_TYPE_HS_52     (1<<1)  /* Card can run at 52MHz */
-#define EXT_CSD_CARD_TYPE_HS200_1_8V (1<<4) /* Card can run at 200MHz */
-#define EXT_CSD_CARD_TYPE_HS400_1_8V (1<<6) /* Card can run at 200MHz DDR, 1.8V */
-```
-
-الـ host driver بيعمل negotiation:
-1. يقرأ `EXT_CSD_CARD_TYPE`
-2. يقارنه بـ host capabilities
-3. يبعت `MMC_SWITCH (CMD6)` لتغيير `EXT_CSD_HS_TIMING` (byte 185)
-
-```c
-#define MMC_SWITCH          6   /* ac   [31:0] See below   R1b */
-#define EXT_CSD_HS_TIMING   185 /* R/W */
-#define EXT_CSD_TIMING_HS400 3  /* HS400 */
-```
-
-الـ Device Tree للـ H616 كان فيه مشكلة:
-
-```dts
-/* Wrong DT - missing vqmmc regulator for 1.8V signaling */
-&mmc0 {
-    vmmc-supply = <&reg_vcc_3v3>;
-    /* vqmmc-supply missing! */
-    bus-width = <8>;
-    max-frequency = <200000000>;
-};
-```
-
-من غير `vqmmc`, الـ host مش قادر يعمل voltage switch لـ 1.8V، فبيفضل على legacy.
-
-#### الحل
-```dts
-/* Correct DT */
-&mmc0 {
-    vmmc-supply = <&reg_vcc_3v3>;
-    vqmmc-supply = <&reg_vcc_1v8>;  /* required for HS200/HS400 */
-    bus-width = <8>;
-    max-frequency = <200000000>;
-    mmc-hs400-1_8v;
-    non-removable;
-};
-```
-
-بعد الـ fix:
-```bash
-$ cat /sys/kernel/debug/mmc0/ios
-clock:          200000000 Hz
-bus width:      8 bits
-timing spec:    hs400
-```
-
-#### الدرس المستفاد
-**`EXT_CSD_CARD_TYPE_HS400_1_8V`** بيحتاج إن الـ host يدعم voltage switching. لو `vqmmc` مش موجود في الـ DT، الـ driver بيرفض يعمل HS200/HS400 حتى لو الكارت يدعمها. دايماً تأكد من الـ `EXT_CSD_STROBE_SUPPORT` (byte 184) لو بتستخدم HS400ES.
-
----
-
-### السيناريو 3: IoT Sensor على STM32MP1 — data corruption عند الكتابة
-
-#### العنوان
-**IoT Sensor على STM32MP1 — بيانات بتتخرّب عند الكتابة على eMMC بعد power loss**
-
-#### السياق
-جهاز IoT بيسجّل sensor data على eMMC صغير 4GB موصّل على SDMMC1 في STM32MP157. الجهاز بيتعرض لانقطاعات مفاجئة في الكهرباء. بعد كل انقطاع، الـ filesystem بيطلع corrupted.
-
-#### المشكلة
-بعد power loss، `fsck` بيلاقي:
-```
-ext4: journal commit I/O error
-block 0x1234: expected checksum 0xABCD, got 0x0000
-```
-
-الكارت مش بيكمّل الـ write قبل ما الطاقة تنقطع.
-
-#### التحليل
-الـ eMMC بيدعم **Reliable Write** عن طريق `EXT_CSD_WR_REL_PARAM` (byte 166):
-
-```c
-#define EXT_CSD_WR_REL_PARAM        166     /* RO */
-#define EXT_CSD_WR_REL_PARAM_EN     (1<<2)  /* Reliable write supported */
-```
-
-ولو مفعّل، الكارت بيضمن إن كل write operation إما بتكتمل أو بترجع للحالة القديمة عند power loss. الـ kernel بيفعّله عن طريق:
-
-```c
-#define MMC_SWITCH          6
-/* MMC_SWITCH argument format:
- * [25:24] Access Mode = 0x03 (WRITE_BYTE)
- * [23:16] EXT_CSD byte index
- * [15:08] Value
- * [02:00] Command Set
+/*
+ * MMC_SWITCH argument format:
+ *
+ *  [31:26] Always 0
+ *  [25:24] Access Mode
+ *  [23:16] Location of target Byte in EXT_CSD
+ *  [15:08] Value Byte
+ *  [07:03] Always 0
+ *  [02:00] Command Set
  */
 ```
 
-الـ driver كان محتاج يبعت:
-```
-CMD6 argument = (MMC_SWITCH_MODE_WRITE_BYTE << 24) |
-                (EXT_CSD_WR_REL_SET << 16) |  /* byte 167 */
-                (0x1F << 8)                     /* enable for all partitions */
+الـ driver بيكتب `EXT_CSD_TIMING_HS400` على byte `EXT_CSD_HS_TIMING` (185):
+
+```c
+#define EXT_CSD_HS_TIMING      185  /* R/W */
+#define EXT_CSD_TIMING_HS400   3    /* HS400 */
 ```
 
-لكن الـ DT ما كانش بيفعّل الـ `reliable-write`:
+لكن الكارت بيرفض لأن `EXT_CSD_CARD_TYPE` (byte 196) بيقول:
 
-```dts
-/* Missing in original DT */
-/* no mmc-ddr-3_3v or any reliable write hint */
+```c
+#define EXT_CSD_CARD_TYPE_HS400_1_8V  (1<<6)  /* 200MHz DDR at 1.8V */
+#define EXT_CSD_CARD_TYPE_HS400_1_2V  (1<<7)  /* 200MHz DDR at 1.2V */
 ```
+
+الكارت يدعم HS400 فقط عند 1.8V، لكن الـ schematic فيه VCCQ موصّل على 3.3V LDO ثابت بدل switchable regulator.
+
+الكارت بيقرأ الـ R1 response ويلاقي الـ state:
+
+```c
+#define R1_CURRENT_STATE(x)  ((x & 0x00001E00) >> 9)
+#define R1_STATE_TRAN  4
+```
+
+الكارت في TRAN state ورافض HS400 — hardware issue مش software bug.
 
 #### الحل
+
+**أولاً: تأكيد بالـ debugfs**
+
+```bash
+# اقرأ EXT_CSD كامل
+mmc extcsd read /dev/mmcblk0 | grep -E "CARD_TYPE|HS_TIMING"
+# EXT_CSD[196] CARD_TYPE: 0xC7 يعني HS400 @ 1.8V فقط
+```
+
+**ثانياً: تعديل الـ Device Tree**
+
 ```dts
-&sdmmc1 {
-    arm,primecell-periphid = <0x10153180>;
-    vmmc-supply = <&v3v3>;
+/* rk3562-gateway.dts */
+&sdhci {
+    bus-width = <8>;
+    mmc-hs200-1_8v;         /* HS200 كافي وأكثر أماناً */
+    /* حذف mmc-hs400-1_8v */
+    non-removable;
+    vmmc-supply  = <&vcc_3v3>;
+    vqmmc-supply = <&vcc_1v8>;  /* لازم 1.8V للـ HS200 */
+};
+```
+
+**ثالثاً: fallback لـ HS52 DDR**
+
+لو الـ 1.8V LDO مش متاح أصلاً، الـ DDR52 يشتغل على 3.3V:
+
+```dts
+mmc-ddr-1_8v;  /* حذف وخليه على 3.3V DDR52 */
+```
+
+```c
+#define EXT_CSD_CARD_TYPE_DDR_1_8V  (1<<2)
+#define EXT_CSD_CARD_TYPE_DDR_52    (EXT_CSD_CARD_TYPE_DDR_1_8V | \
+                                     EXT_CSD_CARD_TYPE_DDR_1_2V)
+```
+
+#### الدرس المستفاد
+الـ `EXT_CSD_CARD_TYPE` defines في `mmc.h` بيحددوا القدرات بالـ voltage class. الـ `R1_SWITCH_ERROR` مش bug في الـ driver — الكارت بيقول صراحة "hardware مش متوافق". لازم تتحقق من الـ voltage rails قبل تفعيل أي speed mode.
+
+---
+
+### السيناريو 2: SDIO WiFi على AM62x بيختفي بعد Suspend/Resume
+
+#### العنوان
+**RTL8189FS** SDIO WiFi module على IoT sensor hub بيختفي بعد كل power-save cycle
+
+#### السياق
+IoT sensor hub مبني على **TI AM62x**، الـ WiFi module هو RTL8189FS موصّل على SDIO slot. الجهاز بيشتغل كويس من الأول، لكن بعد أول suspend/resume cycle، الـ WiFi مش بيشتغل:
+
+```
+mmc1: error -84 during resume
+sdio: SDIO card mmc1:0001 removed
+rtl8189fs: probe failed after resume
+```
+
+#### المشكلة
+الـ error `-EIO` مع الـ status:
+
+```c
+#define R1_CC_ERROR  (1 << 20)  /* erx, c — Controller Communication Error */
+```
+
+الكارت مش بيرد على أي command بعد resume.
+
+#### التحليل
+الـ initialization sequence للـ SDIO بعد resume بتبدأ بـ:
+
+```c
+/* Step 1: reset الكارت */
+#define MMC_GO_IDLE_STATE  0   /* bc — broadcast, no response expected */
+
+/* Step 2: بعت CMD1 وانتظر OCR */
+#define MMC_SEND_OP_COND   1   /* bcr [31:0] OCR  R3 */
+#define MMC_CARD_BUSY      0x80000000  /* bit 31 — card still powering up */
+```
+
+الـ driver بيلوب على CMD1 لحد ما `MMC_CARD_BUSY` يتclear:
+
+```c
+/* داخل mmc_send_op_cond */
+while (ocr & MMC_CARD_BUSY) {
+    mdelay(10);
+    /* retry CMD1 */
+}
+```
+
+المشكلة: الـ AM62x PM driver بيقطع VDDIO في suspend ثم بيرجعه في resume، لكن الـ RTL8189FS محتاج 50ms على الأقل قبل ما يقبل CMD0. الـ driver بيبعت CMD0 قبل انتهاء الـ power-up sequence فالكارت مش بيرد وبييجي timeout.
+
+بعد الـ `mmc_op_tuning()` check:
+
+```c
+static inline bool mmc_op_tuning(u32 opcode)
+{
+    return opcode == MMC_SEND_TUNING_BLOCK ||
+           opcode == MMC_SEND_TUNING_BLOCK_HS200;
+}
+```
+
+اتضح إن tuning operation كانت شغالة لحظة الـ suspend interrupt، فالـ module اتقطع في وسط sequence.
+
+#### الحل
+
+**في الـ Device Tree:**
+
+```dts
+&sdhci1 {
+    /* SDIO WiFi slot */
     bus-width = <4>;
-    non-removable;
-    st,use-cqe;  /* Command Queue for ordered writes */
+    cap-sd-highspeed;
+    keep-power-in-suspend;         /* لا تقطع VDDIO في suspend */
+    wakeup-source;
+    vmmc-supply = <&wifi_3v3_reg>;
+    post-power-on-delay-ms = <80>; /* انتظر 80ms بعد power-on */
 };
 ```
 
-وفي الـ application level، استخدام `O_SYNC | O_DSYNC` مع كل write:
-```c
-int fd = open("/data/sensor.log", O_WRONLY | O_APPEND | O_SYNC);
-```
+**التأكد من الـ resume state:**
 
-للتحقق إن الـ reliable write اتفعّل:
 ```bash
-mmc extcsd read /dev/mmcblk0 | grep -A1 "Write Reliability"
-# Expected: WR_REL_PARAM[2] = 0x1
+# شوف الـ MMC state machine بعد resume
+cat /sys/bus/mmc/devices/mmc1:0001/state
+
+# تابع الـ events
+echo 1 > /sys/kernel/debug/tracing/events/mmc/enable
+cat /sys/kernel/debug/tracing/trace | grep -E "CMD0|CMD1|BUSY"
 ```
 
-وتحقق من الـ R1 status بعد كل write:
+**منع الـ interrupt أثناء tuning:**
+
 ```c
-/* Check R1 response bits after CMD25 */
-if (status & R1_WP_VIOLATION)
-    pr_err("Write protection violation!\n");
-if (status & R1_CC_ERROR)
-    pr_err("Card controller error!\n");
-/* R1_CC_ERROR = (1 << 20) */
+/* في الـ PM suspend callback */
+if (mmc_op_tuning(host->mrq->cmd->opcode)) {
+    /* انتظر انتهاء الـ tuning قبل suspend */
+    mmc_wait_for_req_done(host, host->mrq);
+}
 ```
 
 #### الدرس المستفاد
-**`EXT_CSD_WR_REL_PARAM_EN`** هو أساس data integrity على eMMC في بيئات power-unstable. دايماً تحقق منه في أي IoT أو industrial product، وتفعّل Reliable Write على boot partition وuser data partition.
+الـ `MMC_CARD_BUSY` flag والـ `mmc_op_tuning()` inline function هم barriers مهمة في الـ PM path. أي SDIO module محتاج `post-power-on-delay-ms` كافي في الـ DT، ولازم تمنع الـ suspend وسط tuning sequence.
 
 ---
 
-### السيناريو 4: Automotive ECU على i.MX8 — RPMB authentication فشل
+### السيناريو 3: RPMB على i.MX8 — Automotive ECU Rollback Counter Corruption
 
 #### العنوان
-**Automotive ECU على i.MX8QM — فشل في قراءة security keys من RPMB**
+**RPMB write counter** بيتتلف بعد firmware update على automotive ECU بيستخدم secure boot
 
 #### السياق
-ECU لنظام ADAS بيستخدم i.MX8QM. الـ eMMC RPMB partition بيخزّن cryptographic keys لـ Secure Boot. بعد تبديل الـ eMMC chip بنفس الـ model من supplier تاني، النظام بدأ يرفض يبوت بسبب RPMB authentication failure.
+Automotive ECU لنظام إدارة البطارية مبني على **NXP i.MX8M Plus**، eMMC 5.1 Micron automotive-grade. الـ OP-TEE بيستخدم RPMB لتخزين rollback counters. بعد OTA firmware update، الـ TEE فشل في تحديث الـ counter:
+
+```
+RPMB: write request failed, status=0x0002
+RPMB: authentication failure
+tee-supplicant: ioctl RPMB_WRITE_DATA returned -EPERM
+```
 
 #### المشكلة
-```
-tee-supplicant: RPMB: ioctl RPMB_F_READ failed: -EIO
-optee: secure storage: authentication failed
-```
+الـ RPMB write counter اتضرر بسبب hard reset في منتصف write sequence.
 
 #### التحليل
-الـ RPMB (Replay Protected Memory Block) بيتحكم فيه `EXT_CSD_RPMB_MULT` (byte 168):
+الوصول لـ RPMB partition بيتم عبر `MMC_SWITCH` على `EXT_CSD_PART_CONFIG`:
 
 ```c
-#define EXT_CSD_RPMB_MULT   168     /* RO */
+#define EXT_CSD_PART_CONFIG          179  /* R/W */
+#define EXT_CSD_PART_CONFIG_ACC_RPMB (0x3)
+#define EXT_CSD_PART_CONFIG_ACC_MASK (0x7)
 ```
 
-الـ RPMB size = `EXT_CSD_RPMB_MULT × 128KB`. الكارت الجديد كان نفس الـ model لكن revision مختلف، فـ RPMB size اتغير من 512KB إلى 4MB.
-
-الوصول للـ RPMB بيتم عن طريق:
-1. `MMC_SWITCH (CMD6)` لـ switch لـ RPMB partition
-2. `EXT_CSD_PART_CONFIG` (byte 179) لاختيار الـ partition
+الـ access mode بيتغير بـ:
 
 ```c
-#define EXT_CSD_PART_CONFIG             179     /* R/W */
-#define EXT_CSD_PART_CONFIG_ACC_RPMB    (0x3)   /* Access RPMB partition */
-#define EXT_CSD_PART_CONFIG_ACC_MASK    (0x7)
+#define MMC_SWITCH              6    /* ac [31:0] R1b */
+#define MMC_SWITCH_MODE_WRITE_BYTE  0x03  /* Set target to value */
 ```
 
-الـ switch argument:
+الـ RPMB write sequence:
+
+```
+CMD23 (SET_BLOCK_COUNT) + Reliable Write bit
+    ↓
+CMD25 (WRITE_MULTIPLE_BLOCK) — الـ RPMB frame مع MAC
+    ↓
+CMD13 (SEND_STATUS) — انتظر PRG → TRAN
+```
+
 ```c
-arg = (MMC_SWITCH_MODE_WRITE_BYTE << 24) |
-      (EXT_CSD_PART_CONFIG << 16) |
-      (EXT_CSD_PART_CONFIG_ACC_RPMB << 8) |
-      EXT_CSD_CMD_SET_NORMAL;
+#define MMC_SET_BLOCK_COUNT       23
+#define MMC_WRITE_MULTIPLE_BLOCK  25
+#define MMC_SEND_STATUS           13
 ```
 
-المشكلة إن الـ RPMB key كان مكتوب بـ write counter معيّن في الكارت القديم. الكارت الجديد عنده write counter = 0 (fresh chip) فالـ authentication بيفشل.
+الـ R1 state check:
+
+```c
+#define R1_CURRENT_STATE(x)  ((x & 0x00001E00) >> 9)
+#define R1_STATE_PRG   7   /* card is programming */
+#define R1_STATE_TRAN  4   /* ready for next command */
+```
+
+الـ firmware update script عمل hardware reset والكارت كان في `R1_STATE_PRG`. ده أدى لـ partial RPMB write — counter اتزاد لكن الـ MAC مش محسوب صح.
+
+الـ `EXT_CSD_WR_REL_PARAM` بيتحقق منه الـ driver:
+
+```c
+#define EXT_CSD_WR_REL_PARAM      166  /* RO */
+#define EXT_CSD_WR_REL_PARAM_EN   (1<<2)
+```
+
+الكارت بيدعم reliable write — المشكلة في الـ reset timing مش في الـ card capability.
 
 #### الحل
-الحل في استخدام OP-TEE لإعادة provisioning الـ RPMB key:
+
+**أولاً: تشخيص**
 
 ```bash
-# على النظام الجديد، provisioning الـ RPMB key
-tee-supplicant &
-# ثم من secure world:
-optee_rpmb_write_key
+# اقرأ الـ write counter الحالي
+mmc rpmb read-counter /dev/mmcblk0rpmb
 
-# للتحقق من RPMB size الجديد:
-mmc extcsd read /dev/mmcblk0 | grep "RPMB"
-# RPMB Size: 4096 kB  (EXT_CSD_RPMB_MULT = 32)
+# حاول قراءة بالـ key القديم
+mmc rpmb read-block /dev/mmcblk0rpmb 0 1 /tmp/out.bin <key_file>
 ```
 
-وتحقق من status response بعد كل RPMB operation:
-```c
-/* After CMD13 (MMC_SEND_STATUS): */
-u32 status;
-/* R1_CARD_IS_LOCKED = (1 << 25) */
-if (status & R1_CARD_IS_LOCKED)
-    pr_err("Card is locked - RPMB provisioning needed\n");
-```
-
-#### الدرس المستفاد
-**`EXT_CSD_RPMB_MULT`** لازم يتحقق منه في كل bring-up لكارت جديد. الـ RPMB key مرتبط بالـ chip المادي، ومش portable بين chips حتى لو نفس الـ model. دايماً في الـ automotive، خلّي RPMB provisioning جزء من الـ End-of-Line testing.
-
----
-
-### السيناريو 5: Custom Board Bring-up على AM62x — eMMC بيدخل Sleep ومش بيصحى
-
-#### العنوان
-**Custom Board Bring-up على TI AM62x — eMMC بيدخل في Sleep mode ومش بيرجع**
-
-#### السياق
-فريق bring-up بيشتغل على custom board بيستخدم TI AM62x (Sitara) لـ industrial HMI panel. الـ eMMC 16GB موصّل على MMC0. الـ board بيشتغل تمام أول ما بيبوت، لكن بعد 30 ثانية من idle، كل الـ I/O على الـ eMMC بتفشل.
-
-#### المشكلة
-```
-mmc0: CMD13 failed: -ETIMEDOUT
-mmc0: error -110 whilst initialising MMC card
-block layer: I/O error on mmcblk0
-```
-
-الـ error بييجي بالظبط بعد 30 ثانية — زي ما في timer.
-
-#### التحليل
-الـ eMMC يدعم **Sleep mode** عن طريق `CMD5` (`MMC_SLEEP_AWAKE`):
+**ثانياً: في الـ firmware update path، أرسل Power Off Notification أولاً**
 
 ```c
-#define MMC_SLEEP_AWAKE   5   /* ac   [31:16] RCA 15:flg R1b */
+/* من mmc.h */
+#define EXT_CSD_POWER_OFF_NOTIFICATION  34  /* R/W */
+#define EXT_CSD_POWER_OFF_SHORT         2
+#define EXT_CSD_POWER_OFF_LONG          3
+
+/* قبل أي reset */
+mmc_switch(card, EXT_CSD_CMD_SET_NORMAL,
+           EXT_CSD_POWER_OFF_NOTIFICATION,
+           EXT_CSD_POWER_OFF_SHORT,
+           card->ext_csd.power_off_long_time);
 ```
 
-الـ bit 15 في الـ argument بيحدد:
-- `1` → دخول Sleep
-- `0` → Awake (خروج من Sleep)
-
-الـ Sleep mode بيُفعَّل من الـ host driver لتوفير الطاقة. بعد ما يدخل Sleep، الكارت بيحتاج Awake command قبل أي operation تانية — لو الـ driver نسي يبعت Awake، كل الـ commands بعدها بتفشل.
-
-الـ `EXT_CSD_S_A_TIMEOUT` (byte 217) بيحدد وقت الـ Sleep/Awake timeout:
+**ثالثاً: بعد الـ notification، انتظر TRAN state**
 
 ```c
-#define EXT_CSD_S_A_TIMEOUT   217   /* RO */
-```
-
-الـ actual timeout = `100ns × 2^EXT_CSD_S_A_TIMEOUT`. لو القيمة كبيرة، الـ Awake بياخد وقت طويل والـ driver بيعمل timeout.
-
-المشكلة في الـ DT:
-
-```dts
-/* Wrong: aggressive power saving enabled */
-&sdhci0 {
-    keep-power-in-suspend;
-    /* no cap-mmc-hw-reset */
-};
-```
-
-الـ `mmc-pm-flags` كانت بتفعّل runtime PM بـ 30 ثانية timeout، والـ driver كان بيبعت sleep command لكن مش بيبعت Awake صح بسبب bug في الـ AM62x SDHCI driver.
-
-#### التشخيص
-```bash
-# تحقق من R1 state machine
-# R1_CURRENT_STATE(x) = ((x & 0x00001E00) >> 9)
-# R1_STATE_DIS = 8  <-- disconnected (sleep)
-# لو الكارت في state 8 ومش بيرجع → bug في Awake sequence
-
-# اقرأ الـ EXT_CSD live
-mmc extcsd read /dev/mmcblk0 | grep -E "S_A_TIMEOUT|SLEEP"
-
-# فعّل MMC debug tracing
-echo 1 > /sys/kernel/debug/mmc0/err_stats
-echo 65535 > /sys/bus/platform/drivers/sdhci/fe18000.mmc/mmc_host/mmc0/
-```
-
-تتبع الـ CMD5 في kernel log:
-```bash
-echo 'mmc:*' > /sys/kernel/debug/tracing/set_event
-cat /sys/kernel/debug/tracing/trace_pipe | grep -E "CMD5|SLEEP|AWAKE"
-```
-
-#### الحل
-```dts
-/* Fixed DT - disable aggressive sleep */
-&sdhci0 {
-    pinctrl-names = "default";
-    pinctrl-0 = <&main_mmc0_pins_default>;
-    ti,driver-strength-ohm = <50>;
-    disable-wp;
-    non-removable;
-    cap-mmc-hw-reset;
-    /* Remove keep-power-in-suspend to avoid sleep issues */
-    /* Or increase sleep timeout to safe value */
-};
-```
-
-أو في الـ kernel config:
-```bash
-# Disable MMC runtime PM during bring-up
-echo 0 > /sys/bus/mmc/devices/mmc0:0001/power/autosuspend_delay_ms
-echo on > /sys/bus/mmc/devices/mmc0:0001/power/control
-```
-
-للتحقق من الـ S_A_TIMEOUT value:
-```bash
-mmc extcsd read /dev/mmcblk0 | grep "Sleep/Awake"
-# S_A_TIMEOUT: 0x11 → 100ns × 2^17 = ~13ms
-# لو الـ SDHCI timeout أقل من كده → race condition
-```
-
-#### الدرس المستفاد
-**`MMC_SLEEP_AWAKE (CMD5)`** هو double-edged sword — بيوفر طاقة لكنه بيتطلب Awake sequence صح قبل أي command. في الـ bring-up، افصل الـ runtime PM تماماً أول ما تتأكد إن الـ basic I/O شغّال، وراجع `EXT_CSD_S_A_TIMEOUT` عشان تضبط الـ host timeout أكبر منه. كمان `mmc_ready_for_data()` في `mmc.h` بتتحقق من `R1_CURRENT_STATE == R1_STATE_TRAN` وده مهم جداً — الكارت النايم بيكون في `R1_STATE_DIS` مش `R1_STATE_TRAN`.
-
-```c
-/* This function in mmc.h catches exactly this scenario */
 static inline bool mmc_ready_for_data(u32 status)
 {
     return status & R1_READY_FOR_DATA &&
            R1_CURRENT_STATE(status) == R1_STATE_TRAN;
-    /* Card in sleep (DIS state) will return false here */
 }
+/* ابعت CMD13 في loop لحد ما mmc_ready_for_data() ترجع true */
 ```
+
+**رابعاً: ارجع للـ user partition بعد RPMB**
+
+```c
+/* مهم جداً بعد أي RPMB access */
+mmc_switch(card, EXT_CSD_CMD_SET_NORMAL,
+           EXT_CSD_PART_CONFIG,
+           0x0,  /* back to user partition */
+           card->ext_csd.part_time);
+```
+
+#### الدرس المستفاد
+الـ RPMB مش بيسمح بـ partial write. `EXT_CSD_POWER_OFF_NOTIFICATION` في `mmc.h` موجود لحماية من بالظبط هالسيناريو. كل firmware update path لازم يبعت هاد الـ notification وينتظر `R1_STATE_TRAN` قبل أي reset.
+
+---
+
+### السيناريو 4: SD Card على Allwinner H616 — Android TV Box، الكارت بيتعرف بحجم غلط
+
+#### العنوان
+SD card 32GB بيتعرف كـ 2GB على **Allwinner H616** بسبب خلل في CSD structure field
+
+#### السياق
+Android TV Box مبني على **Allwinner H616**. المصنع غيّر مورّد الـ SD card من SanDisk لـ Kingston في الشحنة الجديدة. الكروت الجديدة بتتعرف بـ 2GB بس:
+
+```bash
+$ lsblk
+NAME       SIZE
+mmcblk1      2G   # المفروض 32G
+```
+
+#### المشكلة
+الـ kernel بيحسب الحجم غلط من الـ CSD register.
+
+#### التحليل
+الـ CSD parsing في الـ kernel بيعتمد على `CSD_STRUCTURE` field:
+
+```c
+#define CSD_STRUCT_VER_1_0  0   /* spec 1.0 - 1.2 — formula قديمة */
+#define CSD_STRUCT_VER_1_1  1   /* spec 1.4 - 2.2 */
+#define CSD_STRUCT_VER_1_2  2   /* spec 3.1 - 4.1 — EXT_CSD */
+#define CSD_STRUCT_EXT_CSD  3   /* Version coded in EXT_CSD */
+```
+
+للـ SD cards:
+- CSD v1 → حجم أقصاه 2GB، المعادلة: `(C_SIZE+1) × 2^(C_SIZE_MULT+2) × 2^READ_BL_LEN`
+- CSD v2 → SDHC/SDXC، المعادلة: `(C_SIZE+1) × 512KB`
+
+الكارت من Kingston بيرجع `CSD_STRUCTURE = 0` بدل `1` (firmware bug في المورّد). الكارت فعلاً 32GB لكن CSD بيقول v1 فالـ parser بيحسب 2GB.
+
+يمكن التأكد عبر `EXT_CSD_SEC_CNT`:
+
+```c
+#define EXT_CSD_SEC_CNT  212  /* RO, 4 bytes — الحجم الحقيقي */
+/* size_bytes = SEC_CNT * 512 */
+```
+
+الـ `CCC_BLOCK_READ` و`CCC_BLOCK_WRITE` في الـ CSD موجودين:
+
+```c
+#define CCC_BLOCK_READ   (1<<2)  /* CMD16,17,18 — support confirmed */
+#define CCC_BLOCK_WRITE  (1<<4)  /* CMD16,24,25 */
+```
+
+وبيأكدوا إن الكارت supports standard block operations — المشكلة فقط في حساب الحجم.
+
+#### الحل
+
+**أولاً: اقرأ الـ CSD raw**
+
+```bash
+cat /sys/bus/mmc/devices/mmc1:0001/csd
+# الـ bits [127:126] = CSD_STRUCTURE
+# لو 00 → v1 مش صح لكارت 32GB
+```
+
+**ثانياً: تأكيد الحجم الحقيقي**
+
+```bash
+mmc extcsd read /dev/mmcblk1 | grep SEC_COUNT
+# SEC_COUNT * 512 = الحجم بالبايت
+# 62333952 * 512 = ~32GB
+```
+
+**ثالثاً: quirk للكارت المعيوب**
+
+```c
+/* في drivers/mmc/core/quirks.h */
+{
+    .name  = "Kingston SC32G",
+    .manfid = 0x0041,
+    .quirk = MMC_QUIRK_BROKEN_HIGHRES_SEC_COUNT,
+    /* أو استخدام SEC_CNT من EXT_CSD مباشرة بدل CSD */
+},
+```
+
+```bash
+# force re-read للحجم من EXT_CSD
+echo 1 > /sys/bus/mmc/devices/mmc1:0001/preferred_erase_size
+```
+
+#### الدرس المستفاد
+الـ `CSD_STRUCT_VER_*` defines في `mmc.h` هم branching points في الـ size parser. الـ `EXT_CSD_SEC_CNT` هو المصدر الأكثر موثوقية للحجم الفعلي. لما تغيّر مورّد الـ SD، دايماً تحقق من `SEC_CNT` يدوياً قبل الإنتاج.
+
+---
+
+### السيناريو 5: eMMC على STM32MP1 — Data Logger بيوصل لـ EOL بسرعة غير طبيعية
+
+#### العنوان
+Industrial data logger على **STM32MP1** بيستنفذ عمر الـ eMMC في 6 أشهر بدل 5 سنوات بسبب خطأ في استخدام erase commands
+
+#### السياق
+data logger صناعي مبني على **STM32MP157** مع eMMC 8GB. الجهاز بيكتب sensor readings كل 5 ثواني 24/7. بعد 6 أشهر:
+
+```
+mmc0: error -5 (EIO) writing sector 0x1a4000
+mmc0: CMD38 ERASE failed, R1 status 0x08000000
+```
+
+الـ status bit:
+
+```c
+#define R1_ERASE_PARAM  (1 << 27)  /* ex, c — invalid erase parameters */
+```
+
+#### المشكلة
+الـ flash wear استنفذ بشكل مسرّع جداً.
+
+#### التحليل
+الـ application كانت تعمل **full erase** بعد كل write cycle "لتأمين البيانات":
+
+```c
+/* الكود القديم الغلط */
+#define MMC_ERASE_GROUP_START  35  /* CMD35 */
+#define MMC_ERASE_GROUP_END    36  /* CMD36 */
+#define MMC_ERASE              38  /* CMD38 */
+
+/* argument غلط */
+cmd.arg = MMC_ERASE_ARG;  /* 0x00000000 — full physical erase */
+```
+
+```c
+/* من mmc.h */
+#define MMC_ERASE_ARG         0x00000000  /* Standard erase — P/E cycle كامل */
+#define MMC_TRIM_ARG          0x00000001  /* Trim — يخلي FTL يقرر */
+#define MMC_DISCARD_ARG       0x00000003  /* Discard — hint بس مش ضمان */
+#define MMC_SECURE_ERASE_ARG  0x80000000  /* Secure erase — أبطأ وأكثر استهلاكاً */
+```
+
+الـ full erase (`MMC_ERASE_ARG`) بيعمل physical erase على الـ erase group كامل (~512KB) حتى لو كتبت sector واحد (512B). الـ write amplification = 512KB / 512B = **1024x**.
+
+الأصح كان `MMC_TRIM_ARG` الذي يخبر الـ FTL (Firmware Translation Layer) بالـ blocks المحذوفة فيعمل wear leveling ذكي.
+
+التحقق من دعم TRIM:
+
+```c
+#define EXT_CSD_SEC_FEATURE_SUPPORT  231  /* RO */
+#define EXT_CSD_SEC_GB_CL_EN         BIT(4)  /* TRIM supported */
+#define EXT_CSD_TRIM_MULT            232  /* RO — timeout multiplier */
+```
+
+الكارت كان يدعم TRIM لكن الكود ما استخدمه. إضافة لكده، الـ BKOPS كان معطّل:
+
+```c
+#define EXT_CSD_BKOPS_EN         163  /* R/W */
+#define EXT_CSD_BKOPS_SUPPORT    502  /* RO — does card support it? */
+#define EXT_CSD_AUTO_BKOPS_MASK  0x02 /* Auto BKOPS bit */
+```
+
+الـ BKOPS المعطّل معناه إن الـ eMMC مش بيعمل background garbage collection في الـ idle time.
+
+كمان كان ممكن ينتبه مبكراً لو كان بيراقب:
+
+```c
+#define EXT_CSD_PRE_EOL_INFO                267  /* RO */
+#define EXT_CSD_DEVICE_LIFE_TIME_EST_TYP_A  268  /* RO — SLC blocks */
+#define EXT_CSD_DEVICE_LIFE_TIME_EST_TYP_B  269  /* RO — MLC blocks */
+```
+
+#### الحل
+
+**أولاً: تغيير الـ erase argument**
+
+```c
+/* بدل MMC_ERASE_ARG استخدم TRIM */
+cmd.opcode = MMC_ERASE_GROUP_START;
+cmd.arg    = start_lba;
+/* ... CMD36 ... */
+cmd.opcode = MMC_ERASE;
+cmd.arg    = MMC_TRIM_ARG;  /* 0x00000001 */
+```
+
+**ثانياً: تفعيل Auto BKOPS**
+
+```bash
+# تفعيل Auto BKOPS
+mmc bkops-enable /dev/mmcblk0
+
+# التحقق
+mmc extcsd read /dev/mmcblk0 | grep -E "BKOPS_EN|BKOPS_SUPPORT"
+```
+
+**ثالثاً: مراقبة health دورية (cron job)**
+
+```bash
+#!/bin/bash
+# /etc/cron.weekly/check-emmc-health
+EXTCSD=$(mmc extcsd read /dev/mmcblk0)
+
+PRE_EOL=$(echo "$EXTCSD" | grep PRE_EOL_INFO | awk '{print $NF}')
+# 0x01 = Normal | 0x02 = Warning | 0x03 = Urgent
+
+LIFE_A=$(echo "$EXTCSD" | grep DEVICE_LIFE_TIME_EST_TYP_A | awk '{print $NF}')
+LIFE_B=$(echo "$EXTCSD" | grep DEVICE_LIFE_TIME_EST_TYP_B | awk '{print $NF}')
+
+logger "eMMC health: PRE_EOL=$PRE_EOL LIFE_A=$LIFE_A LIFE_B=$LIFE_B"
+
+if [ "$PRE_EOL" -ge "2" ]; then
+    logger "WARNING: eMMC approaching end of life!"
+fi
+```
+
+**رابعاً: إضافة fstrim دوري**
+
+```bash
+# systemd timer لـ fstrim
+systemctl enable fstrim.timer
+# أو يدوياً
+fstrim -v /data
+```
+
+#### الدرس المستفاد
+`MMC_ERASE_ARG` vs `MMC_TRIM_ARG` vs `MMC_DISCARD_ARG` في `mmc.h` ليسوا synonyms. الـ full erase بيقتل الـ flash في أقل من سنة في الأنظمة الكاتبة. في أي data logger أو industrial system، لازم تستخدم TRIM، تفعّل Auto BKOPS، وتراقب `EXT_CSD_PRE_EOL_INFO` كـ health indicator — ده موجود في `mmc.h` من كتير بس ناس مش بتستخدمه.
 ## Phase 7: مصادر ومراجع
+
+### توثيق Kernel الرسمي
+
+الـ Linux kernel نفسه فيه توثيق مباشر للـ MMC subsystem تحت `Documentation/`:
+
+| المسار | المحتوى |
+|--------|---------|
+| `Documentation/driver-api/mmc/index.rst` | نقطة البداية للـ MMC/SD/SDIO driver API |
+| `Documentation/driver-api/mmc/mmc-tools.rst` | شرح أدوات `mmc-utils` |
+| `Documentation/driver-api/mmc/mmc-async-req.rst` | الـ asynchronous request framework |
+| `Documentation/driver-api/mmc/mmc-dev-attrs.rst` | الـ sysfs attributes الخاصة بالكارت |
+| `Documentation/driver-api/mmc/mmc-dev-parts.rst` | الـ partitions الخاصة بـ eMMC |
+
+الـ header file المدروسة نفسها:
+
+```
+include/linux/mmc/mmc.h   — MMC commands, EXT_CSD fields, R1 status bits
+include/linux/mmc/host.h  — host controller interface
+include/linux/mmc/card.h  — card descriptor struct
+include/linux/mmc/sdio.h  — SDIO-specific commands
+```
+
+الـ source الرئيسي للـ core:
+
+```
+drivers/mmc/core/mmc.c       — MMC card init & state machine
+drivers/mmc/core/core.c      — request handling, bus ops
+drivers/mmc/core/mmc_ops.c   — low-level MMC command wrappers
+drivers/mmc/core/block.c     — block device interface
+```
 
 ---
 
 ### مقالات LWN.net
 
-دي أهم المقالات اللي بتغطي الـ MMC subsystem في الـ Linux kernel:
+الـ **LWN.net** هو المرجع الأول لمتابعة تطور الـ kernel — الروابط دي كلها حقيقية من نتائج البحث:
 
-| المقال | الوصف |
-|--------|-------|
-| [1/4 MMC layer](https://lwn.net/Articles/82765/) | أول patch series لـ MMC core support في الـ kernel |
-| [new driver: MMC framework, patch against 2.4.19](https://lwn.net/Articles/7176/) | الـ MMC framework الأصلي — تاريخي ومهم لفهم الأساس |
-| [MMC updates](https://lwn.net/Articles/253888/) | تحديثات الـ MMC layer زي SDIO و SPI support |
-| [mmc: Add Command Queue support](https://lwn.net/Articles/738160/) | إضافة الـ HW Command Queue (CMDQ) للـ eMMC — بيديك 25-50% تحسن في الـ random I/O |
-| [Add MMC software queue support](https://lwn.net/Articles/803435/) | الـ SW CMDQ بـ queue depth 32 — بديل للـ HW queue |
-| [pwrseq: Add subsystem for power sequences](https://lwn.net/Articles/602855/) | الـ power sequence subsystem اللي بيخدم الـ MMC controllers |
-| [Replay Protected Memory Block (RPMB) subsystem](https://lwn.net/Articles/975405/) | الـ RPMB كـ subsystem مستقل — مهم جداً للـ secure storage |
-| [mmc: Add host driver for OCTEON MMC controller](https://lwn.net/Articles/496911/) | مثال real-world لـ MMC host controller driver |
+#### تطور الـ subsystem
+
+- **[new driver: multimedia card (mmc) framework — 2002](https://lwn.net/Articles/7176/)**
+  أول patch قدّم الـ MMC framework في الـ kernel — النواة الأولى للـ subsystem.
+
+- **[1/4 MMC layer — 2004](https://lwn.net/Articles/82765/)**
+  patch series أضاف الـ core MMC layer لدعم الـ embedded controllers زي Intel PXA وARM MMCI.
+
+- **[Secure Digital (SD) support — 2005](https://lwn.net/Articles/126098/)**
+  أول دعم لـ SD cards — كشف الفرق بين MMC وSD، قراءة الـ registers الإضافية، ودعم الـ 4-bit mode.
+
+- **[MMC updates — 2008](https://lwn.net/Articles/253888/)**
+  تحديثات شاملة أضافت SDIO وSPI support وأزالت الـ MMC-specific error codes.
+
+- **[mmc: Add SD4.0 support — 2015](https://lwn.net/Articles/642336/)**
+  إضافة دعم SD 4.0 للـ MMC subsystem.
+
+#### ميزات متقدمة
+
+- **[Add MMC erase and secure erase — 2011](https://lwn.net/Articles/391970/)**
+  أول نسخة من patch الـ erase/secure-erase — يغطي `MMC_ERASE_ARG` و`MMC_SECURE_ERASE_ARG`.
+
+- **[Add MMC erase and secure erase V4 — 2011](https://lwn.net/Articles/395147/)**
+  النسخة المحسّنة من نفس الـ patch series بعد review cycles.
+
+- **[eMMC High Priority Interrupt (HPI) Feature — 2012](https://lwn.net/Articles/493070/)**
+  patch series يغطي BKOPS field offsets في EXT_CSD والـ HPI invocation لمعالجة الـ foreground requests بأولوية.
+
+- **[Replay Protected Memory Block (RPMB) subsystem — 2016](https://lwn.net/Articles/694798/)**
+  مناقشة تصميم الـ RPMB subsystem — مهم لفهم `EXT_CSD_RPMB_MULT` وحماية البيانات.
+
+- **[char:rpmb — RPMB subsystem patches — 2016](https://lwn.net/Articles/705850/)**
+  patches الـ RPMB layer الفعلية للـ kernel.
+
+- **[mmc: Add Command Queue support — 2017](https://lwn.net/Articles/738160/)**
+  الـ CMDQ feature من eMMC 5.1 — مباشرةً يغطي `EXT_CSD_CMDQ_SUPPORT` و`EXT_CSD_CMDQ_DEPTH` الموجودين في الـ header.
+
+- **[eMMC inline encryption support — 2021](https://lwn.net/Articles/843454/)**
+  دعم الـ inline encryption على مستوى الـ MMC layer.
 
 ---
 
-### توثيق الـ Kernel الرسمي
+### Kernel Commits المهمة
 
-الملفات دي في `Documentation/` هي المرجع الأول:
+الـ commits دي أضافت أو غيّرت مفاهيم أساسية في `mmc.h`:
 
+| الميزة | ما تبحث عنه في `git log` |
+|--------|--------------------------|
+| EXT_CSD initial definitions | `git log --oneline -- include/linux/mmc/mmc.h` |
+| CMDQ support (`EXT_CSD_CMDQ_*`) | `git log --grep="cmdq" -- drivers/mmc/` |
+| HS200/HS400 card types | `git log --grep="HS200\|HS400" -- include/linux/mmc/` |
+| RPMB mult field | `git log --grep="RPMB" -- include/linux/mmc/mmc.h` |
+| BKOPS support | `git log --grep="bkops" -- drivers/mmc/core/` |
+| Sanitize feature | `git log --grep="sanitize\|SANITIZE" -- include/linux/mmc/` |
+
+للبحث المباشر في الـ kernel git:
+
+```bash
+# تاريخ الـ header file كامل
+git log --oneline include/linux/mmc/mmc.h
+
+# الـ commits اللي أضافت EXT_CSD fields
+git log --all -p --follow include/linux/mmc/mmc.h | grep -A2 "EXT_CSD_CMDQ"
 ```
-Documentation/driver-api/mmc/index.rst       # نقطة البداية
-Documentation/driver-api/mmc/mmc-tools.rst   # mmc-utils tool
-Documentation/driver-api/mmc/mmc-dev-parts.rst  # partitioning: boot, RPMB, GP
-Documentation/driver-api/mmc/mmc-async-req.rst  # async request API
-Documentation/driver-api/mmc/mmc-dev-attrs.rst  # sysfs attributes
-```
-
-**الـ online links:**
-
-- [MMC/SD/SDIO card support — kernel.org](https://docs.kernel.org/driver-api/mmc/index.html)
-- [SD and MMC Device Partitions](https://www.kernel.org/doc/html/latest/driver-api/mmc/mmc-dev-parts.html)
-- [MMC tools introduction](https://docs.kernel.org/driver-api/mmc/mmc-tools.html)
 
 ---
 
-### الـ Source Files الأساسية في الـ Kernel
+### Mailing List — linux-mmc@vger.kernel.org
 
-الملفات دي هي جوهر الـ MMC subsystem:
+الـ mailing list الرسمي للـ MMC subsystem:
 
-```
-include/linux/mmc/mmc.h      # commands, EXT_CSD fields, R1 status — الملف اللي بندرسه
-include/linux/mmc/host.h     # struct mmc_host, OCR bits, capabilities
-include/linux/mmc/card.h     # struct mmc_card, partitions, quirks
-include/linux/mmc/sdio.h     # SDIO-specific commands
-drivers/mmc/core/mmc.c       # MMC core logic: init, EXT_CSD parsing, speed selection
-drivers/mmc/core/core.c      # request handling, power management
-drivers/mmc/core/mmc_ops.c   # low-level operations: switch, send_status
-drivers/mmc/core/queue.c     # block queue and CMDQ integration
-```
+- **الأرشيف**: [https://linux-mmc.vger.kernel.narkive.com/](https://linux-mmc.vger.kernel.narkive.com/)
+- **Patchwork**: [https://patchwork.kernel.org/project/linux-mmc/list/](https://patchwork.kernel.org/project/linux-mmc/list/)
+- **LKML Archive**: [https://lkml.iu.edu/hypermail/linux/kernel/](https://lkml.iu.edu/hypermail/linux/kernel/)
 
----
+مناقشات مهمة محددة:
 
-### Commits مهمة في تاريخ الـ MMC Subsystem
-
-| الـ Feature | المكان للبحث |
-|-------------|--------------|
-| HS200 support | `git log --all --grep="HS200" -- drivers/mmc/` |
-| HS400 support | `git log --all --grep="HS400" -- drivers/mmc/` |
-| HS400ES (Enhanced Strobe) | `git log --all --grep="HS400ES"` |
-| CMDQ hardware support | `git log --all --grep="cmdq" -- drivers/mmc/` |
-| RPMB partition support | `git log --all --grep="RPMB" -- drivers/mmc/` |
-| BKOPS (Background Operations) | `git log --all --grep="BKOPS" -- drivers/mmc/` |
-
-**Patchwork للـ linux-mmc mailing list:**
-- [tmio: eMMC HS400 mode support patch](https://patchwork.kernel.org/patch/10175319/)
-- [linux-commits-search (Typesense)](https://linux-commits-search.typesense.org/) — ابحث بـ "EXT_CSD" أو "mmc_select_hs400"
+- [BKOPS support patches (v9)](https://linux-mmc.vger.kernel.narkive.com/1ZFD1anD/patch-v9-mmc-support-bkops-feature-for-emmc)
+- [BKOPS support patches (v12)](https://linux-mmc.vger.kernel.narkive.com/oFbbbtgD/patch-v12-mmc-support-bkops-feature-for-emmc)
+- [CMDQ host controller patches](https://patchwork.kernel.org/project/linux-arm-msm/patch/20141202120147.GA27669@asutoshd-ics.in.qualcomm.com/)
+- [RPMB HS400 fix](https://lkml.iu.edu/hypermail/linux/kernel/2107.1/10560.html)
 
 ---
 
-### Mailing List
+### KernelNewbies.org
 
-**الـ linux-mmc mailing list** هو المكان الرسمي لمناقشات الـ MMC subsystem:
+الـ [kernelnewbies.org](https://kernelnewbies.org) بيوثّق التغييرات في كل kernel version — الـ MMC اتطوّر عبر releases كتير:
 
-- **Email:** `linux-mmc@vger.kernel.org`
-- **Archive:** [lore.kernel.org/linux-mmc](https://lore.kernel.org/linux-mmc/)
-- **Maintainer حالي:** Ulf Hansson — اتبع patches بتاعته عشان تفهم اتجاه الـ subsystem
-
-مناقشات مهمة اتعملت على الـ list:
-- HS400 init sequence و علاقته بـ HS200
-- CMDQ hardware vs software queue tradeoffs
-- Power management و BKOPS scheduling
-- RPMB كـ character device مستقل
-
----
-
-### مصادر eLinux.org
-
-- [Tests: eMMC 8-bit width](https://elinux.org/Tests:eMMC-8bit-width) — اختبار الـ 8-bit bus width للـ eMMC
-- [Tests: SDIO KS7010](https://elinux.org/Tests:SDIO-KS7010) — مثال على SDIO driver testing
-- [MMC initialization error troubleshooting](https://elinux.org/Thread:Talk:R-Car/Boards/M3SK/Booting_of_kernel_stops_at_23.047503_mmc0:_error_-110_whilst_initialising_MMC_card_(5)) — error -110 أثناء الـ MMC init — مفيد للـ debugging
+| الـ Release | التغيير |
+|-------------|---------|
+| [Linux 2.6.12](https://kernelnewbies.org/Linux_2_6_12) | أول SD protocol support |
+| [Linux 2.6.17](https://kernelnewbies.org/Linux_2_6_17) | SDHCI driver، AT91 MMC |
+| [Linux 2.6.28](https://kernelnewbies.org/Linux_2_6_28) | SDIO high-speed، atmel-mci DMA |
+| [Linux 2.6.31](https://kernelnewbies.org/Linux_2_6_31) | via-sdmmc driver، CB710 reader |
+| [Linux 2.6.32](https://kernelnewbies.org/Linux_2_6_32) | dm365 MMC/SD support |
+| [Linux 4.9](https://kernelnewbies.org/Linux_4.9) | Arria10 SD-MMC EDAC |
+| [LinuxChanges](https://kernelnewbies.org/LinuxChanges) | قائمة شاملة بكل التغييرات |
 
 ---
 
-### مصادر Kernel Newbies
+### eLinux.org
 
-**الـ kernel changelogs** بتوثق كل تغيير مهم في الـ MMC subsystem:
+الـ [elinux.org](https://elinux.org) مهم لـ embedded Linux وتشغيل MMC/SD على boards حقيقية:
 
-| الإصدار | ما اتغير في الـ MMC |
-|---------|---------------------|
-| [Linux 2.6.24](https://kernelnewbies.org/Linux_2_6_24) | SDIO support + MMC over SPI — تحول كبير في الـ subsystem |
-| [Linux 3.9](https://kernelnewbies.org/Linux_3.9) | تحسينات الـ eMMC partitioning |
-| [Linux 4.10](https://kernelnewbies.org/Linux_4.10) | HS400 enhanced strobe |
-| [Linux 6.1](https://kernelnewbies.org/Linux_6.1) | MMC updates مستمرة |
-| [Linux 6.5](https://kernelnewbies.org/Linux_6.5) | تحسينات الـ CMDQ والـ power management |
-| [Linux 6.8](https://kernelnewbies.org/Linux_6.8) | MMC driver improvements |
-| [Linux 6.12](https://kernelnewbies.org/Linux_6.12) | أحدث تحديثات الـ MMC subsystem |
+- **[Tests:eMMC-HS](https://elinux.org/Tests:eMMC-HS)** — اختبار HS200 على eMMC فعلي مع boot log samples
+- **[Tests:SDHI-CMD23](https://elinux.org/Tests:SDHI-CMD23)** — اختبار SDHI مع `CONFIG_MMC_SDHI` و`CONFIG_MMC_DEBUG`
+- **[EVM Second MMC / SD](https://elinux.org/Second_MMC_/_SD)** — إضافة second MMC slot على TI EVM boards
+- **[AM335x recovery](https://elinux.org/AM335x_recovery)** — recovery باستخدام SD card images
 
 ---
 
-### الكتب المرجعية
+### الكتب الموصى بها
 
-#### Linux Device Drivers, 3rd Edition (LDD3)
-- **المؤلفون:** Jonathan Corbet, Alessandro Rubini, Greg Kroah-Hartman
-- **الفصل المهم:** Chapter 17 — Network Drivers (للـ pattern)، وفهم block device layer
-- **ملاحظة:** الـ mmc.h نفسه بيشكر Corbet و Rubini في الـ copyright header — دليل على تأثيرهم
-- **متاح مجاناً:** [lwn.net/Kernel/LDD3](https://lwn.net/Kernel/LDD3/)
+#### Linux Device Drivers (LDD3) — Corbet, Rubini, Kroah-Hartman
+المرجع الكلاسيكي لكتابة الـ kernel drivers. الطبعة المجانية:
+[https://lwn.net/Kernel/LDD3/](https://lwn.net/Kernel/LDD3/)
 
-#### Linux Kernel Development, 3rd Edition — Robert Love
-- **الفصل:** Chapter 14 — The Block I/O Layer
-- **الأهمية:** يشرح الـ block layer اللي الـ MMC بيتعامل معاه
-- الـ `mmc_request`, الـ `mmc_data`, وربطهم بالـ `bio` structure
+الفصول ذات الصلة:
+- **Chapter 3**: Char Drivers — فهم الـ device model الأساسي
+- **Chapter 13**: USB Drivers — نفس مفاهيم الـ bus/device/driver تنطبق على MMC
+- **Chapter 14**: The Linux Device Model
 
-#### Embedded Linux Primer — Christopher Hallinan
-- **الفصل:** Chapter 9 — File Systems
-- **الأهمية:** بيغطي الـ flash storage وإزاي الـ MMC/eMMC بيتعامل مع الـ embedded systems
-- الـ eMMC partitioning strategy وتهيئة الـ boot partition
+#### Linux Kernel Development — Robert Love (3rd Edition)
+- **Chapter 13**: The Virtual Filesystem — فهم كيف الـ block layer يتعامل مع الـ storage
+- **Chapter 14**: The Block I/O Layer — مباشرةً متعلق بكيف الـ MMC block driver يرسل requests
+- **Chapter 17**: Devices and Modules — device registration وـ sysfs
 
-#### Professional Embedded ARM Development
-- بيتناول الـ MMC controller configuration في الـ ARM SoCs
-- مفيد لفهم الـ host controller side بدل ما تبص بس على الـ card side
+#### Embedded Linux Primer — Christopher Hallinan (2nd Edition)
+- **Chapter 9**: File Systems — eMMC partitioning وـ boot partition
+- **Chapter 14**: Bootloaders — كيف الـ bootloader يتعامل مع MMC قبل الـ kernel
+
+#### Professional Linux Kernel Architecture — Wolfgang Mauerer
+- **Chapter 6**: Device Drivers — تغطية شاملة للـ driver model
+- بيشرح الـ `struct bus_type`، `struct device_driver`، وكيف الـ MMC core يستخدمهم
 
 ---
 
-### أدوات عملية
+### أدوات مساعدة
 
 #### mmc-utils
-أداة userspace الرسمية للتعامل مع الـ eMMC:
+الأداة الرسمية للتعامل مع MMC/eMMC من userspace:
 
 ```bash
 # تثبيت
-apt install mmc-utils        # Debian/Ubuntu
-dnf install mmc-utils        # Fedora
+apt install mmc-utils  # Debian/Ubuntu
 
-# أمثلة عملية
-mmc extcsd read /dev/mmcblk0              # قراءة كل الـ EXT_CSD
-mmc status get /dev/mmcblk0               # R1 status
-mmc bkops-en auto /dev/mmcblk0           # تفعيل Auto BKOPS
-mmc sanitize /dev/mmcblk0                # تشغيل Sanitize
-mmc bootpart enable 1 1 /dev/mmcblk0    # تفعيل boot partition
+# قراءة EXT_CSD كاملة
+mmc extcsd read /dev/mmcblk0
 
-# Source code
-git clone git://git.kernel.org/pub/scm/linux/kernel/git/cjb/mmc-utils.git
+# معرفة نوع الكارت وسرعته
+mmc status get /dev/mmcblk0
+
+# تفعيل BKOPS
+mmc bkops enable /dev/mmcblk0
 ```
 
-#### sysfs interface
+- المصدر: [https://git.kernel.org/pub/scm/linux/kernel/git/cjb/mmc-utils.git](https://git.kernel.org/pub/scm/linux/kernel/git/cjb/mmc-utils.git)
+- التوثيق الرسمي: [https://static.lwn.net/kerneldoc/driver-api/mmc/mmc-tools.html](https://static.lwn.net/kerneldoc/driver-api/mmc/mmc-tools.html)
 
-```bash
-# معلومات الـ card
-cat /sys/class/mmc_host/mmc0/mmc0:0001/name
-cat /sys/class/mmc_host/mmc0/mmc0:0001/type
-cat /sys/class/mmc_host/mmc0/mmc0:0001/date
+#### JEDEC Standards
+الـ specs الأصلية — مطلوبة لفهم كل field في الـ header:
 
-# EXT_CSD كـ raw hex
-cat /sys/kernel/debug/mmc0/mmc0:0001/ext_csd
-
-# الـ speed mode الحالي
-cat /sys/class/mmc_host/mmc0/mmc0:0001/speed_class
-```
+| الـ Spec | المحتوى |
+|----------|---------|
+| JESD84-B51 | eMMC 5.1 — يغطي CMDQ، HS400، BKOPS |
+| JESD84-A441 | eMMC 4.41 — الأساس |
+| SD Physical Layer Simplified Specification | SD commands وـ registers |
 
 ---
 
-### مصطلحات للبحث
+### مصطلحات البحث
 
-لو عايز تعمق أكتر، استخدم الـ search terms دي:
-
-```
-# في kernel source
-grep -r "EXT_CSD_CARD_TYPE" drivers/mmc/
-grep -r "mmc_select_hs400" drivers/mmc/core/
-grep -r "MMC_CMDQ" include/linux/mmc/
-
-# في LWN.net
-"MMC command queuing" site:lwn.net
-"eMMC reliable write" site:lwn.net
-"MMC power management BKOPS" site:lwn.net
-
-# في mailing list archive
-"EXT_CSD_CMDQ_SUPPORT" site:lore.kernel.org
-"HS400ES enhanced strobe" site:lore.kernel.org
-"MMC_SEND_TUNING_BLOCK" site:lore.kernel.org
-
-# في patchwork
-"mmc: core:" site:patchwork.kernel.org
-```
-
----
-
-### الـ JEDEC Specification
-
-الـ source الأساسي لكل constants في `mmc.h` هو الـ JEDEC standard:
-
-- **JESD84-B51** — eMMC 5.1 Specification (الأحدث المدعوم في الـ kernel)
-- **JESD84-A441** — eMMC 4.41 (الأساس التاريخي)
-- متاح من: [jedec.org](https://www.jedec.org/standards-documents/docs/jesd84-b51)
-- **كل** `EXT_CSD_*` macro في `mmc.h` له رقم byte مقابل في الـ spec
-
----
-
-### خلاصة تدرجية للتعلم
+للبحث عن معلومات إضافية استخدم الـ search terms دي:
 
 ```
-1. ابدأ بـ mmc.h نفسه — اقرأ الـ commands والـ EXT_CSD fields
-   ↓
-2. اقرأ JEDEC JESD84-B51 للـ spec الأصلي
-   ↓
-3. اتبع drivers/mmc/core/mmc.c لترى كيف يُستخدم كل macro
-   ↓
-4. استخدم mmc-utils عملياً على hardware حقيقي
-   ↓
-5. اقرأ LWN articles عن CMDQ وRPMB
-   ↓
-6. تابع linux-mmc@vger.kernel.org للتطورات الجديدة
+# للبحث في LWN
+site:lwn.net "MMC" OR "eMMC" linux kernel
+
+# للبحث في LKML
+site:lkml.org mmc EXT_CSD linux
+
+# للبحث عن specs
+JESD84-B51 eMMC 5.1 specification
+
+# للبحث عن الكود مباشرة
+git log --oneline --follow -- include/linux/mmc/mmc.h
+git grep "EXT_CSD_CMDQ" -- drivers/mmc/
+
+# للبحث في Patchwork
+site:patchwork.kernel.org "linux-mmc" EXT_CSD
 ```
+
+الـ subsystem maintainer حالياً هو **Ulf Hansson** — ابحث عن patches باسمه على LKML لتتابع أحدث التطورات.
 ## Phase 8: Writing simple module
 
 ### الفكرة
 
-**الـ** `mmc_send_status` هي function مُصدَّرة بـ `EXPORT_SYMBOL_GPL` في `drivers/mmc/core/mmc_ops.c`. بتبعت **الـ** `MMC_SEND_STATUS` (CMD13) للكارت وبترجع الـ R1 status register — ده اللي بيحصل كل ما الـ kernel يحتاج يعرف حالة الكارت (أثناء write / erase / busy-poll). Hook على الـ function ده مفيد جداً لمراقبة نشاط الـ MMC/eMMC بدون أي تعديل في الـ MMC subsystem.
-
-سنستخدم **kprobe** على `mmc_send_status` عشان نطبع اسم الـ host والـ RCA (Relative Card Address) لكل استعلام حالة.
+الـ tracepoint الأنسب للـ hook هو **`mmc_request_start`** المعرَّف في `include/trace/events/mmc.h`.
+ده tracepoint بيتطلق كل ما الـ MMC core بيبعت request للكارت (read/write/command)، ومعاه `struct mmc_host` و`struct mmc_request` اللي بيحتووا على كل التفاصيل: opcode, arg, blocks, blk_addr.
 
 ---
 
@@ -2937,124 +3075,138 @@ grep -r "MMC_CMDQ" include/linux/mmc/
 ```c
 // SPDX-License-Identifier: GPL-2.0
 /*
- * mmc_status_probe.c
+ * mmc_tracer.c — Hook mmc_request_start tracepoint to log every MMC command.
  *
- * kprobe on mmc_send_status() — fires every time the kernel polls
- * an MMC/eMMC card's R1 status register (CMD13).
+ * Tested on Linux 6.x with CONFIG_TRACEPOINTS=y and CONFIG_MMC=m/y.
+ * Build with the Makefile below, then: insmod mmc_tracer.ko
  */
 
-#include <linux/kernel.h>      /* pr_info, pr_err                    */
-#include <linux/module.h>      /* MODULE_* macros, module_init/exit  */
-#include <linux/kprobes.h>     /* struct kprobe, register_kprobe()   */
-#include <linux/mmc/card.h>    /* struct mmc_card, card->host, ->rca */
-#include <linux/mmc/host.h>    /* struct mmc_host, mmc_hostname()    */
-#include <linux/mmc/mmc.h>     /* MMC_SEND_STATUS, R1_CURRENT_STATE  */
+#include <linux/module.h>       /* MODULE_*, module_init/exit          */
+#include <linux/kernel.h>       /* pr_info()                           */
+#include <linux/tracepoint.h>   /* register_trace_*, tracepoint_probe_ */
+#include <linux/mmc/core.h>     /* struct mmc_host, mmc_request, mmc_command, mmc_data */
+#include <linux/mmc/mmc.h>      /* MMC_READ_SINGLE_BLOCK, MMC_WRITE_BLOCK, opcodes */
 
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR("MMC Probe Demo");
-MODULE_DESCRIPTION("kprobe on mmc_send_status to trace CMD13 card-status polls");
-
-/*
- * pre_handler — runs just BEFORE mmc_send_status() executes.
- *
- * Prototype of the hooked function:
- *   int mmc_send_status(struct mmc_card *card, u32 *status)
- *
- * On x86-64:
- *   regs->di == first arg  (struct mmc_card *card)
- *   regs->si == second arg (u32 *status)          -- not used here
- */
-static int handler_pre(struct kprobe *p, struct pt_regs *regs)
+/* ------------------------------------------------------------------ *
+ * Callback — called every time mmc_request_start fires               *
+ * ------------------------------------------------------------------ */
+static void probe_mmc_request_start(void *ignore,
+                                    struct mmc_host *host,
+                                    struct mmc_request *mrq)
 {
-    /* Cast the first argument register to the expected pointer type */
-    struct mmc_card *card = (struct mmc_card *)regs->di;
+    const char *dir = "NONE";
+    u32  opcode   = 0;
+    u32  arg      = 0;
+    unsigned int blocks = 0;
+    unsigned int blk_addr = 0;
 
-    if (!card || !card->host)
-        return 0;   /* safety check — never deref a NULL in a probe */
+    /* Extract command fields safely — cmd may be NULL for data-only requests */
+    if (mrq->cmd) {
+        opcode = mrq->cmd->opcode;
+        arg    = mrq->cmd->arg;
+    }
 
-    /*
-     * mmc_hostname() returns the host's device name string (e.g. "mmc0").
-     * card->rca is the 16-bit Relative Card Address assigned during
-     * MMC_SET_RELATIVE_ADDR (CMD3).
-     */
-    pr_info("mmc_status_probe: [%s] CMD13 (SEND_STATUS) for RCA=0x%04x\n",
-            mmc_hostname(card->host),
-            card->rca);
+    /* Determine transfer direction from data flags */
+    if (mrq->data) {
+        blocks   = mrq->data->blocks;
+        blk_addr = mrq->data->blk_addr;
 
-    return 0; /* non-zero return would skip the original function — we don't want that */
+        if (mrq->data->flags & MMC_DATA_READ)
+            dir = "READ";
+        else if (mrq->data->flags & MMC_DATA_WRITE)
+            dir = "WRITE";
+        else
+            dir = "OTHER";
+    }
+
+    pr_info("mmc_tracer: host=%s opcode=CMD%u arg=0x%08x dir=%s "
+            "blocks=%u blk_addr=0x%x\n",
+            mmc_hostname(host),   /* e.g. "mmc0"                       */
+            opcode,               /* e.g. 18 = READ_MULTIPLE_BLOCK      */
+            arg,                  /* address or RCA depending on opcode */
+            dir,
+            blocks,
+            blk_addr);
+
+    /* Flag dangerous commands — erase on a production device */
+    if (opcode == MMC_ERASE)
+        pr_warn("mmc_tracer: *** ERASE command detected on %s! ***\n",
+                mmc_hostname(host));
 }
 
-/*
- * post_handler — runs just AFTER mmc_send_status() returns.
- *
- * Here we have access to the return value in regs->ax.
- * We only log errors (non-zero return means I/O error on CMD13).
- */
-static void handler_post(struct kprobe *p, struct pt_regs *regs,
-                         unsigned long flags)
-{
-    long ret = regs_return_value(regs); /* portable way to read return val */
-
-    if (ret)
-        pr_warn("mmc_status_probe: mmc_send_status returned error %ld\n", ret);
-}
-
-/* kprobe descriptor — ties the symbol name to our handlers */
-static struct kprobe kp = {
-    .symbol_name = "mmc_send_status",
-    .pre_handler  = handler_pre,
-    .post_handler = handler_post,
-};
-
-static int __init mmc_probe_init(void)
+/* ------------------------------------------------------------------ *
+ * module_init — register the tracepoint probe                        *
+ * ------------------------------------------------------------------ */
+static int __init mmc_tracer_init(void)
 {
     int ret;
 
     /*
-     * register_kprobe() looks up "mmc_send_status" in the kernel symbol
-     * table, patches a breakpoint (int3 on x86) at the function entry,
-     * and registers our handlers. Returns 0 on success.
+     * register_trace_mmc_request_start() macro-generated by TRACE_EVENT.
+     * Associates our callback with the tracepoint.
+     * NULL = no private data passed to the probe (we use the mrq directly).
      */
-    ret = register_kprobe(&kp);
-    if (ret < 0) {
-        pr_err("mmc_status_probe: register_kprobe failed: %d\n", ret);
+    ret = register_trace_mmc_request_start(probe_mmc_request_start, NULL);
+    if (ret) {
+        pr_err("mmc_tracer: failed to register tracepoint: %d\n", ret);
         return ret;
     }
 
-    pr_info("mmc_status_probe: kprobe planted at %s (addr=%px)\n",
-            kp.symbol_name, kp.addr);
+    pr_info("mmc_tracer: loaded — watching all MMC requests\n");
     return 0;
 }
 
-static void __exit mmc_probe_exit(void)
+/* ------------------------------------------------------------------ *
+ * module_exit — mandatory unregister to avoid dangling callback ptr  *
+ * ------------------------------------------------------------------ */
+static void __exit mmc_tracer_exit(void)
 {
     /*
-     * unregister_kprobe() MUST be called in exit — it removes the
-     * breakpoint and ensures no CPU is still inside our handler
-     * before the module pages are freed. Skipping this = kernel panic.
+     * unregister_trace_mmc_request_start() removes our callback.
+     * tracepoint_synchronize_unregister() waits for any in-flight RCU
+     * read-side sections that might still be executing the probe.
+     * Skipping this can cause a use-after-free when the module is unloaded.
      */
-    unregister_kprobe(&kp);
-    pr_info("mmc_status_probe: kprobe removed from %s\n", kp.symbol_name);
+    unregister_trace_mmc_request_start(probe_mmc_request_start, NULL);
+    tracepoint_synchronize_unregister();
+    pr_info("mmc_tracer: unloaded\n");
 }
 
-module_init(mmc_probe_init);
-module_exit(mmc_probe_exit);
+module_init(mmc_tracer_init);
+module_exit(mmc_tracer_exit);
+
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("MMC Learner");
+MODULE_DESCRIPTION("Trace every MMC request via mmc_request_start tracepoint");
 ```
 
 ---
 
-### Makefile لبناء الـ Module
+### Makefile
 
 ```makefile
-obj-m += mmc_status_probe.o
-
-KDIR  ?= /lib/modules/$(shell uname -r)/build
+obj-m += mmc_tracer.o
 
 all:
-	make -C $(KDIR) M=$(PWD) modules
+	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules
 
 clean:
-	make -C $(KDIR) M=$(PWD) clean
+	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean
+```
+
+```bash
+# Build and load
+make
+sudo insmod mmc_tracer.ko
+
+# Watch output
+sudo dmesg -w | grep mmc_tracer
+
+# Trigger some I/O on the eMMC/SD card
+dd if=/dev/mmcblk0 of=/dev/null bs=4K count=32
+
+# Unload
+sudo rmmod mmc_tracer
 ```
 
 ---
@@ -3065,54 +3217,46 @@ clean:
 
 | Header | السبب |
 |--------|-------|
-| `linux/kprobes.h` | يعرّف `struct kprobe`، `register_kprobe()`، `unregister_kprobe()` |
-| `linux/mmc/card.h` | يعرّف `struct mmc_card` اللي فيه `->host` و`->rca` |
-| `linux/mmc/host.h` | يعرّف `struct mmc_host` والـ macro الـ `mmc_hostname()` |
-| `linux/mmc/mmc.h` | تعريفات الـ commands زي `MMC_SEND_STATUS` وبتات الـ R1 status |
+| `linux/module.h` | ماكروهات `MODULE_*` و `module_init/exit` |
+| `linux/tracepoint.h` | `register_trace_*` و `tracepoint_synchronize_unregister` |
+| `linux/mmc/core.h` | تعريفات `struct mmc_host`, `struct mmc_request`, `struct mmc_data` |
+| `linux/mmc/mmc.h` | ماكروهات الـ opcodes زي `MMC_ERASE`, `MMC_READ_MULTIPLE_BLOCK` و `mmc_hostname()` |
 
-الـ `mmc.h` هو ملفنا المحوري — من غيره مش هنعرف نفهم أرقام الـ opcodes أو بتات الـ response.
-
-#### الـ `handler_pre`
-
-الـ pre_handler بيتشغل قبل تنفيذ `mmc_send_status` مباشرةً. بنقرأ الـ `regs->di` (على x86-64 هو أول argument حسب ABI) وبنعامله كـ `struct mmc_card *` عشان نطلع منه اسم الـ host وقيمة الـ RCA — ده بيدّينا context واضح لكل استعلام CMD13.
-
-#### الـ `handler_post`
-
-الـ post_handler بيتشغل بعد ما الـ function ترجع. بنستخدم `regs_return_value()` بدل `regs->ax` مباشرةً عشان الكود يشتغل على أكتر من architecture. بنطبع error بس لو الـ return value مش صفر — ده مفيد للتشخيص بدون إغراق الـ dmesg.
-
-#### الـ `struct kprobe`
-
-**الـ** `.symbol_name` بيقول للـ kernel فين يحط الـ breakpoint بالاسم بدل العنوان — أسهل وأأمن. لو الـ symbol مش موجود أو مش قابل للـ probe، الـ `register_kprobe` بترجع error في init وبيمنع تحميل الـ module.
-
-#### الـ `module_init` / `module_exit`
-
-`register_kprobe` في الـ init بيزرع الـ probe في الـ kernel. `unregister_kprobe` في الـ exit **إجباري** — لو المودول اتأزّل من غيره، الـ CPU هيكمل تنفيذ بعد الـ breakpoint في كود مش موجود، وده kernel panic فوري.
+**الـ** `trace/events/mmc.h` مش بنضمّه مباشرة في الـ module — الـ kernel بيعمل `EXPORT_TRACEPOINT_SYMBOL_GPL` للـ tracepoint، والـ `register_trace_mmc_request_start` بيتوفر من الـ kernel اللي بنبني ضده.
 
 ---
 
-### تجربة الـ Module
+#### الـ Probe Callback
 
-```bash
-# بناء المودول
-make
-
-# تحميله
-sudo insmod mmc_status_probe.ko
-
-# مشاهدة الـ log (الـ CMD13 بيتعمل كتير أثناء أي I/O على eMMC)
-sudo dmesg -w | grep mmc_status_probe
-
-# إزالته
-sudo rmmod mmc_status_probe
+```c
+static void probe_mmc_request_start(void *ignore,
+                                    struct mmc_host *host,
+                                    struct mmc_request *mrq)
 ```
 
-مثال على الـ output المتوقع في `dmesg`:
+- **`void *ignore`** — الـ data pointer اللي بنديه لـ `register_trace_*`؛ احنا بعّتنا `NULL` فمش بنستخدمه.
+- **`struct mmc_host *host`** — يمثل الـ controller نفسه (مثلاً `mmc0`)، بنجيب منه `mmc_hostname()` عشان نعرف على أنهي slot.
+- **`struct mmc_request *mrq`** — الـ request الكامل اللي بيتبعت للكارت، بيتضمن `cmd` و `data` و `stop`؛ كلهم ممكن يكونوا `NULL` فلازم نعمل check قبل ما نوصل للـ fields.
 
-```
-mmc_status_probe: kprobe planted at mmc_send_status (addr=ffffffffc0a1b340)
-mmc_status_probe: [mmc0] CMD13 (SEND_STATUS) for RCA=0x0001
-mmc_status_probe: [mmc0] CMD13 (SEND_STATUS) for RCA=0x0001
-mmc_status_probe: [mmc0] CMD13 (SEND_STATUS) for RCA=0x0001
+الـ callback بيطبع: اسم الـ host، رقم الـ opcode (CMD18 = READ_MULTIPLE_BLOCK مثلاً)، الـ arg (عنوان البلوك)، الاتجاه (READ/WRITE)، وعدد البلوكات. لو الـ opcode كان `MMC_ERASE` بيطلع `pr_warn` تحذيري.
+
+---
+
+#### الـ module_init
+
+```c
+ret = register_trace_mmc_request_start(probe_mmc_request_start, NULL);
 ```
 
-كل سطر بيقابل **busy-poll** واحدة — يعني الـ kernel كان بيستنّى الكارت يخلّص write أو erase ويرجع للـ `TRAN` state.
+الـ macro ده بيضيف الـ callback في قائمة الـ probes الخاصة بالـ tracepoint باستخدام RCU. لو الـ tracepoint مش موجود في الـ kernel (مثلاً `CONFIG_TRACEPOINTS=n`) بيرجع error ومش بنكمل.
+
+---
+
+#### الـ module_exit
+
+```c
+unregister_trace_mmc_request_start(probe_mmc_request_start, NULL);
+tracepoint_synchronize_unregister();
+```
+
+الـ `unregister_trace_*` بيشيل الـ callback من القائمة، لكن ممكن يكون في thread لسه بيشغّل الـ callback في نفس اللحظة (RCU grace period). الـ `tracepoint_synchronize_unregister()` بتستنى لحد ما كل الـ readers الحاليين يخلصوا — من غيرها الـ kernel هيـ call pointer لكود اتحذف وهيحصل kernel panic.
