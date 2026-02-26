@@ -112,6 +112,7 @@ K:	devm_gpiod_unhinge
 - [ ] [gpio-regmap.c](drivers/gpio/gpio-regmap.c.md)
 - [ ] [gpio-generic.c](drivers/gpio/gpio-generic.c.md)
 - [ ] [gpio-mmio.c](drivers/gpio/gpio-mmio.c.md)
+- [ ] [gpiolib.h](drivers/gpio/gpiolib.h.md)
 
 
 ## `I2C SUBSYSTEM`
@@ -866,6 +867,319 @@ F:	drivers/pwm/*.rs
 ```
 ```
 
+
+## `AUXILIARY BUS DRIVER`
+
+```
+M:	Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+M:	"Rafael J. Wysocki" <rafael@kernel.org>
+M:	Danilo Krummrich <dakr@kernel.org>
+R:	Dave Ertman <david.m.ertman@intel.com>
+R:	Ira Weiny <ira.weiny@intel.com>
+R:	Leon Romanovsky <leon@kernel.org>
+L:	driver-core@lists.linux.dev
+S:	Supported
+T:	git git://git.kernel.org/pub/scm/linux/kernel/git/driver-core/driver-core.git
+F:	Documentation/driver-api/auxiliary_bus.rst
+F:	drivers/base/auxiliary.c
+F:	include/linux/auxiliary_bus.h
+F:	rust/helpers/auxiliary.c
+F:	rust/kernel/auxiliary.rs
+F:	samples/rust/rust_driver_auxiliary.rs
+```
+
+## `BITMAP API`
+
+```
+M:	Yury Norov <yury.norov@gmail.com>
+R:	Rasmus Villemoes <linux@rasmusvillemoes.dk>
+S:	Maintained
+F:	include/linux/bitfield.h
+F:	include/linux/bitmap-str.h
+F:	include/linux/bitmap.h
+F:	include/linux/bits.h
+F:	include/linux/cpumask.h
+F:	include/linux/cpumask_types.h
+F:	include/linux/find.h
+F:	include/linux/hw_bitfield.h
+F:	include/linux/nodemask.h
+F:	include/linux/nodemask_types.h
+F:	include/uapi/linux/bits.h
+F:	include/vdso/bits.h
+F:	lib/bitmap-str.c
+F:	lib/bitmap.c
+F:	lib/cpumask.c
+F:	lib/find_bit.c
+F:	lib/find_bit_benchmark.c
+F:	lib/test_bitmap.c
+F:	lib/tests/cpumask_kunit.c
+F:	tools/include/linux/bitfield.h
+F:	tools/include/linux/bitmap.h
+F:	tools/include/linux/bits.h
+F:	tools/include/linux/find.h
+F:	tools/include/uapi/linux/bits.h
+F:	tools/include/vdso/bits.h
+F:	tools/lib/bitmap.c
+F:	tools/lib/find_bit.c
+```
+
+## `ATOMIC INFRASTRUCTURE`
+
+```
+M:	Will Deacon <will@kernel.org>
+M:	Peter Zijlstra <peterz@infradead.org>
+M:	Boqun Feng <boqun@kernel.org>
+R:	Mark Rutland <mark.rutland@arm.com>
+R:	Gary Guo <gary@garyguo.net>
+L:	linux-kernel@vger.kernel.org
+S:	Maintained
+F:	Documentation/atomic_*.txt
+F:	arch/*/include/asm/atomic*.h
+F:	include/*/atomic*.h
+F:	include/linux/refcount.h
+F:	scripts/atomic/
+F:	rust/kernel/sync/atomic.rs
+F:	rust/kernel/sync/atomic/
+F:	rust/kernel/sync/refcount.rs
+```
+
+## `BITOPS API`
+
+```
+M:	Yury Norov <yury.norov@gmail.com>
+R:	Rasmus Villemoes <linux@rasmusvillemoes.dk>
+S:	Maintained
+F:	arch/*/include/asm/bitops.h
+F:	arch/*/include/asm/bitops_32.h
+F:	arch/*/include/asm/bitops_64.h
+F:	arch/*/lib/bitops.c
+F:	include/asm-generic/bitops
+F:	include/asm-generic/bitops.h
+F:	include/linux/bitops.h
+F:	include/linux/count_zeros.h
+F:	lib/hweight.c
+F:	lib/test_bitops.c
+F:	lib/tests/bitops_kunit.c
+F:	tools/*/bitops*
+```
+
+## `BLOCK LAYER`
+
+```
+M:	Jens Axboe <axboe@kernel.dk>
+L:	linux-block@vger.kernel.org
+S:	Maintained
+T:	git git://git.kernel.org/pub/scm/linux/kernel/git/axboe/linux.git
+F:	Documentation/ABI/stable/sysfs-block
+F:	Documentation/block/
+F:	block/
+F:	drivers/block/
+F:	include/linux/bio.h
+F:	include/linux/blk*
+F:	include/uapi/linux/blk*
+F:	include/uapi/linux/ioprio.h
+F:	kernel/trace/blktrace.c
+F:	lib/sbitmap.c
+```
+
+## `CPU FREQUENCY SCALING FRAMEWORK`
+
+```
+M:	"Rafael J. Wysocki" <rafael@kernel.org>
+M:	Viresh Kumar <viresh.kumar@linaro.org>
+L:	linux-pm@vger.kernel.org
+S:	Maintained
+B:	https://bugzilla.kernel.org
+T:	git git://git.kernel.org/pub/scm/linux/kernel/git/rafael/linux-pm.git
+T:	git git://git.kernel.org/pub/scm/linux/kernel/git/vireshk/pm.git (For ARM Updates)
+F:	Documentation/admin-guide/pm/cpufreq.rst
+F:	Documentation/admin-guide/pm/intel_pstate.rst
+F:	Documentation/cpu-freq/
+F:	Documentation/devicetree/bindings/cpufreq/
+F:	drivers/cpufreq/
+F:	include/linux/cpufreq.h
+F:	include/linux/sched/cpufreq.h
+F:	kernel/sched/cpufreq*.c
+F:	rust/kernel/cpufreq.rs
+F:	tools/testing/selftests/cpufreq/
+```
+
+## `CPU HOTPLUG`
+
+```
+M:	Thomas Gleixner <tglx@kernel.org>
+M:	Peter Zijlstra <peterz@infradead.org>
+L:	linux-kernel@vger.kernel.org
+S:	Maintained
+T:	git git://git.kernel.org/pub/scm/linux/kernel/git/tip/tip.git smp/core
+F:	include/linux/cpu.h
+F:	include/linux/cpuhotplug.h
+F:	include/linux/smpboot.h
+F:	kernel/cpu.c
+F:	kernel/smpboot.*
+F:	rust/helpers/cpu.c
+F:	rust/kernel/cpu.rs
+```
+
+## `DEVICE RESOURCE MANAGEMENT HELPERS`
+
+```
+M:	Hans de Goede <hansg@kernel.org>
+R:	Matti Vaittinen <mazziesaccount@gmail.com>
+S:	Maintained
+F:	include/linux/devm-helpers.h
+```
+
+## `DRIVER CORE, KOBJECTS, DEBUGFS AND SYSFS`
+
+```
+M:	Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+M:	"Rafael J. Wysocki" <rafael@kernel.org>
+M:	Danilo Krummrich <dakr@kernel.org>
+L:	driver-core@lists.linux.dev
+S:	Supported
+T:	git git://git.kernel.org/pub/scm/linux/kernel/git/driver-core/driver-core.git
+F:	Documentation/core-api/kobject.rst
+F:	Documentation/driver-api/driver-model/
+F:	drivers/base/
+F:	fs/debugfs/
+F:	fs/sysfs/
+F:	include/linux/device/
+F:	include/linux/debugfs.h
+F:	include/linux/device.h
+F:	include/linux/fwnode.h
+F:	include/linux/kobj*
+F:	include/linux/property.h
+F:	include/linux/sysfs.h
+F:	lib/kobj*
+F:	rust/kernel/debugfs.rs
+F:	rust/kernel/debugfs/
+F:	rust/kernel/device.rs
+F:	rust/kernel/device/
+F:	rust/kernel/device_id.rs
+F:	rust/kernel/devres.rs
+F:	rust/kernel/driver.rs
+F:	rust/kernel/faux.rs
+F:	rust/kernel/platform.rs
+F:	rust/kernel/soc.rs
+F:	samples/rust/rust_debugfs.rs
+F:	samples/rust/rust_debugfs_scoped.rs
+F:	samples/rust/rust_driver_platform.rs
+F:	samples/rust/rust_driver_faux.rs
+F:	samples/rust/rust_soc.rs
+```
+
+## `ETHERNET PHY LIBRARY`
+
+```
+M:	Andrew Lunn <andrew@lunn.ch>
+M:	Heiner Kallweit <hkallweit1@gmail.com>
+R:	Russell King <linux@armlinux.org.uk>
+L:	netdev@vger.kernel.org
+S:	Maintained
+F:	Documentation/ABI/testing/sysfs-class-net-phydev
+F:	Documentation/devicetree/bindings/net/ethernet-connector.yaml
+F:	Documentation/devicetree/bindings/net/ethernet-phy.yaml
+F:	Documentation/devicetree/bindings/net/mdio*
+F:	Documentation/devicetree/bindings/net/qca,ar803x.yaml
+F:	Documentation/networking/phy-port.rst
+F:	Documentation/networking/phy.rst
+F:	drivers/net/mdio/
+F:	drivers/net/mdio/acpi_mdio.c
+F:	drivers/net/mdio/fwnode_mdio.c
+F:	drivers/net/mdio/of_mdio.c
+F:	drivers/net/pcs/
+F:	drivers/net/phy/
+F:	include/dt-bindings/net/qca-ar803x.h
+F:	include/linux/*mdio*.h
+F:	include/linux/linkmode.h
+F:	include/linux/mdio/*.h
+F:	include/linux/mii.h
+F:	include/linux/of_net.h
+F:	include/linux/phy.h
+F:	include/linux/phy_fixed.h
+F:	include/linux/phy_link_topology.h
+F:	include/linux/phylib_stubs.h
+F:	include/linux/platform_data/mdio-bcm-unimac.h
+F:	include/linux/platform_data/mdio-gpio.h
+F:	include/net/phy/
+F:	include/trace/events/mdio.h
+F:	include/uapi/linux/mdio.h
+F:	include/uapi/linux/mii.h
+F:	net/core/of_net.c
+```
+
+## `LOCKING PRIMITIVES`
+
+```
+M:	Peter Zijlstra <peterz@infradead.org>
+M:	Ingo Molnar <mingo@redhat.com>
+M:	Will Deacon <will@kernel.org>
+M:	Boqun Feng <boqun@kernel.org> (LOCKDEP & RUST)
+R:	Waiman Long <longman@redhat.com>
+L:	linux-kernel@vger.kernel.org
+S:	Maintained
+T:	git git://git.kernel.org/pub/scm/linux/kernel/git/tip/tip.git locking/core
+F:	Documentation/locking/
+F:	arch/*/include/asm/spinlock*.h
+F:	include/linux/local_lock*.h
+F:	include/linux/lockdep*.h
+F:	include/linux/mutex*.h
+F:	include/linux/rwlock*.h
+F:	include/linux/rwsem*.h
+F:	include/linux/seqlock.h
+F:	include/linux/spinlock*.h
+F:	kernel/locking/
+F:	lib/locking*.[ch]
+F:	rust/helpers/mutex.c
+F:	rust/helpers/spinlock.c
+F:	rust/kernel/sync/lock.rs
+F:	rust/kernel/sync/lock/
+F:	rust/kernel/sync/locked_by.rs
+X:	kernel/locking/locktorture.c
+```
+
+## `SECURITY SUBSYSTEM`
+
+```
+M:	Paul Moore <paul@paul-moore.com>
+M:	James Morris <jmorris@namei.org>
+M:	"Serge E. Hallyn" <serge@hallyn.com>
+L:	linux-security-module@vger.kernel.org
+S:	Supported
+Q:	https://patchwork.kernel.org/project/linux-security-module/list
+B:	mailto:linux-security-module@vger.kernel.org
+P:	https://github.com/LinuxSecurityModule/kernel/blob/main/README.md
+T:	git https://git.kernel.org/pub/scm/linux/kernel/git/pcmoore/lsm.git
+F:	include/linux/lsm/
+F:	include/linux/lsm_audit.h
+F:	include/linux/lsm_hook_defs.h
+F:	include/linux/lsm_hooks.h
+F:	include/linux/security.h
+F:	include/uapi/linux/lsm.h
+F:	security/
+F:	tools/testing/selftests/lsm/
+F:	rust/kernel/security.rs
+X:	security/selinux/
+K:	\bsecurity_[a-z_0-9]\+\b
+```
+
+## `XARRAY`
+
+```
+M:	Matthew Wilcox <willy@infradead.org>
+L:	linux-fsdevel@vger.kernel.org
+L:	linux-mm@kvack.org
+S:	Supported
+F:	Documentation/core-api/idr.rst
+F:	Documentation/core-api/xarray.rst
+F:	include/linux/idr.h
+F:	include/linux/xarray.h
+F:	lib/idr.c
+F:	lib/test_xarray.c
+F:	lib/xarray.c
+F:	tools/testing/radix-tree
+```
 
 
 
