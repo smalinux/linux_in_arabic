@@ -12,7 +12,7 @@ $ claude --dangerously-skip-permissions
 ```
 
 
-## `OPEN FIRMWARE`
+## `OPEN FIRMWARE` ✅
 ```
 OPEN FIRMWARE AND FLATTENED DEVICE TREE
 M:	Rob Herring <robh@kernel.org>
@@ -66,7 +66,7 @@ F:	include/dt-bindings/
 
 
 
-## `GPIO SUBSYSTEM`
+## `GPIO SUBSYSTEM` ✅
 ```
 M:	Linus Walleij <linusw@kernel.org>
 M:	Bartosz Golaszewski <brgl@kernel.org>
@@ -161,7 +161,7 @@ F:	include/dt-bindings/i2c/
 - [ ] [i2c-dev.h](include/linux/i2c-dev.h.md)
 - [ ] [i2c-smbus.h](include/linux/i2c-smbus.h.md)
 - [ ] [include/linux/i2c.h](include/linux/i2c.h.md)
-## `SPI SUBSYSTEM`
+## `SPI SUBSYSTEM` ✅
 
 ```
 M:	Mark Brown <broonie@kernel.org>
@@ -424,13 +424,13 @@ X:	drivers/clk/clkdev.c
 
 - [ ] [clk-divider.c](drivers/clk/clk-divider.c.md)
 - [ ] [clk-fixed-factor.c](drivers/clk/clk-fixed-factor.c.md)
-- [ ] drivers/clk/clk-fixed-rate.c
-- [ ] drivers/clk/clk-gate.c
-- [ ] drivers/clk/clk-multiplier.c
-- [ ] drivers/clk/clk-mux.c
-- [ ] drivers/clk/clk-composite.c
-- [ ] drivers/clk/clk-gpio.c
-- [ ] drivers/clk/clk-conf.c
+- [ ] [clk-fixed-rate.c](drivers/clk/clk-fixed-rate.c.md)
+- [ ] [clk-gate.c](drivers/clk/clk-gate.c.md)
+- [ ] [clk-multiplier.c](drivers/clk/clk-multiplier.c.md)
+- [ ] [clk-mux.c](drivers/clk/clk-mux.c.md)
+- [ ] [clk-composite.c](drivers/clk/clk-composite.c.md)
+- [ ] [clk-gpio.c](drivers/clk/clk-gpio.c.md)
+- [ ] [clk-conf.c](drivers/clk/clk-conf.c.md)
 
 - [ ] [clk.h](include/linux/clk.h.md)
 - [ ] [clk-provider.h](include/linux/clk-provider.h.md)
@@ -1030,7 +1030,7 @@ S:	Maintained
 F:	include/linux/devm-helpers.h
 ```
 
-## `DRIVER CORE, KOBJECTS, DEBUGFS AND SYSFS`
+## `DRIVER CORE, KOBJECTS, DEBUGFS AND SYSFS` ⭐
 
 ```
 M:	Greg Kroah-Hartman <gregkh@linuxfoundation.org>
@@ -1068,6 +1068,21 @@ F:	samples/rust/rust_driver_platform.rs
 F:	samples/rust/rust_driver_faux.rs
 F:	samples/rust/rust_soc.rs
 ```
+
+Documentation/core-api/kobject.rst
+Documentation/driver-api/driver-model/
+- [ ] include/linux/debugfs.h
+- [ ] include/linux/device.h
+- [ ] include/linux/fwnode.h
+- [ ] include/linux/kobject.h
+- [ ] include/linux/property.h
+- [ ] include/linux/sysfs.h
+
+- [ ] include/linux/device/bus.h
+- [ ] include/linux/device/class.h
+- [ ] include/linux/device/devres.h
+- [ ] include/linux/device/driver.h
+- [ ] include/linux/device/faux.h
 
 ## `ETHERNET PHY LIBRARY`
 

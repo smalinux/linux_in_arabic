@@ -1,220 +1,275 @@
 ## Phase 1: الصورة الكبيرة ببساطة
 
-### المشكلة اللي بتحلها
+### الـ Subsystem
 
-تخيل إنك بتشتري جهاز راوتر. جوا الراوتر في chips كتير: chip للـ WiFi، chip للـ Ethernet، chip للـ USB. كل chip دي محتاجة driver في الـ Linux kernel يشغّلها. الـ driver محتاج يعرف معلومات عن الـ hardware: "انت بتشتغل على IRQ رقم كام؟ العنوان في الـ memory إيه؟ هل بتدعم big-endian؟"
+**الـ `include/linux/property.h`** ينتمي لـ subsystem اسمه **SOFTWARE NODES AND DEVICE PROPERTIES** (وهو جزء من **DRIVER CORE**)، maintainers هم Andy Shevchenko وفريق Intel. الملفات الأساسية للـ subsystem:
 
-**السؤال هو: فين الـ driver هيلاقي المعلومات دي؟**
-
-الإجابة مش واحدة — بتختلف حسب نوع الـ platform:
-
-| Platform | طريقة وصف الـ Hardware |
-|----------|------------------------|
-| ARM / Embedded | **Device Tree (DT)** — ملف `.dts` بيوصف الـ hardware |
-| x86 / Laptop / Server | **ACPI** — جداول بيكتبها الـ BIOS/UEFI |
-| Virtual / Test | **Software Nodes** — properties بتتكتب في الـ C code مباشرة |
-
-المشكلة الكبيرة: كل طريقة ليها API مختلفة تماماً. الـ driver اللي بيشتغل على ARM بيستخدم `of_property_read_u32()`، ونفس الـ driver لو شغّال على x86 هيستخدم `acpi_dev_get_property()`. ده معناه إن نفس الـ driver محتاج يتكتب مرتين — كارثة.
+| الملف | الدور |
+|-------|-------|
+| `include/linux/property.h` | الـ public API header — موضوع شرحنا |
+| `include/linux/fwnode.h` | الـ low-level types: `fwnode_handle`, `fwnode_operations` |
+| `drivers/base/property.c` | الـ implementation (~1482 سطر) |
+| `drivers/base/swnode.c` | الـ software nodes implementation (~1144 سطر) |
 
 ---
 
-### الحل: Unified Device Property Interface
+### المشكلة اللي بيحلها الملف ده — القصة الكاملة
 
-**الـ `property.h`** هو رأس ملف الـ **Unified Device Property Interface** — طبقة abstraction وحيدة فوق كل طرق وصف الـ hardware.
+تخيل إنك بتصمم kernel driver لـ sensor حرارة. الـ sensor ده موجود في أجهزة مختلفة:
+- في Raspberry Pi: معلوماته موجودة في **Device Tree** (ملف `.dts`)
+- في لاب توب Intel: معلوماته موجودة في **ACPI tables** (firmware من BIOS)
+- في جهاز embedded مفيهوش firmware خالص: معلوماته مكتوبة **في الكود مباشرةً** (software node)
 
-الفكرة بسيطة جداً: بدل ما كل driver يعرف إيه الـ firmware اللي شغال عليه (DT ولا ACPI ولا غيره)، يكلم API واحدة بس، وهي هي اللي تروح تسأل الـ firmware المناسب.
+السؤال: ازاي تكتب driver واحد يشتغل مع الثلاث حالات دول من غير ما تحط `#ifdef` في كل حتة؟
 
 ```
-Driver Code
-    │
-    ▼
-┌─────────────────────────────────────────┐
-│  property.h  (Unified API)              │
-│  device_property_read_u32(dev, "speed") │
-└──────────────┬──────────────────────────┘
-               │  fwnode_handle (abstract pointer)
-       ┌───────┼───────────────┐
-       ▼       ▼               ▼
-   OF/DT     ACPI        Software Node
-  (ARM)     (x86)        (pure code)
+قبل property.h:
+  driver-for-DT.c  →  of_property_read_u32(np, "clock-freq", &val)
+  driver-for-ACPI.c → acpi_dev_get_property(adev, "clock-freq", ...)
+  driver-for-X86.c  → قراءة من table خاصة...
+
+بعد property.h:
+  driver.c (واحد بس) → device_property_read_u32(dev, "clock-freq", &val)
+```
+
+**الـ `property.h`** هو الـ "مترجم الموحد" — بيخلي أي driver يتكلم لغة واحدة مع أي مصدر معلومات firmware.
+
+---
+
+### الصورة الكبيرة — ELI5
+
+فكّر في الموضوع زي كده:
+
+**الـ Device Tree / ACPI / Software Node = بطاقة هوية الجهاز**
+
+زي ما البطاقة الشخصية بتقول: "الاسم: أحمد، السن: 30، العنوان: القاهرة" — كمان كل hardware device بيحتاج "بطاقة هوية" بتقول:
+- "الـ clock speed بتاعتي: 400MHz"
+- "الـ interrupt رقم: 5"
+- "الـ GPIO اللي بيتحكم فيّ: رقم 17"
+- "أنا compatible مع: `vendor,my-sensor-v2`"
+
+المشكلة إن في Linux في **أكتر من نوع بطاقة هوية**:
+
+```
+┌─────────────────────────────────────────────────┐
+│              Hardware Description Sources        │
+│                                                  │
+│  ┌──────────────┐  ┌──────────┐  ┌───────────┐  │
+│  │  Device Tree │  │   ACPI   │  │  Software │  │
+│  │  (ARM/RISC-V)│  │  (x86)   │  │   Node    │  │
+│  └──────┬───────┘  └────┬─────┘  └─────┬─────┘  │
+│         │               │              │         │
+│         └───────────────┼──────────────┘         │
+│                         │                        │
+│                  ┌──────▼──────┐                 │
+│                  │fwnode_handle│  ← الوسيط الموحد │
+│                  └──────┬──────┘                 │
+│                         │                        │
+│              ┌──────────▼──────────┐             │
+│              │   property.h API    │             │
+│              │  device_property_*  │             │
+│              │  fwnode_property_*  │             │
+│              └─────────────────────┘             │
+└─────────────────────────────────────────────────┘
+```
+
+**الـ `fwnode_handle`** هو الـ "بطاقة هوية موحدة" — abstraction layer بيمثّل أي مصدر firmware بصرف النظر عن نوعه.
+
+**الـ `property.h`** هو الـ API اللي بيتيح للـ driver يقرأ من أي بطاقة هوية بنفس الكود.
+
+---
+
+### ليه ده مفيد؟
+
+**بدونه:** كل driver لازم يعرف هو شغّال على ARM مع DT ولا x86 مع ACPI ولا embedded بدون firmware، ويكتب كود مختلف لكل حالة.
+
+**بيه:** Driver بسيط زي ده بيشتغل في كل مكان:
+
+```c
+static int my_sensor_probe(struct platform_device *pdev)
+{
+    struct device *dev = &pdev->dev;
+    u32 clock_freq;
+    const char *label;
+
+    /* نفس الكود على DT و ACPI و software node */
+    if (device_property_read_u32(dev, "clock-frequency", &clock_freq))
+        clock_freq = 1000000; /* default */
+
+    if (!device_property_read_string(dev, "label", &label))
+        dev_info(dev, "Sensor label: %s\n", label);
+
+    return 0;
+}
 ```
 
 ---
 
-### الـ fwnode_handle: البطل الأساسي
+### محتوى الملف — الـ 4 طبقات
 
-**الـ `struct fwnode_handle`** هو الـ abstraction الأساسية في الموضوع ده كله. هو مجرد pointer صغير فيه:
-- `ops` — جدول function pointers (زي vtable في C++)
-- `secondary` — fallback لـ fwnode تاني
-- flags وlinks للـ device dependencies
-
-كل firmware type (DT، ACPI، swnode) بيعمل implementation خاصة بيه للـ `fwnode_operations`، وبكده الـ `property.h` API بتشتغل على الكل بنفس الكود.
-
----
-
-### قصة حقيقية: driver لـ I2C sensor
-
-تخيل إنك بتكتب driver لـ temperature sensor بيتوصل بـ I2C. الـ sensor ده بيتستخدم في:
-
-- Raspberry Pi (ARM + Device Tree)
-- Intel NUC (x86 + ACPI)
-- QEMU virtual machine (Software Node في الـ test code)
-
-**بدون `property.h`**، كنت هتكتب كده:
-
+#### 1. قراءة الـ Properties من الـ Device مباشرةً
 ```c
-#ifdef CONFIG_OF
-    of_property_read_u32(np, "polling-interval-ms", &interval);
-#elif defined(CONFIG_ACPI)
-    acpi_dev_get_property(adev, "polling-interval-ms", ACPI_TYPE_INTEGER, &val);
-#endif
+/* قراءة قيمة u32 من أي firmware source */
+device_property_read_u32(dev, "clock-freq", &val);
+
+/* قراءة string */
+device_property_read_string(dev, "label", &str);
+
+/* التحقق من وجود property */
+device_property_present(dev, "some-feature");
+
+/* قراءة bool */
+device_property_read_bool(dev, "enabled");
 ```
 
-**بـ `property.h`**، بتكتب مرة واحدة بس:
-
+#### 2. قراءة الـ Properties من الـ `fwnode_handle` مباشرةً
+نفس الـ API بس على مستوى الـ `fwnode` بدل الـ `device` — مفيد لما تتعامل مع child nodes أو external fwnodes:
 ```c
-/* works on DT, ACPI, and software nodes — same code */
-device_property_read_u32(dev, "polling-interval-ms", &interval);
+fwnode_property_read_u32(fwnode, "reg", &val);
+fwnode_property_match_string(fwnode, "compatible", "vendor,chip");
 ```
 
----
-
-### مكونات الـ API في property.h
-
-#### 1. قراءة الـ Properties
-دوال لقراءة أنواع مختلفة من الـ properties — integers، strings، booleans، arrays:
-
+#### 3. التنقل في شجرة الـ Nodes (Traversal)
+الـ hardware مش flat — فيه parent/child relationships. مثلاً: `SoC → I2C bus → sensor`:
 ```c
-/* قراءة integer واحد */
-device_property_read_u32(dev, "clock-frequency", &freq);
-
-/* قراءة array */
-device_property_read_u32_array(dev, "reg", regs, count);
-
-/* تحقق من وجود property */
-device_property_present(dev, "enable-gpios");
-
-/* قراءة boolean property */
-device_property_read_bool(dev, "wakeup-source");
-```
-
-#### 2. التنقل في شجرة الـ nodes
-
-الـ hardware ممكن يكون له structure هرمي — chip رئيسية وجوّاها sub-nodes (ports، endpoints، channels). الـ `property.h` بيوفر macros للتنقل:
-
-```c
-/* iterate على كل child nodes */
+/* التنقل بين الأبناء */
 device_for_each_child_node(dev, child) {
-    fwnode_property_read_u32(child, "reg", &reg);
+    fwnode_property_read_u32(child, "reg", &addr);
 }
 
-/* scoped version — بيعمل put تلقائي */
-device_for_each_child_node_scoped(dev, child) {
-    /* child بيتحرر تلقائياً عند الخروج من الـ scope */
-}
+/* الوصول لـ parent */
+struct fwnode_handle *parent = fwnode_get_parent(fwnode);
+
+/* البحث عن child باسم محدد */
+struct fwnode_handle *child = device_get_named_child_node(dev, "ports");
 ```
 
-#### 3. الـ Graph API (للـ Media و Networking)
-
-لما يكون في connections بين devices — زي camera متوصلة بـ ISP متوصل بـ display — الـ fwnode graph API بيعبّر عن العلاقات دي:
-
+#### 4. الـ Fwnode Graph — ربط الأجهزة ببعض
+لما يكون فيه data path بين devices (مثلاً: camera → ISP → display)، بيستخدموا **fwnode graph**:
 ```c
-/* امشي على كل endpoints */
-fwnode_graph_for_each_endpoint(fwnode, ep) {
-    remote = fwnode_graph_get_remote_endpoint(ep);
-}
+/* الـ camera تعرف الـ ISP اللي بتتكلم معاه */
+struct fwnode_handle *remote = fwnode_graph_get_remote_endpoint(ep);
 ```
 
-#### 4. الـ Software Nodes
-
-لما الـ hardware مش موصوف في DT أو ACPI (زي في الـ testing أو الـ x86 devices اللي مش ليها ACPI entries)، الـ `software_node` بيخليك تعرّف الـ properties مباشرة في الـ C code:
-
+#### 5. الـ Software Nodes — لما مفيش Firmware
+لما الـ hardware مفهوش DT ولا ACPI (أو الـ firmware ناقص)، الـ driver نفسه بيعرّف الـ properties في الكود:
 ```c
-static const struct property_entry my_dev_props[] = {
+/* تعريف properties في الكود */
+static const struct property_entry my_device_props[] = {
     PROPERTY_ENTRY_U32("clock-frequency", 400000),
-    PROPERTY_ENTRY_STRING("status", "okay"),
-    PROPERTY_ENTRY_BOOL("wakeup-source"),
+    PROPERTY_ENTRY_STRING("label", "my-sensor"),
+    PROPERTY_ENTRY_BOOL("some-feature"),
     { }  /* sentinel */
 };
 
 static const struct software_node my_swnode = {
-    .name       = "my-sensor",
-    .properties = my_dev_props,
+    .name = "my-device",
+    .properties = my_device_props,
 };
 
-/* attach to device */
+/* ربطها بالـ device */
 device_add_software_node(dev, &my_swnode);
 ```
 
 ---
 
-### الـ Subsystem في MAINTAINERS
+### الـ `struct property_entry` — كيف بتُخزّن الـ Property
 
-الملف ده جزء من subsystem اسمه **SOFTWARE NODES AND DEVICE PROPERTIES** وموجود في قسم `drivers/base/`.
+```c
+struct property_entry {
+    const char *name;       /* اسم الـ property */
+    size_t length;          /* حجم الـ value بالبايت */
+    bool is_inline;         /* هل الـ value صغيرة تتخزن inline؟ */
+    enum dev_prop_type type; /* U8, U16, U32, U64, STRING, أو REF */
+    union {
+        const void *pointer; /* لو الـ data كبيرة → pointer */
+        union {
+            u8  u8_data[8];
+            u16 u16_data[4];
+            u32 u32_data[2];
+            u64 u64_data[1];
+            const char *str[...];
+        } value;             /* لو الـ data صغيرة → inline */
+    };
+};
+```
 
----
-
-### الملفات اللي بتكوّن الـ Subsystem
-
-| الملف | الدور |
-|-------|-------|
-| `include/linux/property.h` | الـ public API header — ده ملفنا |
-| `include/linux/fwnode.h` | تعريف `fwnode_handle` و`fwnode_operations` |
-| `drivers/base/property.c` | التنفيذ الفعلي لكل دوال الـ `device_property_*` و`fwnode_property_*` |
-| `drivers/base/swnode.c` | تنفيذ الـ software nodes — الـ fwnode_operations للـ swnode backend |
-
-### ملفات backend بتنفّذ نفس الـ interface
-
-| الملف | الدور |
-|-------|-------|
-| `drivers/of/property.c` | Device Tree backend |
-| `drivers/acpi/property.c` | ACPI backend |
-| `drivers/acpi/acpi_lpss.c` | مثال على إضافة software nodes لـ x86 devices |
-
-### ملفات مرتبطة بالـ use cases
-
-| الملف | الدور |
-|-------|-------|
-| `include/media/v4l2-fwnode.h` | استخدام الـ graph API في الـ camera subsystem |
-| `drivers/media/v4l2-core/v4l2-fwnode.c` | تنفيذه |
-| `drivers/net/mdio/fwnode_mdio.c` | استخدام الـ property API في الـ network MDIO |
+الـ `is_inline = true` معناها الـ value اتخزنت جوه الـ struct نفسه (optimization لتجنب memory allocation إضافي للقيم الصغيرة).
 
 ---
 
-### الخلاصة
+### الـ Architecture الكاملة — كيف بيشتغل كل ده
 
-**الـ `property.h`** هو "محوّل كهربائي" بين الـ drivers والـ firmware. الـ driver مش محتاج يعرف إيه الـ firmware اللي شغّال عليه — بيسأل `device_property_read_*()` وهي هي تعرف تروح فين. ده بيخلي الـ drivers أبسط، أقل `#ifdef`، وتشتغل على كل الـ platforms من نفس الكود.
-## Phase 2: شرح الـ Unified Device Property Framework
+```
+┌──────────────────────────────────────────────────────────┐
+│                   Driver Code                            │
+│  device_property_read_u32(dev, "reg", &val)              │
+└──────────────────────────┬───────────────────────────────┘
+                           │
+                           ▼
+┌──────────────────────────────────────────────────────────┐
+│              drivers/base/property.c                     │
+│  1. استخرج dev->fwnode                                   │
+│  2. نادي fwnode->ops->property_read_int_array(...)       │
+└───────────┬───────────────────────────────────┬──────────┘
+            │                                   │
+            ▼                                   ▼
+┌───────────────────────┐         ┌─────────────────────────┐
+│   OF (Device Tree)    │         │         ACPI            │
+│   of_fwnode_ops       │         │    acpi_fwnode_ops       │
+│  (drivers/of/...)     │         │  (drivers/acpi/...)      │
+└───────────────────────┘         └─────────────────────────┘
+            │                                   │
+            ▼                                   ▼
+    يقرأ من DTB                      يقرأ من ACPI tables
+    في الـ RAM                        في الـ firmware
+```
 
-### المشكلة: ليه الـ Framework ده موجود أصلاً؟
+---
 
-في الـ embedded Linux، الـ driver بيحتاج يعرف إيه الـ configuration بتاعت الـ hardware اللي شغال عليه — مثلاً:
-- الـ I2C sensor ده بيشتغل على أنهي address؟
-- الـ GPIO reset line بتاعت الـ controller ده رقم كام؟
-- الـ clock frequency المطلوبة إيه؟
-- فيه `big-endian` registers ولا لأ؟
+### الملفات المرتبطة اللي المبرمج يعرفها
 
-المشكلة إن في الـ Linux kernel في **3 طرق مختلفة** للـ hardware description:
+| الملف | الدور |
+|-------|-------|
+| `include/linux/fwnode.h` | الـ low-level types والـ `fwnode_operations` vtable |
+| `include/linux/of.h` | الـ Device Tree specific API |
+| `include/linux/acpi.h` | الـ ACPI specific API |
+| `drivers/base/property.c` | الـ implementation للـ unified API |
+| `drivers/base/swnode.c` | الـ software nodes implementation |
+| `drivers/of/property.c` | الـ DT backend للـ fwnode ops |
+| `drivers/acpi/property.c` | الـ ACPI backend للـ fwnode ops |
+| `include/linux/of_graph.h` | الـ DT graph API (كاميرات، media) |
+| `Documentation/driver-api/device_link.rst` | توثيق الـ device links |
+## Phase 2: شرح الـ Unified Device Property / fwnode Framework
 
-| الطريقة | المصدر | المنصة |
-|---------|--------|--------|
-| **Device Tree (DT)** | `.dts` file compiled to DTB | ARM, RISC-V, embedded |
-| **ACPI** | BIOS/firmware tables | x86, ARM servers |
-| **Software Nodes** | Static C structs in driver code | Platforms with no firmware |
+---
 
-لو كتبت driver بيقرأ من الـ DT مباشرةً باستخدام `of_property_read_u32()` — الـ driver ده مش هيشتغل على ACPI system والعكس بالعكس.
+### المشكلة اللي بيحلها الـ Framework ده
 
-**الـ fragmentation كان فادح:** نفس الـ driver كان لازم يتكتب مرتين، أو يبقى مليان `#ifdef CONFIG_OF` و`#ifdef CONFIG_ACPI`.
+**الـ Linux kernel** بيشتغل على hardware بتتوصفله بطرق مختلفة جداً:
+
+- **Device Tree (DT)**: المستخدمة في ARM/RISC-V embedded — ملفات `.dts` بتوصف الـ hardware كـ tree من nodes بـ properties.
+- **ACPI**: المستخدمة في x86/ARM servers — tables بتيجي من firmware بتوصف الـ hardware بـ namespace موحد.
+- **Software Nodes**: مش فيه firmware خالص — الـ driver أو الـ board file بتعرّف الـ properties في الـ C code مباشرة.
+
+**المشكلة**: كل source ليها API مختلف. لو driver عايز يقرأ property اسمها `clock-frequency`:
+- في DT بيستخدم `of_property_read_u32(np, "clock-frequency", &val)`
+- في ACPI بيستخدم شيء تاني خالص
+- النتيجة: driver مكتوب مرتين أو مليان `#ifdef CONFIG_OF` و `#ifdef CONFIG_ACPI`
+
+ده code duplication بيخلي الـ driver fragile ومش portable.
 
 ---
 
 ### الحل: Unified Device Property Interface
 
-الـ kernel حل المشكلة بـ **abstraction layer** اسمه **Unified Device Property API** — موجود في `include/linux/property.h` و`drivers/base/property.c`.
+الـ kernel حل المشكلة دي بـ abstraction layer اسمه **firmware node (fwnode)**.
 
-الفكرة الجوهرية: كل مصدر للـ firmware (DT، ACPI، Software) بيـ"wrap" نفسه في object واحد اسمه **`fwnode_handle`** — وكل `fwnode_handle` بيحمل معاه pointer لـ vtable من النوع **`fwnode_operations`** فيه implementation خاصة بيه.
-
-الـ driver مش بيكلم الـ DT أو الـ ACPI directly — بيكلم الـ `fwnode_handle` فقط، والـ kernel هو اللي يروح يجيب القيمة من أي backend موجود.
+الفكرة:
+1. كل مصدر وصف hardware (DT، ACPI، software) بيوفر `struct fwnode_operations` — table من function pointers.
+2. كل node في الـ tree (DT node، ACPI device، software node) بتتمثل بـ `struct fwnode_handle`.
+3. الـ driver بيتكلم مع الـ `fwnode_handle` بس، مش مع DT أو ACPI مباشرة.
+4. الـ `property.h` هو الـ API اللي بيستخدمه الـ driver — generic وموحد.
 
 ---
 
@@ -222,229 +277,144 @@ device_add_software_node(dev, &my_swnode);
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                         Driver Code                             │
-│                                                                 │
-│  device_property_read_u32(dev, "clock-frequency", &val)        │
-│  fwnode_property_read_string(fwnode, "compatible", &str)       │
-└──────────────────────────┬──────────────────────────────────────┘
-                           │  Unified API  (property.h)
-                           ▼
+│                        Driver Code                              │
+│  device_property_read_u32(dev, "reg", &val)                    │
+│  fwnode_property_present(fwnode, "compatible")                  │
+└────────────────────┬────────────────────────────────────────────┘
+                     │  calls into
+                     ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                    fwnode_handle  (fwnode.h)                    │
+│              Unified Property API  (property.h / property.c)    │
 │                                                                 │
-│   struct fwnode_handle {                                        │
-│       const struct fwnode_operations  *ops;  ◄── vtable        │
-│       struct fwnode_handle            *secondary;              │
-│       struct device                   *dev;                    │
-│       struct list_head                 suppliers;              │
-│       struct list_head                 consumers;              │
-│       u8                               flags;                  │
-│   }                                                             │
-└────────────┬───────────────────────┬───────────────────────────┘
-             │                       │
-     ┌───────▼──────┐     ┌──────────▼──────────┐     ┌──────────────────┐
-     │  OF (DT)     │     │    ACPI              │     │  Software Node   │
-     │  Backend     │     │    Backend           │     │  Backend         │
-     │              │     │                      │     │                  │
-     │ of_fwnode_ops│     │ acpi_fwnode_ops      │     │ swnode_ops       │
-     │              │     │                      │     │                  │
-     │ reads from   │     │ reads from           │     │ reads from       │
-     │ DTB in RAM   │     │ ACPI tables          │     │ property_entry[] │
-     └──────────────┘     └──────────────────────┘     └──────────────────┘
+│   device_property_*()  ──►  dev_fwnode(dev)  ──►  fwnode_*()  │
+└────────────────────┬────────────────────────────────────────────┘
+                     │  dispatches via fwnode->ops->property_*()
+                     ▼
+        ┌────────────┴──────────────┐──────────────────┐
+        │                           │                  │
+        ▼                           ▼                  ▼
+┌──────────────┐           ┌──────────────┐   ┌──────────────────┐
+│  OF/DT Layer │           │  ACPI Layer  │   │  Software Nodes  │
+│  (of.c)      │           │  (acpi.c)    │   │  (swnode.c)      │
+│              │           │              │   │                  │
+│ fwnode_ops   │           │ fwnode_ops   │   │ fwnode_ops       │
+│ backed by    │           │ backed by    │   │ backed by        │
+│ device_node  │           │ acpi_device  │   │ property_entry[] │
+└──────┬───────┘           └──────┬───────┘   └────────┬─────────┘
+       │                          │                     │
+       ▼                          ▼                     ▼
+  .dts / dtb files          ACPI BIOS Tables       C code arrays
+  (Boot-time loaded)        (UEFI firmware)        (compile-time)
 ```
 
----
-
-### التشبيه الواقعي: نظام الخرائط في الهاتف
-
-تخيل إن أنت بتكتب app على الموبايل محتاج يعرض خريطة. عندك خيارات:
-- Google Maps API
-- Apple Maps API
-- OpenStreetMap API
-
-لو كتبت الـ app بتاعك يكلم Google Maps directly — مش هتشتغل على iOS.
-
-الحل: بتستخدم **Map Abstraction Layer** — interface واحد اسمه `MapProvider` — وكل provider بيعمل `implement` لنفس الـ interface.
-
-دلوقتي:
-
-| الـ Map Abstraction | الـ Kernel Equivalent |
-|--------------------|----------------------|
-| `MapProvider` interface | `struct fwnode_handle` + `fwnode_operations` |
-| `GoogleMapsProvider` | `of_fwnode_ops` (Device Tree backend) |
-| `AppleMapsProvider` | `acpi_fwnode_ops` (ACPI backend) |
-| `OSMProvider` | `swnode_ops` (Software Node backend) |
-| `getLocation(name)` | `fwnode_property_read_u32(fwnode, name, &val)` |
-| الـ App code | الـ Driver code |
-| الخريطة الـ underlying | الـ DTB / ACPI Tables / property_entry[] |
-
-**التطابق الكامل:**
-- زي ما الـ app مش بيعرف إيه الـ map provider الـ underlying — الـ driver مش بيعرف إيه الـ firmware source.
-- زي ما الـ `MapProvider` بيعمل reference counting (لو الـ map object اتحذف) — الـ `fwnode_handle` عنده `get/put` في الـ `fwnode_operations`.
-- زي ما الـ Map app ممكن يـ"chain" بين providers (fallback) — الـ `fwnode_handle.secondary` بيخلي الـ kernel يـ"chain" بين DT و Software Node لنفس الـ device.
+**الـ dev_fwnode(dev)** هو الـ macro اللي بيجيب الـ `fwnode_handle` المرتبط بالـ `struct device`.
 
 ---
 
-### الـ Core Abstraction: `fwnode_handle` والـ vtable
+### التشبيه الحقيقي — Hardware Store مع Translators
 
-ده الـ heart of the subsystem. كل firmware backend بيعمل `embed` لـ `fwnode_handle` جوا struct أكبر:
+تخيل إن عندك مهندس (الـ driver) بيشتغل على مشروع، وبيحتاج يعرف "ما هو الـ voltage للـ component ده؟"
+
+المشكلة: الـ datasheet ممكن يكون:
+- **باليابانية** (Device Tree)
+- **بالألمانية** (ACPI)
+- **مكتوب بخط يدك** في نوتة (Software Node)
+
+الحل: توظف **مترجم موحد** (الـ fwnode API) بيتكلم مع كل مصدر ويرجع لك الإجابة بالإنجليزي.
+
+| التشبيه | الـ Kernel Concept |
+|---------|-------------------|
+| المهندس (الـ driver) | أي kernel driver محتاج يقرأ config |
+| السؤال عن الـ voltage | `device_property_read_u32(dev, "voltage", &v)` |
+| المترجم الموحد | `fwnode_property_read_u32()` |
+| الـ datasheet باليابانية | Device Tree node (`.dts`) |
+| الـ datasheet بالألمانية | ACPI namespace object |
+| النوتة المكتوبة بخط يدك | `software_node` مع `property_entry[]` |
+| الـ translator's desk | `struct fwnode_handle` |
+| قواعد ترجمة كل لغة | `struct fwnode_operations` |
+| عنوان الـ desk في الشركة | `dev->fwnode` pointer في `struct device` |
+
+---
+
+### الـ Core Abstraction: الـ `fwnode_handle`
+
+**الـ `struct fwnode_handle`** هو حجر الأساس في الـ framework كله. ده مش بيحتوي على data — هو handle بس، زي الـ file descriptor في POSIX:
 
 ```c
-/* مثال: DT backend (of/base.c) */
-struct device_node {
-    const char *name;
-    /* ... */
-    struct fwnode_handle fwnode;  /* embedded — هنا بيتم الـ embedding */
-};
+struct fwnode_handle {
+    struct fwnode_handle *secondary;   /* fallback fwnode (e.g. DT + swnode together) */
+    const struct fwnode_operations *ops; /* vtable — who handles operations */
 
-/* مثال: Software Node (swnode.c) */
-struct swnode {
-    struct kobject kobj;
-    struct fwnode_handle fwnode;  /* embedded */
-    const struct software_node *node;
-    /* ... */
+    /* used by device links subsystem */
+    struct device *dev;
+    struct list_head suppliers;
+    struct list_head consumers;
+    u8 flags;
 };
 ```
 
-ده نفس pattern الـ **container_of** — لما عندك `fwnode_handle *` تقدر توصل للـ outer struct باستخدام `to_of_node()` أو `to_software_node()`.
-
-```
-┌────────────────────────────────────────┐
-│         struct device_node             │
-│  ┌──────────────────────────────────┐  │
-│  │     struct fwnode_handle         │  │
-│  │   ops  ──► of_fwnode_ops         │  │
-│  │   dev  ──► struct device         │  │
-│  │   secondary ──► NULL / swnode    │  │
-│  └──────────────────────────────────┘  │
-│  name: "i2c@40005400"                  │
-│  properties: { clock-frequency: ... } │
-└────────────────────────────────────────┘
-           ▲
-           │  container_of
-           │
-     to_of_node(fwnode)
-```
+**الـ `secondary`** ده مهم: ممكن device عندها DT node (الـ primary) وفي نفس الوقت software node (الـ secondary) بيضيف properties ناقصة. الـ framework بيسأل الـ primary الأول، لو مش لاقي يسأل الـ secondary.
 
 ---
 
-### الـ vtable بالتفصيل: `struct fwnode_operations`
+### الـ vtable: `struct fwnode_operations`
+
+ده الـ interface اللي لازم كل backend (DT، ACPI، swnode) يـimplement:
 
 ```c
 struct fwnode_operations {
-    /* Reference counting */
+    /* lifecycle */
     struct fwnode_handle *(*get)(struct fwnode_handle *fwnode);
     void (*put)(struct fwnode_handle *fwnode);
 
-    /* Device availability (مثلاً: status = "okay" في DT) */
+    /* device status */
     bool (*device_is_available)(const struct fwnode_handle *fwnode);
+    const void *(*device_get_match_data)(...);
+    bool (*device_dma_supported)(...);
+    enum dev_dma_attr (*device_get_dma_attr)(...);
 
-    /* Driver match data (لـ platform_device_id / of_device_id) */
-    const void *(*device_get_match_data)(const struct fwnode_handle *fwnode,
-                                          const struct device *dev);
-
-    /* DMA support */
-    bool (*device_dma_supported)(const struct fwnode_handle *fwnode);
-
-    /* Property reading */
+    /* property access */
     bool (*property_present)(const struct fwnode_handle *, const char *propname);
-    bool (*property_read_bool)(const struct fwnode_handle *, const char *propname);
-    int  (*property_read_int_array)(const struct fwnode_handle *,
-                                    const char *propname,
-                                    unsigned int elem_size,   /* 1, 2, 4, or 8 bytes */
-                                    void *val, size_t nval);
-    int  (*property_read_string_array)(const struct fwnode_handle *,
-                                       const char *propname,
-                                       const char **val, size_t nval);
+    bool (*property_read_bool)(...);
+    int (*property_read_int_array)(...);
+    int (*property_read_string_array)(...);
 
-    /* Tree navigation */
-    const char *(*get_name)(const struct fwnode_handle *fwnode);
-    struct fwnode_handle *(*get_parent)(const struct fwnode_handle *fwnode);
-    struct fwnode_handle *(*get_next_child_node)(const struct fwnode_handle *,
-                                                  struct fwnode_handle *child);
-    struct fwnode_handle *(*get_named_child_node)(const struct fwnode_handle *,
-                                                   const char *name);
+    /* tree traversal */
+    const char *(*get_name)(...);
+    struct fwnode_handle *(*get_parent)(...);
+    struct fwnode_handle *(*get_next_child_node)(...);
+    struct fwnode_handle *(*get_named_child_node)(...);
 
-    /* Reference properties (phandles في DT) */
-    int (*get_reference_args)(const struct fwnode_handle *fwnode,
-                               const char *prop, const char *nargs_prop,
-                               unsigned int nargs, unsigned int index,
-                               struct fwnode_reference_args *args);
+    /* references */
+    int (*get_reference_args)(...);
 
-    /* Graph API (camera pipelines, display links) */
+    /* graph (media/camera pipelines) */
     struct fwnode_handle *(*graph_get_next_endpoint)(...);
     struct fwnode_handle *(*graph_get_remote_endpoint)(...);
     struct fwnode_handle *(*graph_get_port_parent)(...);
     int (*graph_parse_endpoint)(...);
 
-    /* Hardware resources */
-    void __iomem *(*iomap)(struct fwnode_handle *fwnode, int index);
-    int (*irq_get)(const struct fwnode_handle *fwnode, unsigned int index);
-
-    /* Device links / probe ordering */
-    int (*add_links)(struct fwnode_handle *fwnode);
+    /* misc */
+    void __iomem *(*iomap)(...);
+    int (*irq_get)(...);
+    int (*add_links)(struct fwnode_handle *fwnode); /* for devlinks */
 };
 ```
 
-**ملاحظة مهمة:** `property_read_int_array` بتاخد `elem_size` parameter — ده بيخليها تشتغل كـ u8، u16، u32، u64 بدون تكرار الكود. الـ `device_property_read_u32_array()` في property.h بتستدعيها بـ `elem_size = sizeof(u32)`.
-
----
-
-### الـ Macro Dispatch: `fwnode_call_int_op`
-
+الـ dispatch بيتم عبر macros زي:
 ```c
-#define fwnode_call_int_op(fwnode, op, ...)                         \
-    (fwnode_has_op(fwnode, op) ?                                    \
-     (fwnode)->ops->op(fwnode, ## __VA_ARGS__) :                    \
-     (IS_ERR_OR_NULL(fwnode) ? -EINVAL : -ENXIO))
+#define fwnode_call_int_op(fwnode, op, ...) \
+    (fwnode_has_op(fwnode, op) ?            \
+     (fwnode)->ops->op(fwnode, ##__VA_ARGS__) : -ENXIO)
 ```
 
-ده الـ dispatcher اللي بيحول كل الـ API calls للـ vtable:
-- لو الـ `fwnode` = NULL → `-EINVAL`
-- لو الـ backend مش بيدعم الـ operation → `-ENXIO`
-- لو كل حاجة تمام → بيستدعي الـ function pointer مباشرةً
+لو الـ backend مش implement الـ operation ده، بيرجع `-ENXIO` تلقائي.
 
 ---
 
-### طبقات الـ API: `device_*` vs `fwnode_*`
+### الـ Property Types والـ `struct property_entry`
 
-الـ API عنده طبقتين:
-
-```
-device_property_read_u32(dev, "reg", &val)
-         │
-         ▼
-    dev_fwnode(dev)          ← يجيب الـ fwnode من الـ device
-         │
-         ▼
-fwnode_property_read_u32(fwnode, "reg", &val)
-         │
-         ▼
-fwnode_call_int_op(fwnode, property_read_int_array, "reg", 4, &val, 1)
-         │
-         ▼
-fwnode->ops->property_read_int_array(fwnode, "reg", 4, &val, 1)
-         │
-         ▼
-    [DT implementation OR ACPI implementation OR swnode implementation]
-```
-
-الـ `dev_fwnode(dev)` macro بتستخدم `_Generic` لـ type safety:
-
-```c
-#define dev_fwnode(dev)                                 \
-    _Generic((dev),                                     \
-             const struct device *: __dev_fwnode_const, \
-             struct device *:       __dev_fwnode)(dev)
-```
-
-لو الـ `dev` هو `const struct device *` → بترجع `const struct fwnode_handle *`.
-لو الـ `dev` هو `struct device *` → بترجع `struct fwnode_handle *`.
-ده بيمنع الـ driver من accidental modification للـ fwnode لما الـ device const.
-
----
-
-### الـ Property Types: `enum dev_prop_type`
+**الـ `enum dev_prop_type`** بيحدد أنواع الـ properties الممكنة:
 
 ```c
 enum dev_prop_type {
@@ -453,924 +423,1032 @@ enum dev_prop_type {
     DEV_PROP_U32,
     DEV_PROP_U64,
     DEV_PROP_STRING,
-    DEV_PROP_REF,     /* reference لـ node تاني */
+    DEV_PROP_REF,    /* reference to another fwnode — زي phandles في DT */
 };
 ```
 
-الـ `DEV_PROP_REF` خاصة جداً — بتمثل الـ **phandle** في DT أو الـ equivalent في ACPI. مثلاً في DT:
-
-```dts
-clocks = <&rcc 0>;  /* reference لـ clock controller + argument */
-```
-
-ده بيتقرأ بـ `fwnode_property_get_reference_args()` وبيرجع `struct fwnode_reference_args`:
-
-```c
-struct fwnode_reference_args {
-    struct fwnode_handle *fwnode;        /* الـ node المشار إليه */
-    unsigned int          nargs;         /* عدد الـ arguments */
-    u64                   args[16];      /* الـ arguments نفسها */
-};
-```
-
----
-
-### `struct property_entry`: الـ Software Node Properties
-
-ده الـ building block بتاع الـ Software Nodes — بيخلي الـ driver أو platform code يعرّف properties في C code مباشرةً بدون أي firmware:
+**الـ `struct property_entry`** هو الـ in-memory representation لـ property واحدة (مستخدم في software nodes):
 
 ```c
 struct property_entry {
-    const char         *name;       /* اسم الـ property */
-    size_t              length;     /* حجم الـ data بالـ bytes */
-    bool                is_inline;  /* هل القيمة stored inline في الـ struct؟ */
-    enum dev_prop_type  type;
+    const char *name;
+    size_t length;
+    bool is_inline;           /* true = value stored in struct itself */
+    enum dev_prop_type type;
     union {
-        const void *pointer;        /* لو الـ data كبيرة → pointer للـ array */
+        const void *pointer;  /* when is_inline == false */
         union {
-            u8         u8_data[8];
-            u16        u16_data[4];
-            u32        u32_data[2];
-            u64        u64_data[1];
-            const char *str[1];     /* sizeof(u64)/sizeof(char*) = 1 on 64-bit */
-        } value;                    /* لو الـ data صغيرة → stored inline */
+            u8  u8_data[8];
+            u16 u16_data[4];
+            u32 u32_data[2];
+            u64 u64_data[1];
+            const char *str[1]; /* on 64-bit: sizeof(u64)/sizeof(char*) = 1 */
+        } value;              /* when is_inline == true */
     };
 };
 ```
 
-**الـ inline optimization:** القيم الصغيرة (u8 ، u16، u32، u64 واحدة، string واحدة) بتتخزن مباشرةً جوا الـ `struct property_entry` نفسه بدون heap allocation. الـ `is_inline = true` بيعلّم ده.
+**تحسين مهم**: الـ `is_inline` بيخلي values صغيرة (u8, u16, u32, u64 فردية) متخزنة مباشرة في الـ struct من غير heap allocation. ده بيقلل fragmentation لأن الـ property_entry arrays بتكون static في الـ driver.
 
-**مثال عملي:**
-
-```c
-static const struct property_entry my_sensor_props[] = {
-    PROPERTY_ENTRY_U32("clock-frequency", 400000),   /* inline */
-    PROPERTY_ENTRY_BOOL("wakeup-source"),             /* bool: is_inline=true, length=0 */
-    PROPERTY_ENTRY_STRING("label", "front-sensor"),  /* inline string */
-    PROPERTY_ENTRY_U32_ARRAY("reg-names-ids",
-                              (u32[]){0x10, 0x20, 0x30}, 3), /* pointer */
-    { }  /* sentinel — NULL name = end of array */
-};
-
-static const struct software_node my_sensor_node = {
-    .name       = "my-sensor",
-    .properties = my_sensor_props,
-};
 ```
+property_entry (is_inline = true):
+┌──────────┬────────┬───────────┬──────┬────────────────────────┐
+│  name *  │ length │ is_inline │ type │  value.u32_data[0]=42  │
+└──────────┴────────┴───────────┴──────┴────────────────────────┘
 
-ثم في الـ driver أو board file:
-
-```c
-device_add_software_node(dev, &my_sensor_node);
+property_entry (is_inline = false):
+┌──────────┬────────┬───────────┬──────┬────────────────────────┐
+│  name *  │ length │   false   │ type │  pointer → u32 array[] │
+└──────────┴────────┴───────────┴──────┴────────────────────────┘
+                                              │
+                                              ▼
+                                        { 100, 200, 300, 400 }
 ```
 
 ---
 
-### الـ Software Node Tree: `struct software_node`
+### الـ Software Nodes — لما مفيش Firmware
+
+**الـ `struct software_node`** بيسمح لـ driver أو platform code يوصف hardware من C code خالص:
 
 ```c
 struct software_node {
-    const char                  *name;
-    const struct software_node  *parent;    /* لبناء tree hierarchy */
+    const char *name;
+    const struct software_node *parent;    /* tree structure */
     const struct property_entry *properties;
 };
 ```
 
-```
-software_node: "i2c-bus"
-   ├── software_node: "sensor@48"
-   │       properties: [address=0x48, ...]
-   └── software_node: "eeprom@50"
-           properties: [address=0x50, ...]
+مثال حقيقي: I2C device مش عنده DT node (legacy x86 board):
+
+```c
+/* define the properties */
+static const struct property_entry my_sensor_props[] = {
+    PROPERTY_ENTRY_U32("clock-frequency", 400000),
+    PROPERTY_ENTRY_STRING("compatible", "bosch,bme280"),
+    PROPERTY_ENTRY_BOOL("wakeup-source"),
+    { }  /* sentinel */
+};
+
+/* define the software node */
+static const struct software_node my_sensor_swnode = {
+    .name       = "bme280-sensor",
+    .properties = my_sensor_props,
+};
+
+/* register it and attach to device */
+int init_sensor(struct device *dev)
+{
+    return device_add_software_node(dev, &my_sensor_swnode);
+}
 ```
 
-ده بيحاكي نفس الـ tree structure بتاع الـ DT أو ACPI — الـ driver بيـ traverse الـ tree بنفس الـ API.
+بعد كده الـ driver بيقرأ بنفس الـ API:
+
+```c
+u32 freq;
+device_property_read_u32(dev, "clock-frequency", &freq); /* works! */
+```
 
 ---
 
-### الـ Graph API: ليه موجود؟
+### الـ Reference Properties والـ `software_node_ref_args`
 
-الـ `fwnode_graph_*` functions بتحل مشكلة specific: **media pipelines** و **display pipelines** في embedded systems.
-
-مثلاً board عندها:
-
-```
-Camera Sensor ──► MIPI CSI-2 Receiver ──► ISP ──► DMA ──► Memory
-```
-
-كل "سلك" بين component وتاني بيتمثل بـ **endpoint** في DT:
+الـ DT بيدعم مفهوم **phandles** — property بيشير لـ node تاني في الـ tree. مثال:
 
 ```dts
-sensor {
-    port {
-        sensor_out: endpoint {
-            remote-endpoint = <&csi_in>;
-        };
-    };
-};
+clocks = <&clk_apb 3>;  /* reference to clk_apb node, arg=3 */
+```
 
-csi2_rx {
-    ports {
-        port@0 {                    /* input port */
-            csi_in: endpoint@0 {
-                remote-endpoint = <&sensor_out>;
-            };
-        };
-        port@1 {                    /* output port */
-            csi_out: endpoint@0 {
-                remote-endpoint = <&isp_in>;
-            };
-        };
-    };
+الـ equivalent في software nodes هو `struct software_node_ref_args`:
+
+```c
+struct software_node_ref_args {
+    const struct software_node *swnode;  /* target node */
+    struct fwnode_handle *fwnode;        /* or a raw fwnode */
+    unsigned int nargs;
+    u64 args[NR_FWNODE_REFERENCE_ARGS]; /* up to 16 extra args */
 };
 ```
 
-الـ Graph API بيخليك تـ traverse الـ pipeline ده:
+الـ macro `SOFTWARE_NODE_REFERENCE` بيستخدم `_Generic` يـtype-check الـ reference وقت الـ compilation:
 
 ```c
-/* جيب كل endpoints بتاعت الـ device */
-fwnode_graph_for_each_endpoint(fwnode, ep) {
-    /* جيب الـ endpoint على الطرف التاني */
-    remote = fwnode_graph_get_remote_endpoint(ep);
-    /* جيب الـ device اللي الـ remote endpoint تبعه */
-    remote_parent = fwnode_graph_get_remote_port_parent(ep);
+#define SOFTWARE_NODE_REFERENCE(_ref_, ...)     \
+(const struct software_node_ref_args) {         \
+    .swnode = _Generic(_ref_,                   \
+        const struct software_node *: _ref_,    \
+        struct software_node *: _ref_,          \
+        default: NULL),                         \
+    .fwnode = _Generic(_ref_,                   \
+        struct fwnode_handle *: _ref_,          \
+        default: NULL),                         \
+    .nargs = COUNT_ARGS(__VA_ARGS__),           \
+    .args = { __VA_ARGS__ },                    \
 }
 ```
 
 ---
 
-### الـ `secondary` Field: الـ DT + Software Node Combo
+### الـ Fwnode Graph — Camera / Media Pipelines
 
-الـ `fwnode_handle.secondary` بيخلي الـ kernel يـ"chain" بين firmware sources لنفس الـ device:
+الـ framework بيدعم **graph topology** بين devices عبر مفهوم الـ **ports** و **endpoints**.
+
+مثال: camera sensor متصل بـ ISP (Image Signal Processor):
+
+```
+sensor node                    ISP node
+┌──────────────┐              ┌──────────────┐
+│  port@0      │              │  port@0      │
+│  endpoint@0  │◄────────────►│  endpoint@0  │
+│  (TX)        │ remote-endpoint  (RX)       │
+└──────────────┘              └──────────────┘
+```
+
+الـ API بيسمح traverse الـ graph:
+
+```c
+/* get the remote endpoint connected to a local endpoint */
+struct fwnode_handle *remote =
+    fwnode_graph_get_remote_endpoint(local_endpoint);
+
+/* get the device that owns the remote endpoint */
+struct fwnode_handle *remote_dev =
+    fwnode_graph_get_remote_port_parent(local_endpoint);
+
+/* iterate all endpoints of a device */
+fwnode_graph_for_each_endpoint(dev_fwnode(dev), ep) {
+    /* process each endpoint */
+}
+```
+
+---
+
+### الـ Two-Level API: `device_*` vs `fwnode_*`
+
+الـ framework بيوفر مستويين من الـ API:
+
+| **الـ `device_*` API** | **الـ `fwnode_*` API** |
+|------------------------|------------------------|
+| `device_property_read_u32(dev, ...)` | `fwnode_property_read_u32(fwnode, ...)` |
+| بياخد `struct device *` | بياخد `struct fwnode_handle *` |
+| بيعمل `dev_fwnode(dev)` داخلياً | مباشر على الـ fwnode |
+| للـ drivers اللي عندهم `struct device` | لما بتتعامل مع child nodes أو references |
+
+**الـ `dev_fwnode(dev)`** هو macro بيستخدم `_Generic` لـ const-correctness:
+
+```c
+#define dev_fwnode(dev)                          \
+    _Generic((dev),                              \
+        const struct device *: __dev_fwnode_const, \
+        struct device *: __dev_fwnode)(dev)
+```
+
+---
+
+### الـ Scoped Iteration — Memory Safety
+
+الـ framework بيدعم **scoped iteration** مستخدماً الـ cleanup mechanism (`__free`):
+
+```c
+/* classic iteration — requires manual fwnode_handle_put() on break */
+fwnode_for_each_child_node(parent, child) {
+    if (condition)
+        break; /* MUST call fwnode_handle_put(child) here! */
+}
+
+/* scoped iteration — automatic cleanup via DEFINE_FREE */
+fwnode_for_each_child_node_scoped(parent, child) {
+    if (condition)
+        break; /* child is auto-released when scope exits */
+}
+```
+
+الـ `DEFINE_FREE` هو macro من الـ `cleanup.h` subsystem بيـregister destructor للـ variable:
+
+```c
+DEFINE_FREE(fwnode_handle, struct fwnode_handle *, fwnode_handle_put(_T))
+```
+
+ده بيمنع reference leaks لما الـ loop بيـbreak مبكر.
+
+---
+
+### ما الذي يـown الـ Framework vs ما بيـdelegate للـ Backends
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│              ما الـ Framework بيـOWN                         │
+├──────────────────────────────────────────────────────────────┤
+│ • الـ unified API surface (device_property_*, fwnode_*)      │
+│ • الـ dispatch logic (fwnode_call_*_op macros)              │
+│ • الـ secondary fwnode fallback logic                        │
+│ • الـ graph traversal wrappers                              │
+│ • الـ software_node implementation كاملة                    │
+│ • الـ property_entry inline/pointer storage logic           │
+│ • الـ scoped iteration + DEFINE_FREE                        │
+│ • الـ connection finding (fwnode_connection_find_match)      │
+└──────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────┐
+│              ما بيـDelegate للـ Backends                     │
+├──────────────────────────────────────────────────────────────┤
+│ • parsing الـ DT binary blob ← OF subsystem                  │
+│ • parsing الـ ACPI tables ← ACPI subsystem                  │
+│ • reference counting semantics (get/put) ← كل backend بـalgo│
+│ • تحديد لو device "available" ← backend بيقرر              │
+│ • الـ IRQ mapping من property index ← platform-specific     │
+│ • الـ iomap للـ memory regions ← backend-specific           │
+│ • إنشاء فـdevlinks (add_links) ← backend بيعرف topology    │
+└──────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### كيفية ربط كل الـ Structs ببعض — Big Picture
 
 ```
 struct device
-    └── fwnode ──► DT fwnode_handle
-                        secondary ──► swnode fwnode_handle
-                                          secondary ──► NULL
+├── fwnode: *fwnode_handle  ──────────────────────────────────┐
+└── ...                                                        │
+                                                               ▼
+                                             struct fwnode_handle
+                                             ├── secondary: *fwnode_handle (optional)
+                                             ├── ops: *fwnode_operations
+                                             │       ├── get / put
+                                             │       ├── property_present
+                                             │       ├── property_read_int_array
+                                             │       ├── property_read_string_array
+                                             │       ├── get_parent
+                                             │       ├── get_next_child_node
+                                             │       ├── graph_get_next_endpoint
+                                             │       └── add_links
+                                             ├── dev: *device (backref)
+                                             ├── suppliers: list_head
+                                             ├── consumers: list_head
+                                             └── flags: u8
+
+If backend == software_node:
+    fwnode_handle is embedded inside:
+    struct swnode {
+        struct kobject kobj;
+        struct fwnode_handle fwnode;  ◄── embedded here
+        const struct software_node *node;
+        struct swnode *parent;
+        struct list_head children;
+        /* ... */
+    }
+    and software_node contains:
+    struct software_node
+    ├── name: "my-device"
+    ├── parent: *software_node
+    └── properties: *property_entry[]
+                    ├── { "clock-frequency", 4, true, U32, {.u32_data[0]=400000} }
+                    ├── { "compatible",      8, true, STR, {.str[0]="bosch,bme280"} }
+                    └── { NULL }  ← sentinel
 ```
-
-لو property مش موجودة في الـ DT — الـ kernel بيـ fallback للـ `secondary` تلقائياً. ده بيخلي platform code يـ"override" أو يـ"augment" الـ DT properties بـ software nodes بدون تعديل الـ DTB.
-
-**Use case حقيقي:** ACPI-based tablet عنده camera sensor الـ ACPI table بتاعه ناقصة بعض الـ properties المطلوبة للـ driver. الـ kernel بيضيف software node بالـ missing properties وبيـ chain له على الـ ACPI fwnode.
 
 ---
 
-### الـ Scoped Iteration: `__free(fwnode_handle)`
+### مثال Driver حقيقي: I2C Touchscreen
 
 ```c
-#define fwnode_for_each_child_node_scoped(fwnode, child)        \
-    for (struct fwnode_handle *child __free(fwnode_handle) =    \
-            fwnode_get_next_child_node(fwnode, NULL);           \
-         child; child = fwnode_get_next_child_node(fwnode, child))
-```
-
-ده بيستخدم الـ **cleanup attribute** (مضاف في kernel 6.x) اللي بيعمل `fwnode_handle_put()` تلقائياً لما الـ scope بينتهي — حتى لو فيه `break` أو `return` جوا الـ loop. من غيره، الـ developer ممكن ينسى الـ put ويحصل reference leak.
-
----
-
-### الـ Connection API: `fwnode_connection_find_match`
-
-```c
-typedef void *(*devcon_match_fn_t)(const struct fwnode_handle *fwnode,
-                                    const char *id, void *data);
-
-void *fwnode_connection_find_match(const struct fwnode_handle *fwnode,
-                                   const char *con_id, void *data,
-                                   devcon_match_fn_t match);
-```
-
-ده بيخلي subsystem (مثلاً GPIO أو regulator) يـ"match" connections بين devices بناءً على property names. مثلاً الـ regulator framework بيستخدمه لإيجاد "vdd-supply" connection.
-
----
-
-### إيه اللي الـ Subsystem ده بيملكه vs إيه اللي بيفوضه للـ Backends
-
-| ما يملكه الـ Subsystem | ما يفوضه للـ Backends |
-|------------------------|----------------------|
-| الـ unified API surface (`device_property_*`, `fwnode_property_*`) | تفسير الـ DTB أو ACPI tables |
-| الـ `fwnode_handle` struct وإدارة الـ reference counting | بناء الـ tree hierarchy من الـ firmware |
-| الـ `fwnode_call_*_op` dispatch macros | تحديد إيه معنى "device is available" |
-| الـ `secondary` chaining logic | قراءة الـ IRQ numbers من الـ firmware |
-| الـ Software Node registration/lookup | iomap من firmware resources |
-| الـ Graph traversal API (port/endpoint model) | add_links للـ probe ordering |
-| الـ inline optimization في `property_entry` | |
-| الـ scoped cleanup للـ fwnode references | |
-
----
-
-### الـ `dev_dma_attr` و DMA Support
-
-الـ `fwnode_operations` بتعرض:
-
-```c
-bool (*device_dma_supported)(const struct fwnode_handle *fwnode);
-enum dev_dma_attr (*device_get_dma_attr)(const struct fwnode_handle *fwnode);
-```
-
-الـ `enum dev_dma_attr`:
-
-```c
-enum dev_dma_attr {
-    DEV_DMA_NOT_SUPPORTED,   /* الـ device مش بيدعم DMA */
-    DEV_DMA_NON_COHERENT,    /* بيدعم DMA بس محتاج explicit cache ops */
-    DEV_DMA_COHERENT,        /* بيدعم coherent DMA (hardware does cache sync) */
+/* في board file أو platform init code */
+static const struct property_entry ts_props[] = {
+    PROPERTY_ENTRY_U32("touchscreen-size-x", 1080),
+    PROPERTY_ENTRY_U32("touchscreen-size-y", 1920),
+    PROPERTY_ENTRY_BOOL("touchscreen-inverted-x"),
+    PROPERTY_ENTRY_STRING("compatible", "edt,edt-ft5406"),
+    { }
 };
-```
 
-في DT، ده بيتحدد من `dma-coherent` property. الـ DMA subsystem بيسأل عنه عشان يعرف يستخدم `dma_alloc_coherent()` ولا `dma_alloc_noncoherent()`.
+static const struct software_node ts_swnode = {
+    .name       = "ts@38",
+    .properties = ts_props,
+};
 
----
-
-### مثال كامل: Driver بيستخدم الـ API
-
-```c
-static int my_sensor_probe(struct i2c_client *client)
+/* في الـ driver probe() */
+static int ts_probe(struct i2c_client *client)
 {
     struct device *dev = &client->dev;
-    u32 clock_freq;
-    const char *label;
-    struct fwnode_handle *ep;
-    int ret;
+    u32 width, height;
+    bool inv_x;
 
-    /* قراءة scalar property */
-    ret = device_property_read_u32(dev, "clock-frequency", &clock_freq);
-    if (ret)
-        return dev_err_probe(dev, ret, "missing clock-frequency\n");
+    /* يقرأ بـ unified API — مش مهم مصدر الـ properties */
+    if (device_property_read_u32(dev, "touchscreen-size-x", &width))
+        width = 800; /* default */
 
-    /* قراءة string property */
-    ret = device_property_read_string(dev, "label", &label);
-    if (ret)
-        label = "unknown";
+    if (device_property_read_u32(dev, "touchscreen-size-y", &height))
+        height = 600;
 
-    /* check boolean property */
-    if (device_property_read_bool(dev, "wakeup-source"))
-        device_init_wakeup(dev, true);
+    inv_x = device_property_read_bool(dev, "touchscreen-inverted-x");
 
-    /* check compatible */
-    if (device_is_compatible(dev, "myvendor,sensor-v2")) {
-        /* v2-specific init */
-    }
-
-    /* traverse graph endpoints */
-    fwnode_graph_for_each_endpoint(dev_fwnode(dev), ep) {
-        struct fwnode_handle *remote;
-        remote = fwnode_graph_get_remote_port_parent(ep);
-        /* process remote device */
-        fwnode_handle_put(remote);
-    }
-
+    dev_info(dev, "TS: %dx%d, inv_x=%d\n", width, height, inv_x);
     return 0;
 }
 ```
 
-نفس الـ driver ده هيشتغل على DT board، ACPI laptop، وحتى platform بدون firmware لو عملنا `device_add_software_node()` للـ device.
+نفس الـ driver بيشتغل مع DT، ACPI، أو software_node من غير أي تغيير.
 ## Phase 3: التفاصيل العميقة — الـ Structs والعلاقات
 
 ---
 
-### الـ Enums والـ Flags — Cheatsheet
+### 0. الـ Flags والـ Enums والـ Config Options
 
-#### `enum dev_prop_type` — نوع الـ property
+#### `enum dev_prop_type` — أنواع الـ properties
 
 | القيمة | المعنى |
 |---|---|
-| `DEV_PROP_U8` | بايت واحد unsigned |
-| `DEV_PROP_U16` | 16-bit unsigned |
-| `DEV_PROP_U32` | 32-bit unsigned (الأكثر استخداماً) |
-| `DEV_PROP_U64` | 64-bit unsigned |
-| `DEV_PROP_STRING` | نص `const char *` |
-| `DEV_PROP_REF` | مرجع لـ `software_node_ref_args` |
+| `DEV_PROP_U8` | integer 8-bit |
+| `DEV_PROP_U16` | integer 16-bit |
+| `DEV_PROP_U32` | integer 32-bit (الأشيع في الـ DT) |
+| `DEV_PROP_U64` | integer 64-bit |
+| `DEV_PROP_STRING` | **الـ** `const char *` |
+| `DEV_PROP_REF` | reference لـ node تاني (`software_node_ref_args`) |
 
 #### `enum dev_dma_attr` — قدرات الـ DMA
 
 | القيمة | المعنى |
 |---|---|
-| `DEV_DMA_NOT_SUPPORTED` | الجهاز مش بيعمل DMA خالص |
-| `DEV_DMA_NON_COHERENT` | DMA بس محتاج cache sync يدوي |
-| `DEV_DMA_COHERENT` | DMA coherent — hardware بيعمل sync لوحده |
+| `DEV_DMA_NOT_SUPPORTED` | الجهاز مش بيدعم DMA خالص |
+| `DEV_DMA_NON_COHERENT` | DMA موجود بس محتاج sync يدوي |
+| `DEV_DMA_COHERENT` | DMA coherent — الـ cache متزامن أوتوماتيك |
 
-#### `fwnode_handle` flags
+#### `FWNODE_FLAG_*` — flags الـ fwnode_handle
 
-| الـ Flag | الـ Bit | المعنى |
+| الـ Flag | البت | المعنى |
 |---|---|---|
-| `FWNODE_FLAG_LINKS_ADDED` | `BIT(0)` | الـ fwnode اتحلل وأُضيفت links بتاعته |
-| `FWNODE_FLAG_NOT_DEVICE` | `BIT(1)` | مش هيتحول لـ `struct device` أبداً |
-| `FWNODE_FLAG_INITIALIZED` | `BIT(2)` | الـ hardware المقابل له اتهيّأ |
-| `FWNODE_FLAG_NEEDS_CHILD_BOUND_ON_ADD` | `BIT(3)` | محتاج الـ children يعملوا bind الأول |
-| `FWNODE_FLAG_BEST_EFFORT` | `BIT(4)` | يـprobe بدري حتى لو في suppliers ناقصة |
-| `FWNODE_FLAG_VISITED` | `BIT(5)` | اتزار أثناء traversal (cycle detection) |
+| `FWNODE_FLAG_LINKS_ADDED` | `BIT(0)` | تم parse الـ fwnode links بالفعل |
+| `FWNODE_FLAG_NOT_DEVICE` | `BIT(1)` | الـ node دي مش هتتحول لـ `struct device` |
+| `FWNODE_FLAG_INITIALIZED` | `BIT(2)` | الـ hardware اتهيأ |
+| `FWNODE_FLAG_NEEDS_CHILD_BOUND_ON_ADD` | `BIT(3)` | يحتاج الـ child devices تتـ bind الأول |
+| `FWNODE_FLAG_BEST_EFFORT` | `BIT(4)` | يعدي لو الـ suppliers ناقصين |
+| `FWNODE_FLAG_VISITED` | `BIT(5)` | اتزار أثناء الـ traversal (داخلي) |
 
-#### `fwnode_link` flags
+#### `FWLINK_FLAG_*` — flags الـ fwnode_link
 
-| الـ Flag | الـ Bit | المعنى |
+| الـ Flag | البت | المعنى |
 |---|---|---|
-| `FWLINK_FLAG_CYCLE` | `BIT(0)` | الـ link جزء من cycle — متـdefer الـ probe |
-| `FWLINK_FLAG_IGNORE` | `BIT(1)` | تجاهل الـ link كلياً حتى في cycle detection |
+| `FWLINK_FLAG_CYCLE` | `BIT(0)` | الـ link جزء من cycle — متـ defer الـ probe |
+| `FWLINK_FLAG_IGNORE` | `BIT(1)` | تجاهل الـ link تماماً حتى في cycle detection |
 
-#### `fwnode_graph` lookup flags (في `property.h`)
+#### `FWNODE_GRAPH_*` — flags بحث الـ graph
 
-| الـ Flag | الـ Bit | المعنى |
+| الـ Flag | البت | المعنى |
 |---|---|---|
-| `FWNODE_GRAPH_ENDPOINT_NEXT` | `BIT(0)` | لو مفيش exact match، خد أقرب endpoint ID أكبر |
-| `FWNODE_GRAPH_DEVICE_DISABLED` | `BIT(1)` | اسمح بـ endpoints تبع devices معطّلة أو غير متصلة |
+| `FWNODE_GRAPH_ENDPOINT_NEXT` | `BIT(0)` | لو مفيش exact match، خد أقرب ID أكبر |
+| `FWNODE_GRAPH_DEVICE_DISABLED` | `BIT(1)` | ضم الـ endpoints اللي جهازها disabled |
 
-#### `NR_FWNODE_REFERENCE_ARGS` = 16
-الحد الأقصى لعدد الـ integer arguments في أي reference property.
+#### الـ Config Options المؤثرة
 
----
+| الـ Option | التأثير |
+|---|---|
+| `CONFIG_CPU_BIG_ENDIAN` | يأثر على `fwnode_device_is_big_endian()` — لو مفعل، الـ `native-endian` property تعني BE |
 
-### الـ Structs المهمة
+#### الـ Macros المساعدة — cheatsheet
 
----
-
-#### 1. `struct fwnode_handle` (في `fwnode.h`)
-
-**الغرض:** الـ handle الموحّد اللي بيمثّل أي firmware node — سواء كان OF (Device Tree)، أو ACPI، أو software node. ده الـ abstraction layer اللي بيخلي الـ drivers ما تشوفش الفرق بين الأنواع دي.
-
-| الحقل | النوع | الدور |
-|---|---|---|
-| `secondary` | `struct fwnode_handle *` | pointer لـ fwnode تاني (fallback/chain) — بيُستخدم لربط ACPI وـ OF لنفس الجهاز |
-| `ops` | `const struct fwnode_operations *` | جدول العمليات (vtable) — ده اللي بيخلي الـ polymorphism يشتغل |
-| `dev` | `struct device *` | الـ device المرتبط (بيُستخدم حصرياً من device links) |
-| `suppliers` | `struct list_head` | قايمة الـ fwnode links اللي ده consumer فيها |
-| `consumers` | `struct list_head` | قايمة الـ fwnode links اللي ده supplier فيها |
-| `flags` | `u8` | مجموعة `FWNODE_FLAG_*` |
+| الـ Macro | الاستخدام |
+|---|---|
+| `PROPERTY_ENTRY_U8(name, val)` | inline scalar u8 |
+| `PROPERTY_ENTRY_U32(name, val)` | inline scalar u32 (الأكثر شيوعاً) |
+| `PROPERTY_ENTRY_STRING(name, val)` | inline string |
+| `PROPERTY_ENTRY_BOOL(name)` | boolean — length=0, is_inline=true |
+| `PROPERTY_ENTRY_U32_ARRAY(name, arr)` | array بـ pointer خارجي |
+| `PROPERTY_ENTRY_REF(name, ref, ...)` | reference لـ software_node مع args |
+| `SOFTWARE_NODE_REFERENCE(ref, ...)` | يبني `software_node_ref_args` inline |
+| `SOFTWARE_NODE(name, props, parent)` | يبني `software_node` بسرعة |
+| `NR_FWNODE_REFERENCE_ARGS` | `16` — أقصى عدد args في reference |
 
 ---
 
-#### 2. `struct fwnode_operations` (في `fwnode.h`)
+### 1. الـ Structs المهمة
 
-**الغرض:** الـ vtable — كل نوع firmware node (OF/ACPI/swnode) بيسجّل نسخته الخاصة من الـ ops دي. ده اللي بيخلي `fwnode_property_read_u32()` تشتغل على DT وعلى ACPI بدون ما الـ driver يعرف الفرق.
+#### `struct fwnode_handle`
 
-| الـ Op | التوقيع المختصر | الدور |
-|---|---|---|
-| `get` / `put` | `fwnode → fwnode` / `void` | reference counting |
-| `device_is_available` | `fwnode → bool` | هل الجهاز enabled في الـ firmware? |
-| `device_get_match_data` | `fwnode, dev → void *` | الـ driver data المرتبط بالـ compatible/HID |
-| `device_dma_supported` | `fwnode → bool` | هل بيدعم DMA? |
-| `device_get_dma_attr` | `fwnode → enum dev_dma_attr` | coherent ولا non-coherent? |
-| `property_present` | `fwnode, name → bool` | هل الـ property موجودة؟ |
-| `property_read_bool` | `fwnode, name → bool` | قيمة property بوليانية |
-| `property_read_int_array` | `fwnode, name, elem_size, val, nval → int` | قراءة array من integers بأي حجم |
-| `property_read_string_array` | `fwnode, name, val, nval → int` | قراءة array من strings |
-| `get_name` / `get_name_prefix` | `fwnode → const char *` | اسم الـ node |
-| `get_parent` | `fwnode → fwnode` | الـ node الأب |
-| `get_next_child_node` | `fwnode, prev → fwnode` | iteration على الأبناء |
-| `get_named_child_node` | `fwnode, name → fwnode` | ابن باسم معين |
-| `get_reference_args` | `fwnode, prop, nargs_prop, nargs, idx → args` | reference property مع arguments |
-| `graph_get_next_endpoint` | `fwnode, prev → fwnode` | iteration على endpoints |
-| `graph_get_remote_endpoint` | `fwnode → fwnode` | الـ endpoint التاني في الـ connection |
-| `graph_get_port_parent` | `fwnode → fwnode` | الـ device اللي بيملك الـ port |
-| `graph_parse_endpoint` | `fwnode, endpoint → int` | استخراج port/id |
-| `iomap` | `fwnode, index → void __iomem *` | map الـ MMIO region |
-| `irq_get` | `fwnode, index → int` | رقم الـ IRQ |
-| `add_links` | `fwnode → int` | إنشاء fwnode links للـ suppliers |
+**الغرض:** الـ handle الأساسي لأي firmware node — سواء OF (Device Tree)، ACPI، أو software. كل node في الـ tree بتتمثل بـ `fwnode_handle`.
 
----
-
-#### 3. `struct fwnode_link` (في `fwnode.h`)
-
-**الغرض:** بيمثّل dependency link بين firmware node supplier وـ consumer — ده اللي بيستخدمه الـ `fw_devlink` system لضمان ترتيب الـ probe.
-
-| الحقل | النوع | الدور |
-|---|---|---|
-| `supplier` | `struct fwnode_handle *` | الـ node اللي بيقدّم الـ resource |
-| `s_hook` | `struct list_head` | hook في قايمة `suppliers` بتاعة الـ supplier |
-| `consumer` | `struct fwnode_handle *` | الـ node اللي بيحتاج الـ resource |
-| `c_hook` | `struct list_head` | hook في قايمة `consumers` بتاعة الـ consumer |
-| `flags` | `u8` | `FWLINK_FLAG_*` |
-
----
-
-#### 4. `struct fwnode_endpoint` (في `fwnode.h`)
-
-**الغرض:** بيمثّل endpoint في الـ fwnode graph — نقطة الاتصال بين جهازين (مثلاً: كاميرا → ISP).
-
-| الحقل | النوع | الدور |
-|---|---|---|
-| `port` | `unsigned int` | رقم الـ port على الـ device |
-| `id` | `unsigned int` | رقم الـ endpoint داخل الـ port |
-| `local_fwnode` | `const struct fwnode_handle *` | الـ fwnode node بتاع الـ endpoint نفسه |
-
----
-
-#### 5. `struct fwnode_reference_args` (في `fwnode.h`)
-
-**الغرض:** نتيجة تحليل reference property — بيجيب الـ fwnode المُشار إليه مع الـ integer arguments المصاحبة له. مثلاً في DT: `gpios = <&gpioc 5 GPIO_ACTIVE_LOW>` → fwnode=gpioc، args=[5, 1].
-
-| الحقل | النوع | الدور |
-|---|---|---|
-| `fwnode` | `struct fwnode_handle *` | الـ node المُشار إليه |
-| `nargs` | `unsigned int` | عدد الـ arguments الفعلية |
-| `args[16]` | `u64[]` | الـ arguments (max 16) |
-
----
-
-#### 6. `struct property_entry` (في `property.h`)
-
-**الغرض:** تمثيل "مدمج" لأي device property — بيُستخدم في الـ software nodes والـ built-in properties. بيخلّيك تعرّف properties في الـ C code مباشرةً بدون DT أو ACPI.
-
-| الحقل | النوع | الدور |
-|---|---|---|
-| `name` | `const char *` | اسم الـ property |
-| `length` | `size_t` | حجم البيانات بالبايت |
-| `is_inline` | `bool` | `true` لو القيمة مخزّنة جوّا الـ struct نفسه |
-| `type` | `enum dev_prop_type` | نوع البيانات |
-| `pointer` | `const void *` | pointer للبيانات لو مش inline |
-| `value` | union | البيانات inline (u8[8] / u16[4] / u32[2] / u64[1] / str[1]) |
-
-الـ union الداخلي بيخلي القيمة الواحدة تتخزن مباشرة في الـ struct بدون allocation لو حجمها ≤ 8 bytes. لو أكبر، بيتخزن في `pointer`.
-
----
-
-#### 7. `struct software_node_ref_args` (في `property.h`)
-
-**الغرض:** reference property في الـ software nodes — بيخلّيك تشير من software node لـ software node تاني (أو لـ fwnode_handle) مع إرفاق integer arguments زي ما DT بيعمل.
-
-| الحقل | النوع | الدور |
-|---|---|---|
-| `swnode` | `const struct software_node *` | الـ target لو كان software node |
-| `fwnode` | `struct fwnode_handle *` | الـ target لو كان fwnode مباشر |
-| `nargs` | `unsigned int` | عدد الـ args |
-| `args[16]` | `u64[]` | الـ integer arguments |
-
----
-
-#### 8. `struct software_node` (في `property.h`)
-
-**الغرض:** بيخلّيك تكتب firmware description للجهاز في C code خالص — من غير DT ومن غير ACPI. بيُستخدم لـ devices اللي الـ BIOS/firmware بتاعها ناقصة أو غلط.
-
-| الحقل | النوع | الدور |
-|---|---|---|
-| `name` | `const char *` | اسم الـ node (بيبقى unique جوّا parent) |
-| `parent` | `const struct software_node *` | الـ node الأب في الشجرة |
-| `properties` | `const struct property_entry *` | array من الـ properties (NULL-terminated) |
-
----
-
-### مخططات العلاقات بين الـ Structs
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                         struct device                               │
-│                    (kernel device object)                           │
-└──────────────────────────┬──────────────────────────────────────────┘
-                           │  dev->fwnode
-                           ▼
-┌──────────────────────────────────────────────────────────────────┐
-│                    struct fwnode_handle                          │
-│  ┌──────────┐  ┌─────────────────────────┐  ┌────────────────┐  │
-│  │secondary ├─►│ fwnode_handle (ACPI/OF) │  │ops (vtable ptr)│  │
-│  └──────────┘  └─────────────────────────┘  └───────┬────────┘  │
-│  ┌──────────┐                                        │           │
-│  │suppliers │◄──── fwnode_link.s_hook                │           │
-│  └──────────┘                                        ▼           │
-│  ┌──────────┐                           ┌─────────────────────┐  │
-│  │consumers │◄──── fwnode_link.c_hook   │ fwnode_operations   │  │
-│  └──────────┘                           │ (OF/ACPI/swnode ops)│  │
-└──────────────────────────────────────────┴─────────────────────┘
-
-                    ▲ (embedded in)
-┌───────────────────┴──────────────────────────────────────────────┐
-│              struct software_node_fwnode (internal)              │
-│  ┌──────────────────────┐   points to                           │
-│  │  struct software_node├──────────────────────────────────────►│
-│  │  .name               │   ┌────────────────────────────────┐  │
-│  │  .parent─────────────┼──►│  struct software_node (parent) │  │
-│  │  .properties─────────┼──►│  ...                           │  │
-│  └──────────────────────┘   └────────────────────────────────┘  │
-│         │ .properties                                            │
-│         ▼                                                        │
-│  ┌──────────────────────────────────────────────────────────┐   │
-│  │  struct property_entry[]  (NULL-terminated array)        │   │
-│  │  [0]: { name="clock-frequency", type=U32, val=100000000} │   │
-│  │  [1]: { name="compatible",  type=STRING, ptr="ti,bq..."}│   │
-│  │  [2]: { name="vdd-supply",  type=REF,    ptr=ref_args } │   │
-│  │  [3]: { .name = NULL }  ← sentinel                       │   │
-│  └──────────────────────────────────────────────────────────┘   │
-└──────────────────────────────────────────────────────────────────┘
+```c
+struct fwnode_handle {
+    struct fwnode_handle *secondary; // فلبك لـ node تاني (مثلاً ACPI fallback لـ DT)
+    const struct fwnode_operations *ops; // الـ vtable — محدد نوع الـ backend
+    struct device *dev;       // الـ device المربوط بالـ node (لو موجود)
+    struct list_head suppliers; // الـ nodes اللي الـ node دي تعتمد عليها
+    struct list_head consumers; // الـ nodes اللي بتعتمد على الـ node دي
+    u8 flags;                 // FWNODE_FLAG_* بالـ bits
+};
 ```
 
-```
-struct fwnode_link — ربط supplier-consumer
+**الارتباطات:**
+- بتشاور على `fwnode_operations` (الـ vtable)
+- مربوطة بـ `struct device` عن طريق `dev`
+- بتشكل tree عن طريق `get_parent` / `get_next_child_node` في الـ ops
 
-┌──────────────────┐         ┌──────────────────┐
-│  fwnode_handle   │         │  fwnode_handle   │
-│  (supplier)      │         │  (consumer)      │
-│  .consumers list │         │  .suppliers list │
-└──────┬───────────┘         └──────────┬───────┘
-       │                                │
-       │       ┌──────────────────┐     │
-       └──────►│  fwnode_link     │◄────┘
-               │  .supplier ──────┼──► supplier fwnode
-               │  .s_hook (list)  │
-               │  .consumer ──────┼──► consumer fwnode
-               │  .c_hook (list)  │
-               │  .flags          │
-               └──────────────────┘
+---
+
+#### `struct fwnode_operations`
+
+**الغرض:** الـ vtable (virtual function table) — بتفصل الـ API العام عن الـ backend implementation (OF/ACPI/swnode).
+
+```c
+struct fwnode_operations {
+    struct fwnode_handle *(*get)(struct fwnode_handle *);   // ref-count up
+    void (*put)(struct fwnode_handle *);                    // ref-count down
+    bool (*device_is_available)(...);    // هل الجهاز enabled في الـ firmware؟
+    const void *(*device_get_match_data)(...); // match data من الـ id_table
+    bool (*device_dma_supported)(...);
+    enum dev_dma_attr (*device_get_dma_attr)(...);
+    bool (*property_present)(...);        // هل الـ property موجودة؟
+    bool (*property_read_bool)(...);
+    int (*property_read_int_array)(...);  // قراءة integer array (core API)
+    int (*property_read_string_array)(...);
+    const char *(*get_name)(...);
+    const char *(*get_name_prefix)(...);
+    struct fwnode_handle *(*get_parent)(...);
+    struct fwnode_handle *(*get_next_child_node)(...);
+    struct fwnode_handle *(*get_named_child_node)(...);
+    int (*get_reference_args)(...);       // resolve property reference مع args
+    struct fwnode_handle *(*graph_get_next_endpoint)(...);
+    struct fwnode_handle *(*graph_get_remote_endpoint)(...);
+    struct fwnode_handle *(*graph_get_port_parent)(...);
+    int (*graph_parse_endpoint)(...);
+    void __iomem *(*iomap)(...);          // map مساحة الـ registers
+    int (*irq_get)(...);
+    int (*add_links)(...);                // يبني dependency links
+};
 ```
 
-```
-fwnode graph — ربط endpoints (كاميرا ← → ISP مثلاً)
+**الارتباطات:** كل `fwnode_handle` بيشاور على instance واحد من الـ ops (مشترك بين كل nodes من نفس النوع).
 
-  [camera device]              [ISP device]
-  fwnode_handle                fwnode_handle
-       │                            │
-   port@0                       port@0
-       │                            │
-   endpoint@0 ◄────────────► endpoint@0
-   (local)     remote-endpoint  (remote)
-       │                            │
-  fwnode_endpoint              fwnode_endpoint
-  .port=0                      .port=0
-  .id=0                        .id=0
-  .local_fwnode=*              .local_fwnode=*
+---
+
+#### `struct property_entry`
+
+**الغرض:** تمثيل واحدة property في الـ software node — سواء كانت قيمة inline صغيرة أو pointer لبيانات خارجية.
+
+```c
+struct property_entry {
+    const char *name;     // اسم الـ property (مثلاً "clock-frequency")
+    size_t length;        // حجم البيانات بالـ bytes
+    bool is_inline;       // true = القيمة محفوظة مباشرة في الـ union
+    enum dev_prop_type type; // نوع البيانات (U8/U16/U32/U64/STRING/REF)
+    union {
+        const void *pointer;  // pointer للبيانات لو مش inline
+        union {
+            u8  u8_data[8];   // inline: 8 قيم u8
+            u16 u16_data[4];  // inline: 4 قيم u16
+            u32 u32_data[2];  // inline: 2 قيم u32
+            u64 u64_data[1];  // inline: قيمة u64 واحدة
+            const char *str[1]; // inline: string pointer واحد
+        } value;
+    };
+};
+```
+
+**ملحوظة مهمة:** الـ inline union كلها بحجم 8 bytes (حجم `u64`) — ده تصميم مقصود عشان توفر allocation لـ scalars صغيرة.
+
+**الارتباطات:**
+- array منها بتتحمل في `software_node.properties`
+- بتستخدم `software_node_ref_args` لما `type == DEV_PROP_REF`
+
+---
+
+#### `struct software_node`
+
+**الغرض:** node افتراضية بالكامل في الـ kernel — بتوفر firmware description لما الـ hardware مش معرّف في ACPI أو Device Tree (مثلاً platform devices قديمة أو USB devices محتاجة properties إضافية).
+
+```c
+struct software_node {
+    const char *name;                      // اسم الـ node
+    const struct software_node *parent;    // الـ parent في الـ tree
+    const struct property_entry *properties; // array من الـ properties (NULL-terminated)
+};
+```
+
+**الارتباطات:**
+- بتتحول لـ `fwnode_handle` عن طريق `software_node_fwnode()`
+- الـ properties بتاعتها بتتقرأ عن طريق نفس `fwnode_property_*` API
+- ممكن تتربط بـ `struct device` عن طريق `device_add_software_node()`
+
+---
+
+#### `struct software_node_ref_args`
+
+**الغرض:** property من نوع reference — بتشاور على node تانية مع arguments إضافية (مثل `clocks = <&clk0 0>` في DT).
+
+```c
+struct software_node_ref_args {
+    const struct software_node *swnode; // reference لـ software_node
+    struct fwnode_handle *fwnode;       // أو reference مباشر لـ fwnode
+    unsigned int nargs;                 // عدد الـ args
+    u64 args[NR_FWNODE_REFERENCE_ARGS]; // الـ args (max 16)
+};
+```
+
+**الارتباطات:**
+- بتتخزن كـ `pointer` في `property_entry` لما `type == DEV_PROP_REF`
+- بتتقرأ عن طريق `fwnode_property_get_reference_args()`
+
+---
+
+#### `struct fwnode_link`
+
+**الغرض:** dependency link بين node supplier وnode consumer — الـ kernel بيستخدمها عشان يتأكد إن الـ supplier اتـ probe قبل الـ consumer.
+
+```c
+struct fwnode_link {
+    struct fwnode_handle *supplier; // الـ node اللي بتوفر (مثلاً clock provider)
+    struct list_head s_hook;        // hook في قائمة suppliers.consumers
+    struct fwnode_handle *consumer; // الـ node اللي بتستهلك
+    struct list_head c_hook;        // hook في قائمة consumers.suppliers
+    u8 flags;                       // FWLINK_FLAG_*
+};
 ```
 
 ---
 
-### دورة الحياة — Lifecycle Diagrams
+#### `struct fwnode_endpoint`
 
-#### دورة حياة `software_node`
+**الغرض:** يمثل endpoint في الـ fwnode graph — نظام الـ OF graph للتعبير عن الاتصالات بين الأجهزة (مثلاً camera sensor → ISP).
 
-```
-[تعريف static في C code]
-        │
-        │  static const struct property_entry props[] = {
-        │      PROPERTY_ENTRY_U32("clock-frequency", 400000),
-        │      PROPERTY_ENTRY_STRING("compatible", "vendor,chip"),
-        │      { }
-        │  };
-        │  static const struct software_node node = {
-        │      .name = "my-i2c-device",
-        │      .properties = props,
-        │  };
-        ▼
-[التسجيل — Registration]
-        │
-        ├─ software_node_register(&node)
-        │      → يخلق swnode_fwnode داخلي
-        │      → يربطه بالـ fwnode_operations بتاعة swnode
-        │      → يضيفه لـ global software node list
-        ▼
-[الربط بالـ device]
-        │
-        ├─ device_add_software_node(dev, &node)
-        │      → يعمل dev->fwnode = software_node_fwnode(&node)
-        │      → الـ driver دلوقتي يقدر يقرأ properties عبر
-        │        device_property_read_u32(dev, ...)
-        ▼
-[الاستخدام — Usage]
-        │
-        ├─ device_property_read_u32(dev, "clock-frequency", &val)
-        ├─ device_is_compatible(dev, "vendor,chip")
-        ├─ device_for_each_child_node(dev, child) { ... }
-        ▼
-[الإزالة — Teardown]
-        │
-        ├─ device_remove_software_node(dev)
-        │      → يفكّ ربط الـ dev عن الـ fwnode
-        │
-        └─ software_node_unregister(&node)
-               → يزيله من الـ global list
-               → يحرر الـ swnode_fwnode
-```
-
-#### دورة حياة `fwnode_handle` مع Reference Counting
-
-```
-[الإنشاء]
-  fwnode_init(fwnode, &my_ops)
-       → fwnode->ops = &my_ops
-       → INIT_LIST_HEAD(suppliers/consumers)
-
-[زيادة الـ reference]
-  fwnode_handle_get(fwnode)
-       → ops->get(fwnode)   [implementation-specific refcount]
-
-[الاستخدام في loops — مع scoped cleanup]
-  fwnode_for_each_child_node_scoped(parent, child) {
-      /* child automatically put() on loop exit */
-      device_property_read_u32(child_dev, ...);
-  }
-  /* __free(fwnode_handle) → fwnode_handle_put(child) */
-
-[الإنهاء]
-  fwnode_handle_put(fwnode)
-       → ops->put(fwnode)   [decrement refcount, maybe free]
-```
-
-#### دورة حياة `fwnode_reference_args`
-
-```
-[طلب reference property]
-  fwnode_property_get_reference_args(fwnode,
-      "clocks",      /* property name */
-      "#clock-cells",/* nargs property */
-      0,             /* nargs fallback */
-      0,             /* index */
-      &args)         /* output */
-       ↓
-  [ops->get_reference_args() يملا:]
-       args.fwnode  = pointer لـ clock provider
-       args.nargs   = 1
-       args.args[0] = clock ID
-
-[الاستخدام]
-  clk = clk_get_from_fwnode(&args);
-
-[التحرير]
-  fwnode_handle_put(args.fwnode);
+```c
+struct fwnode_endpoint {
+    unsigned int port;                    // رقم الـ port
+    unsigned int id;                      // رقم الـ endpoint في الـ port
+    const struct fwnode_handle *local_fwnode; // الـ fwnode الخاص بالـ endpoint ده
+};
 ```
 
 ---
 
-### مخططات تدفق الاستدعاء — Call Flow Diagrams
+#### `struct fwnode_reference_args`
 
-#### قراءة property من driver
+**الغرض:** نتيجة `get_reference_args` — بتحتوي على الـ fwnode المُشار إليه مع الـ integer arguments.
+
+```c
+struct fwnode_reference_args {
+    struct fwnode_handle *fwnode; // الـ node المُشار إليها
+    unsigned int nargs;           // عدد الـ args الفعلية
+    u64 args[NR_FWNODE_REFERENCE_ARGS]; // القيم (max 16)
+};
+```
+
+---
+
+### 2. مخطط علاقات الـ Structs
 
 ```
-driver calls:
-  device_property_read_u32(dev, "clock-frequency", &val)
+                    ┌──────────────────────────────┐
+                    │       struct device           │
+                    │  (drivers/base/core.c)        │
+                    │                               │
+                    │  fwnode ──────────────────────┼──┐
+                    └──────────────────────────────┘  │
+                                                       │ dev_fwnode(dev)
+                                                       ▼
+┌────────────────────────────────────────────────────────────────┐
+│                   struct fwnode_handle                          │
+│                                                                 │
+│  secondary ──────────────────────────────────► fwnode_handle   │
+│             (fallback, e.g. ACPI for OF node)  (another type)  │
+│                                                                 │
+│  ops ────────────────────────────────────────► fwnode_operations│
+│                                                 (vtable)        │
+│                                                                 │
+│  dev ◄──────────────────────────────────────── struct device   │
+│                                                                 │
+│  suppliers ──────► list_head ◄──── fwnode_link.c_hook          │
+│  consumers ──────► list_head ◄──── fwnode_link.s_hook          │
+│  flags (u8)                                                     │
+└────────────────────────────────────────────────────────────────┘
+          ▲                    ▲
+          │ parent/child       │ software backend
+          │                    │
+┌─────────────────┐   ┌────────────────────────────────┐
+│  fwnode_handle  │   │      struct software_node      │
+│  (OF/ACPI node) │   │                                │
+└─────────────────┘   │  name                          │
+                      │  parent ────────────────────►  software_node
+                      │  properties ────────────────►  property_entry[]
+                      └────────────────────────────────┘
+                                        │
+                                        ▼
+                      ┌────────────────────────────────┐
+                      │     struct property_entry      │
+                      │                                │
+                      │  name (string)                 │
+                      │  length                        │
+                      │  is_inline (bool)              │
+                      │  type (dev_prop_type)          │
+                      │  union {                       │
+                      │    pointer ────────────────►   │ (array data / ref_args)
+                      │    value { u8/u16/u32/u64/str }│
+                      │  }                             │
+                      └────────────────────────────────┘
+                                (لما type == DEV_PROP_REF)
+                                        │ pointer
+                                        ▼
+                      ┌────────────────────────────────┐
+                      │  struct software_node_ref_args │
+                      │                                │
+                      │  swnode ──────────────────────►software_node
+                      │  fwnode ──────────────────────►fwnode_handle
+                      │  nargs                         │
+                      │  args[16]                      │
+                      └────────────────────────────────┘
+
+
+فـ الـ fwnode_link:
+┌─────────────────┐     fwnode_link      ┌─────────────────┐
+│   supplier      │◄──────────────────── │   consumer      │
+│  fwnode_handle  │  s_hook ←→ c_hook   │  fwnode_handle  │
+└─────────────────┘                      └─────────────────┘
+```
+
+---
+
+### 3. دورة حياة الـ Structs
+
+#### الـ software_node — من التعريف للاستخدام للحذف
+
+```
+[1] تعريف static (compile-time)
+    ───────────────────────────
+    static const struct property_entry props[] = {
+        PROPERTY_ENTRY_U32("clock-frequency", 400000),
+        PROPERTY_ENTRY_STRING("compatible", "vendor,chip"),
+        { }  /* sentinel */
+    };
+
+    static const struct software_node node = {
+        .name = "my-device",
+        .properties = props,
+    };
+
+         │
+         ▼
+[2] التسجيل في الـ kernel
+    ───────────────────────
+    software_node_register(&node);
+    /* أو لمجموعة: software_node_register_node_group(group) */
+
+    داخلياً:
+    - بيخصص swnode (software_node private struct)
+    - بيبني fwnode_handle مدمج
+    - بيضيفه للـ global swnode list
+
+         │
+         ▼
+[3] الربط بالـ device
+    ──────────────────
+    device_add_software_node(dev, &node);
+    /* أو: device_create_managed_software_node(dev, props, parent) */
+
+    - بيربط fwnode_handle بـ dev->fwnode
+
+         │
+         ▼
+[4] الاستخدام من الـ driver
+    ──────────────────────
+    device_property_read_u32(dev, "clock-frequency", &val);
+    /* يمشي: dev → fwnode → ops->property_read_int_array */
+
+         │
+         ▼
+[5] الحذف
+    ──────
+    device_remove_software_node(dev);
+    /* أو: fwnode_remove_software_node(fwnode) */
+    /* أو: software_node_unregister(&node) */
+
+    - بيفصل الـ fwnode عن الـ device
+    - بيحذف الـ swnode من الـ list
+    - الـ ref-count لازم يوصل صفر قبل الـ free الفعلي
+```
+
+#### الـ fwnode_handle reference counting
+
+```
+fwnode_handle_get(fwnode)  →  ref++
+fwnode_handle_put(fwnode)  →  ref--  →  (لو وصل 0) → ops->put() → free
+
+في الـ iteration loops:
+    fwnode_for_each_child_node(parent, child) {
+        /* child got via get_next_child_node = implicit get */
+        if (done) {
+            fwnode_handle_put(child);  /* لازم لو break */
+            break;
+        }
+    }
+    /* loop طبيعي = الـ last iteration بترجع NULL = مفيش put مطلوب */
+
+    الـ _scoped variants بتعمل __free(fwnode_handle) أوتوماتيك:
+    fwnode_for_each_child_node_scoped(parent, child) {
+        /* child بيتـ put أوتوماتيك عند الخروج من الـ scope */
+    }
+```
+
+---
+
+### 4. مخططات تدفق الـ API
+
+#### قراءة property من device
+
+```
+driver:
+  device_property_read_u32(dev, "reg", &val)
     │
-    ├─► dev_fwnode(dev)          [_Generic macro → __dev_fwnode(dev)]
-    │        → returns dev->fwnode
+    ├─► dev_fwnode(dev)
+    │     └─► _Generic(dev):
+    │           const dev* → __dev_fwnode_const(dev)
+    │           dev*       → __dev_fwnode(dev)
+    │         يرجع dev->fwnode (أو dev->of_node/acpi_node)
     │
-    └─► fwnode_property_read_u32(fwnode, "clock-frequency", &val)
-              │
-              └─► fwnode_property_read_u32_array(fwnode, name, &val, 1)
+    └─► device_property_read_u32_array(dev, "reg", &val, 1)
+          │
+          └─► fwnode_property_read_u32_array(fwnode, "reg", &val, 1)
+                │
+                └─► fwnode_call_int_op(fwnode, property_read_int_array,
+                                        "reg", sizeof(u32), &val, 1)
+                      │
+                      ├─► [OF backend]
+                      │     of_fwnode_ops.property_read_int_array()
+                      │       └─► of_property_read_u32_array()
+                      │             └─► reads from DTB blob
+                      │
+                      ├─► [ACPI backend]
+                      │     acpi_fwnode_ops.property_read_int_array()
+                      │       └─► acpi_dev_prop_read()
+                      │
+                      └─► [swnode backend]
+                            swnode_ops.property_read_int_array()
+                              └─► يبحث في property_entry array
+                                    └─► بيرجع القيمة من value.u32_data
+```
+
+#### إضافة software_node لجهاز موجود
+
+```
+driver init:
+  device_add_software_node(dev, &my_node)
+    │
+    ├─► software_node_fwnode(&my_node)
+    │     └─► يرجع الـ fwnode_handle المدمج في الـ swnode
+    │
+    ├─► set_secondary_fwnode(dev, swnode_fwnode)
+    │     └─► dev->fwnode->secondary = swnode_fwnode
+    │         (أو dev->fwnode = swnode_fwnode لو مفيش fwnode أصلي)
+    │
+    └─► device_add_software_node → returns 0 on success
+
+الـ secondary chain:
+  dev->fwnode (OF/ACPI node)
+       └─► secondary → swnode fwnode
+                           └─► secondary → NULL
+
+لما ops تتدعى وتفشل على الأول، بتـ fallback على الـ secondary.
+```
+
+#### بناء graph والاتصال بين الأجهزة
+
+```
+[camera sensor DT node]          [ISP DT node]
+  port@0/endpoint@0    ────────►   port@0/endpoint@0
+    remote-endpoint = &isp_ep         remote-endpoint = &cam_ep
+
+driver يقرأ الاتصال:
+  fwnode_graph_get_next_endpoint(dev_fwnode(sensor_dev), NULL)
+    └─► يرجع fwnode لـ endpoint@0
+          │
+          fwnode_graph_get_remote_endpoint(ep_fwnode)
+            └─► يتبع remote-endpoint property
+                  └─► يرجع fwnode لـ ISP endpoint
                         │
-                        └─► fwnode_call_int_op(fwnode,
-                                property_read_int_array,
-                                name, sizeof(u32), &val, 1)
-                                  │
-                            ┌─────┴──────────────────────────┐
-                            │ if fwnode is OF node:          │
-                            │   of_property_read_u32_array() │
-                            │   → reads from DTB             │
-                            ├────────────────────────────────┤
-                            │ if fwnode is ACPI node:        │
-                            │   acpi_dev_prop_read()         │
-                            │   → reads from ACPI tables     │
-                            ├────────────────────────────────┤
-                            │ if fwnode is software_node:    │
-                            │   software_node_read_array()   │
-                            │   → reads from property_entry[]│
-                            └────────────────────────────────┘
+                        fwnode_graph_get_port_parent(remote_ep)
+                          └─► يرجع fwnode لـ ISP device نفسه
+
+fwnode_graph_parse_endpoint(ep_fwnode, &endpoint)
+  └─► يملا: endpoint.port = 0
+             endpoint.id   = 0
+             endpoint.local_fwnode = ep_fwnode
 ```
 
-#### البحث عن device عبر fwnode graph
+#### البحث عن connection بالـ con_id
 
 ```
-driver (ISP) يدور على camera endpoint:
-  fwnode_graph_get_next_endpoint(isp_fwnode, NULL)
+driver:
+  device_connection_find_match(dev, "i2c", data, my_match_fn)
     │
-    └─► ops->graph_get_next_endpoint(fwnode, NULL)
-              │
-              └─► [OF: of_graph_get_next_endpoint()]
-                  [ACPI: acpi_graph_get_next_endpoint()]
-                        │
-                        returns endpoint fwnode (local)
-                              │
-  fwnode_graph_get_remote_endpoint(ep_fwnode)
-    │
-    └─► ops->graph_get_remote_endpoint(ep_fwnode)
-              │
-              └─► reads "remote-endpoint" property
-                  returns remote endpoint fwnode
-                        │
-  fwnode_graph_get_port_parent(remote_ep)
-    │
-    └─► ops->graph_get_port_parent(remote_ep)
-              │
-              returns camera device fwnode
-                    │
-  device = fwnode_to_device(camera_fwnode)
-    → driver gets reference to camera device
-```
-
-#### تسجيل software_node وإضافتها لـ device
-
-```
-platform code:
-  software_node_register_node_group(node_group[])
-    │
-    ├─ for each node in group:
-    │     software_node_register(node)
-    │           │
-    │           └─► kobject_init_and_add()  [يضيفه لـ sysfs]
-    │               swnode->fwnode.ops = &software_node_ops
-    │               fwnode_init(&swnode->fwnode, &software_node_ops)
-    │
-    └─ [later, when i2c/spi device is created]
-         device_add_software_node(dev, node)
-               │
-               └─► software_node_fwnode(node)
-                         → returns &swnode->fwnode
-                   set_secondary_fwnode(dev, fwnode)
-                         → dev->fwnode->secondary = swnode_fwnode
-                           (يكون fallback لو primary فشل)
-```
-
-#### connection lookup (devcon)
-
-```
-driver calls:
-  device_connection_find_match(dev, "i2c-bus", data, my_match_fn)
-    │
-    └─► fwnode_connection_find_match(fwnode, "i2c-bus", data, match)
-              │
-              ├─ يبحث في الـ fwnode references
-              │
-              └─ for each connection found:
-                    result = match(candidate_fwnode, "i2c-bus", data)
-                    if result != NULL → return result
+    └─► fwnode_connection_find_match(dev_fwnode(dev), "i2c", data, fn)
+          │
+          ├─► يبحث في الـ fwnode properties عن "i2c-bus" أو مشابه
+          │
+          └─► فلو لقى match:
+                fn(matched_fwnode, "i2c", data)
+                  └─► driver-specific: مثلاً يرجع i2c_adapter*
 ```
 
 ---
 
-### استراتيجية الـ Locking
+### 5. استراتيجية الـ Locking
 
-الـ `property.h` نفسه **ما بيعرّفش locks صريحة** — الـ locking موزّع على الـ subsystems اللي بتنفّذ الـ ops:
+#### مفيش lock صريح في `property.h` — إيه الحكمة؟
 
-| الـ Layer | الـ Lock المستخدم | اللي بيحميه |
+الـ `property.h` API مبنية على مبدأ **read-mostly** — الـ properties بتتقرأ كتير وبتتكتب نادراً (أو مش بتتكتب خالص بعد الـ registration).
+
+#### الـ locking حسب كل layer:
+
+| الـ Layer | الـ Lock المستخدم | المحمي |
 |---|---|---|
-| **OF (Device Tree)** | `of_mutex` / `devtree_lock` | قراءة/كتابة الـ DT nodes وـ properties |
-| **ACPI** | `acpi_device_lock` | الـ ACPI namespace |
-| **software_node** | `swnode_lock` (mutex) | الـ global software nodes list وـ kset |
-| **fwnode_link** | `device_links_lock` (mutex) | قائمتي `suppliers`/`consumers` |
-| **fwnode flags** | implicit (boot-time mostly) | الـ `flags` field في `fwnode_handle` |
-| **reference counting** | atomic ops / `kref` | `get`/`put` ops |
+| **OF (Device Tree)** | `of_mutex` / `devtree_lock` (spinlock) | الـ DTB tree traversal |
+| **ACPI** | `acpi_device_lock` (mutex) | الـ ACPI namespace |
+| **swnode** | `swnode_root_ids` (ida) + `kobj_lock` | التسجيل والـ id allocation |
+| **fwnode links** | `fwnode_links_lock` (mutex في device.c) | قوائم `suppliers`/`consumers` |
+| **فـ الـ consumers/suppliers lists** | RCU أو device_links_lock | الـ devlink traversal |
 
-#### ترتيب الـ Locks (Lock Ordering)
+#### قاعدة الـ refcount:
 
 ```
-[أعلى في الترتيب - يُمسك أولاً]
-        device_links_lock  (mutex)
-               ↓
-        swnode_lock  (mutex)
-               ↓
-        of_mutex / devtree_lock
-               ↓
-        كل lock داخل الـ driver نفسه
-[أسفل في الترتيب - يُمسك أخيراً]
+الـ fwnode_handle بيستخدم atomic refcount (عبر ops->get/ops->put)
+
+لازم:
+  - كل call لـ get_next_child_node / get_parent / graph_get_*
+    بترجع fwnode بـ refcount مرفوع
+  - لازم تعمل fwnode_handle_put() لما تخلص
+  - الـ _scoped() macros بتعمل ده أوتوماتيك بـ __free(fwnode_handle)
+
+ترتيب الـ locking (لو احتجت تمسك أكتر من lock):
+  device_links_lock → fwnode_links_lock → swnode internal lock
+
+لا تعمل:
+  swnode internal lock → device_links_lock  ← deadlock!
 ```
 
-**ملاحظات مهمة:**
-- الـ `device_property_read_*` functions كلها **read-only** — آمنة تُستدعى من أي context بعد الـ probe.
-- الـ `software_node_register` / `software_node_unregister` يحتاجوا `swnode_lock` — لازم يتعملوا من process context.
-- **الـ `fwnode_for_each_child_node_scoped`** بيستخدم `__free(fwnode_handle)` لضمان `put()` تلقائي عند الخروج من الـ scope — بيمنع leaks لو حصل `return` أو `break` في النص.
-- الـ `fwnode_handle.suppliers` و `.consumers` lists محمية بـ `device_links_lock` — **ما تقراهاش من interrupt context**.
+#### الـ software_node registration — thread safety:
+
+```c
+/* software_node_register() محمية بـ: */
+static DEFINE_MUTEX(software_nodes_lock);
+
+/* بتحمي: */
+/* - إضافة/حذف nodes من الـ global list */
+/* - الـ parent/child relationships */
+
+/* بعد الـ registration، الـ properties read-only → لا تحتاج lock */
+```
 ## Phase 4: شرح الـ Functions
 
 ---
 
-### Cheatsheet — كل الـ Functions والـ APIs دفعة واحدة
+### ملخص سريع — Cheatsheet
 
-#### Group 1: Device Property — قراءة Properties من الـ `struct device`
+#### Group 1: Device Property Read (via `struct device`)
 
-| Function | الغرض | Return |
-|---|---|---|
-| `device_property_present` | هل الـ property موجودة؟ | `bool` |
-| `device_property_read_bool` | قراءة boolean property | `bool` |
-| `device_property_read_u8` | قراءة u8 واحد | `int` (0 or -errno) |
-| `device_property_read_u16` | قراءة u16 واحد | `int` |
-| `device_property_read_u32` | قراءة u32 واحد | `int` |
-| `device_property_read_u64` | قراءة u64 واحد | `int` |
-| `device_property_read_u8_array` | قراءة array من u8 | `int` |
-| `device_property_read_u16_array` | قراءة array من u16 | `int` |
-| `device_property_read_u32_array` | قراءة array من u32 | `int` |
-| `device_property_read_u64_array` | قراءة array من u64 | `int` |
-| `device_property_read_string` | قراءة string واحدة | `int` |
-| `device_property_read_string_array` | قراءة array من strings | `int` |
-| `device_property_match_string` | إيجاد index لـ string في property | `int` (index or -errno) |
-| `device_property_match_property_string` | مطابقة property string مع array ثابت | `int` |
-| `device_property_count_u8/16/32/64` | عدد elements في property | `int` |
-| `device_property_string_array_count` | عدد strings في property | `int` |
-| `device_is_big_endian` | هل الجهاز big-endian؟ | `bool` |
-| `device_is_compatible` | مطابقة compatible string | `bool` |
-| `device_dma_supported` | هل DMA مدعوم؟ | `bool` |
-| `device_get_dma_attr` | نوع الـ DMA coherency | `enum dev_dma_attr` |
-| `device_get_match_data` | الـ driver match data | `const void *` |
-| `device_get_phy_mode` | قراءة PHY mode | `int` |
-
-#### Group 2: fwnode Property — قراءة Properties من الـ `fwnode_handle`
-
-| Function | الغرض | Return |
-|---|---|---|
-| `fwnode_property_present` | هل الـ property موجودة في الـ fwnode؟ | `bool` |
-| `fwnode_property_read_bool` | قراءة boolean property | `bool` |
-| `fwnode_property_read_u8/16/32/64` | قراءة scalar integer | `int` |
-| `fwnode_property_read_u8/16/32/64_array` | قراءة integer array | `int` |
-| `fwnode_property_read_string` | قراءة string | `int` |
-| `fwnode_property_read_string_array` | قراءة string array | `int` |
-| `fwnode_property_match_string` | إيجاد index لـ string | `int` |
-| `fwnode_property_match_property_string` | مطابقة مع array ثابت | `int` |
-| `fwnode_property_count_u8/16/32/64` | عدد elements | `int` |
-| `fwnode_property_string_array_count` | عدد strings | `int` |
-| `fwnode_property_get_reference_args` | جلب reference مع arguments | `int` |
-| `fwnode_get_phy_mode` | PHY mode من fwnode | `int` |
-| `fwnode_device_is_available` | هل الـ device متاح؟ | `bool` |
-| `fwnode_device_is_big_endian` | big-endian check | `bool` |
-| `fwnode_device_is_compatible` | compatible string match | `bool` |
-
-#### Group 3: fwnode Tree Navigation
-
-| Function | الغرض | Return |
-|---|---|---|
-| `fwnode_get_name` | اسم الـ node | `const char *` |
-| `fwnode_get_name_prefix` | prefix للطباعة | `const char *` |
-| `fwnode_name_eq` | مقارنة اسم الـ node | `bool` |
-| `fwnode_get_parent` | الـ parent node | `fwnode_handle *` |
-| `fwnode_get_next_parent` | الـ parent التالي (مع consume للحالي) | `fwnode_handle *` |
-| `fwnode_count_parents` | عدد الـ parents | `unsigned int` |
-| `fwnode_get_nth_parent` | الـ parent عند depth معين | `fwnode_handle *` |
-| `fwnode_get_next_child_node` | الـ child node التالي | `fwnode_handle *` |
-| `fwnode_get_next_available_child_node` | الـ child التالي المتاح | `fwnode_handle *` |
-| `fwnode_get_named_child_node` | child بالاسم | `fwnode_handle *` |
-| `fwnode_get_child_node_count` | عدد children | `unsigned int` |
-| `fwnode_get_named_child_node_count` | عدد children باسم معين | `unsigned int` |
-| `device_get_next_child_node` | child التالي من device | `fwnode_handle *` |
-| `device_get_named_child_node` | child بالاسم من device | `fwnode_handle *` |
-| `device_get_child_node_count` | عدد children للـ device | `unsigned int` |
-| `device_get_named_child_node_count` | عدد children باسم | `unsigned int` |
-| `fwnode_handle_get` | increment refcount | `fwnode_handle *` |
-| `fwnode_handle_put` | decrement refcount | `void` |
-| `fwnode_find_reference` | جلب reference node باسم وindex | `fwnode_handle *` |
-
-#### Group 4: fwnode Graph (V4L2/media graph model)
-
-| Function | الغرض | Return |
-|---|---|---|
-| `fwnode_graph_get_next_endpoint` | الـ endpoint التالي في الـ graph | `fwnode_handle *` |
-| `fwnode_graph_get_port_parent` | الـ parent للـ port | `fwnode_handle *` |
-| `fwnode_graph_get_remote_port_parent` | الـ remote device | `fwnode_handle *` |
-| `fwnode_graph_get_remote_port` | الـ remote port | `fwnode_handle *` |
-| `fwnode_graph_get_remote_endpoint` | الـ remote endpoint | `fwnode_handle *` |
-| `fwnode_graph_get_endpoint_by_id` | endpoint بـ port/endpoint id | `fwnode_handle *` |
-| `fwnode_graph_get_endpoint_count` | عدد endpoints | `unsigned int` |
-| `fwnode_graph_parse_endpoint` | parse endpoint info | `int` |
-| `fwnode_graph_is_endpoint` | هل الـ node endpoint؟ | `bool` |
-| `fwnode_iomap` | map MMIO region من fwnode | `void __iomem *` |
-| `fwnode_irq_get` | جلب IRQ number بـ index | `int` |
-| `fwnode_irq_get_byname` | جلب IRQ number بالاسم | `int` |
-
-#### Group 5: Connection / Consumer-Supplier
-
-| Function | الغرض | Return |
-|---|---|---|
-| `fwnode_connection_find_match` | إيجاد أول connection match | `void *` |
-| `device_connection_find_match` | نفس السابق من device | `void *` |
-| `fwnode_connection_find_matches` | إيجاد كل connections | `int` |
-
-#### Group 6: Software Nodes
-
-| Function | الغرض | Return |
-|---|---|---|
-| `is_software_node` | هل الـ fwnode software node؟ | `bool` |
-| `to_software_node` | cast من fwnode لـ software_node | `const struct software_node *` |
-| `software_node_fwnode` | جلب fwnode_handle من software_node | `fwnode_handle *` |
-| `software_node_find_by_name` | إيجاد software_node بالاسم | `const struct software_node *` |
-| `software_node_register` | تسجيل node واحد | `int` |
-| `software_node_unregister` | إلغاء تسجيل node واحد | `void` |
-| `software_node_register_node_group` | تسجيل مجموعة nodes | `int` |
-| `software_node_unregister_node_group` | إلغاء تسجيل مجموعة | `void` |
-| `fwnode_create_software_node` | إنشاء software node من properties | `fwnode_handle *` |
-| `fwnode_remove_software_node` | حذف software node | `void` |
-| `device_add_software_node` | ربط software node بـ device | `int` |
-| `device_remove_software_node` | فك الربط | `void` |
-| `device_create_managed_software_node` | إنشاء وربط managed node | `int` |
-
-#### Group 7: Helpers للـ `dev_fwnode`
-
-| Function/Macro | الغرض | Return |
-|---|---|---|
-| `dev_fwnode(dev)` | جلب `fwnode_handle` من device (const-safe) | `fwnode_handle *` |
-| `__dev_fwnode` | non-const version | `fwnode_handle *` |
-| `__dev_fwnode_const` | const version | `const fwnode_handle *` |
-
-#### Group 8: property_entry Helpers والـ Macros
-
-| Macro | الغرض |
+| Function | الغرض |
 |---|---|
-| `PROPERTY_ENTRY_U8/16/32/64` | scalar inline entry |
-| `PROPERTY_ENTRY_U8/16/32/64_ARRAY` | array entry (pointer to data) |
-| `PROPERTY_ENTRY_STRING` | single string entry |
-| `PROPERTY_ENTRY_STRING_ARRAY` | string array entry |
-| `PROPERTY_ENTRY_BOOL` | boolean (exists = true) |
-| `PROPERTY_ENTRY_REF` | reference entry |
-| `PROPERTY_ENTRY_REF_ARRAY` | array of references |
+| `device_property_present` | هل الـ property موجودة؟ |
+| `device_property_read_bool` | قراءة boolean property |
+| `device_property_read_u8/u16/u32/u64` | قراءة قيمة scalar واحدة |
+| `device_property_read_u8/u16/u32/u64_array` | قراءة array من القيم |
+| `device_property_read_string` | قراءة string واحدة |
+| `device_property_read_string_array` | قراءة array من الـ strings |
+| `device_property_match_string` | البحث عن string في property |
+| `device_property_match_property_string` | مقارنة property بـ array ثابت |
+| `device_property_count_u8/u16/u32/u64` | عدد العناصر في property |
+| `device_property_string_array_count` | عدد الـ strings في property |
+
+#### Group 2: fwnode Property Read (via `fwnode_handle`)
+
+| Function | الغرض |
+|---|---|
+| `fwnode_property_present` | هل الـ property موجودة؟ |
+| `fwnode_property_read_bool` | قراءة boolean |
+| `fwnode_property_read_u8/u16/u32/u64` | قراءة scalar واحدة |
+| `fwnode_property_read_u8/u16/u32/u64_array` | قراءة array |
+| `fwnode_property_read_string` | قراءة string |
+| `fwnode_property_read_string_array` | قراءة string array |
+| `fwnode_property_match_string` | بحث عن string |
+| `fwnode_property_match_property_string` | مقارنة property بـ array |
+| `fwnode_property_count_u8/u16/u32/u64` | عد العناصر |
+| `fwnode_property_string_array_count` | عد الـ strings |
+
+#### Group 3: fwnode Navigation
+
+| Function | الغرض |
+|---|---|
+| `dev_fwnode` (macro) | الحصول على `fwnode_handle` من `device` |
+| `fwnode_get_parent` | الـ parent node |
+| `fwnode_get_next_parent` | التنقل للـ parent مع drop المرجع الحالي |
+| `fwnode_count_parents` | عدد الـ parents |
+| `fwnode_get_nth_parent` | الـ parent على عمق معين |
+| `fwnode_get_next_child_node` | التنقل بين الـ children |
+| `fwnode_get_next_available_child_node` | children المتاحة فقط |
+| `fwnode_get_named_child_node` | child باسم معين |
+| `fwnode_get_child_node_count` | عدد الـ children |
+| `fwnode_get_named_child_node_count` | عدد الـ children بنفس الاسم |
+| `fwnode_get_name` | اسم الـ node |
+| `fwnode_get_name_prefix` | prefix الاسم (للطباعة) |
+| `fwnode_name_eq` | مقارنة الاسم |
+
+#### Group 4: fwnode Reference Management
+
+| Function | الغرض |
+|---|---|
+| `fwnode_handle_get` | زيادة الـ refcount |
+| `fwnode_handle_put` | تقليل الـ refcount |
+| `fwnode_property_get_reference_args` | قراءة reference مع arguments |
+| `fwnode_find_reference` | البحث عن reference بالـ index |
+
+#### Group 5: fwnode Graph (V4L2 / media topology)
+
+| Function | الغرض |
+|---|---|
+| `fwnode_graph_get_next_endpoint` | التنقل بين الـ endpoints |
+| `fwnode_graph_get_port_parent` | الـ device الذي يحتوي الـ port |
+| `fwnode_graph_get_remote_port_parent` | الـ device الطرف الآخر |
+| `fwnode_graph_get_remote_port` | الـ port الطرف الآخر |
+| `fwnode_graph_get_remote_endpoint` | الـ endpoint الطرف الآخر |
+| `fwnode_graph_get_endpoint_by_id` | endpoint بـ port/id محددين |
+| `fwnode_graph_get_endpoint_count` | عدد الـ endpoints |
+| `fwnode_graph_parse_endpoint` | parse بيانات الـ endpoint |
+| `fwnode_graph_is_endpoint` (inline) | هل الـ node هو endpoint؟ |
+
+#### Group 6: Device Capabilities
+
+| Function | الغرض |
+|---|---|
+| `fwnode_device_is_available` | هل الـ device متاح (status = okay)؟ |
+| `fwnode_device_is_big_endian` (inline) | هل الـ device big-endian؟ |
+| `fwnode_device_is_compatible` (inline) | هل compatible يطابق؟ |
+| `device_is_big_endian` (inline) | wrapper لـ device |
+| `device_is_compatible` (inline) | wrapper لـ device |
+| `device_dma_supported` | هل DMA مدعومة؟ |
+| `device_get_dma_attr` | نوع الـ DMA coherency |
+| `device_get_match_data` | بيانات الـ driver match |
+| `device_get_phy_mode` | PHY interface mode من الـ device |
+| `fwnode_get_phy_mode` | PHY interface mode من الـ fwnode |
+| `fwnode_iomap` | iomap للـ fwnode |
+| `fwnode_irq_get` | IRQ number بالـ index |
+| `fwnode_irq_get_byname` | IRQ number بالاسم |
+
+#### Group 7: Connection Matching
+
+| Function | الغرض |
+|---|---|
+| `fwnode_connection_find_match` | إيجاد أول match لـ connection |
+| `device_connection_find_match` (inline) | wrapper لـ device |
+| `fwnode_connection_find_matches` | إيجاد كل الـ matches |
+
+#### Group 8: Software Nodes
+
+| Function | الغرض |
+|---|---|
+| `is_software_node` | هل الـ fwnode هو software node؟ |
+| `to_software_node` | cast من fwnode لـ software_node |
+| `software_node_fwnode` | الحصول على fwnode من software_node |
+| `software_node_find_by_name` | البحث عن software node باسم |
+| `software_node_register` | تسجيل node واحد |
+| `software_node_unregister` | إلغاء تسجيل node واحد |
+| `software_node_register_node_group` | تسجيل مجموعة nodes |
+| `software_node_unregister_node_group` | إلغاء تسجيل مجموعة |
+| `fwnode_create_software_node` | إنشاء node ديناميكي |
+| `fwnode_remove_software_node` | حذف node ديناميكي |
+| `device_add_software_node` | ربط node بـ device |
+| `device_remove_software_node` | فك ربط الـ node من الـ device |
+| `device_create_managed_software_node` | إنشاء node مُدار بالـ devres |
+
+#### Group 9: Property Entry Macros & Helpers
+
+| Macro / Function | الغرض |
+|---|---|
+| `PROPERTY_ENTRY_U8/U16/U32/U64` | تعريف scalar property inline |
+| `PROPERTY_ENTRY_STRING` | تعريف string property inline |
+| `PROPERTY_ENTRY_BOOL` | تعريف boolean property |
+| `PROPERTY_ENTRY_U8/U16/U32/U64_ARRAY` | تعريف array property |
+| `PROPERTY_ENTRY_STRING_ARRAY` | تعريف string array property |
+| `PROPERTY_ENTRY_REF` | تعريف reference property |
+| `PROPERTY_ENTRY_REF_ARRAY` | تعريف reference array |
 | `SOFTWARE_NODE_REFERENCE` | بناء `software_node_ref_args` |
-| `SOFTWARE_NODE` | compound literal لـ `software_node` |
-| `property_entries_dup` | نسخ property array في الـ heap |
-| `property_entries_free` | تحرير المنسوخ |
+| `property_entries_dup` | نسخ مصفوفة properties |
+| `property_entries_free` | تحرير مصفوفة properties |
 
 ---
 
-### Group 1: Device Property Read Functions
+### Group 1: Device Property Read
 
-الـ group ده بيوفر الـ API الأساسية اللي بيستخدمها الـ driver مباشرة مع `struct device`. كل function فيه بيعمل `dev_fwnode(dev)` جوا وبيفوّض للـ `fwnode_*` counterpart. الغرض هو abstraction كاملة فوق DT / ACPI / software nodes.
+**الغرض:** الـ `device_property_*` functions هي الـ high-level API التي يستخدمها الـ driver مباشرة. كلها تعمل كـ thin wrappers فوق نظيراتها الـ `fwnode_property_*`، وتحصل على الـ `fwnode_handle` من الـ `device` عبر `dev_fwnode(dev)` داخليًا.
+
+---
+
+#### `dev_fwnode` (macro)
+
+```c
+#define dev_fwnode(dev)   \
+    _Generic((dev),       \
+        const struct device *: __dev_fwnode_const, \
+        struct device *: __dev_fwnode)(dev)
+```
+
+**الـ macro** يستخدم C11 `_Generic` لاختيار الـ const-correct version تلقائيًا. بيرجع `fwnode_handle *` أو `const fwnode_handle *` بناءً على نوع `dev`. النقطة الجوهرية هنا هي أن كل الـ property API يبدأ من هنا — الـ fwnode هو الـ abstraction layer اللي يعرف إزاي يتكلم مع DT أو ACPI أو software nodes.
 
 ---
 
@@ -1380,17 +1458,12 @@ driver calls:
 bool device_property_present(const struct device *dev, const char *propname);
 ```
 
-بتتحقق إن الـ property موجودة أصلاً في الـ firmware description للـ device. مش بتقرأ القيمة، بس بتأكد وجودها كـ boolean check.
+بتبحث إذا كانت الـ property موجودة في الـ firmware description للـ device. بترجع `true` إذا الـ property موجودة بصرف النظر عن قيمتها. بتُستخدم قبل القراءة لتجنب error handling في بعض الحالات.
 
-**Parameters:**
-- `dev` — الـ device المستهدف
-- `propname` — اسم الـ property كـ string literal
-
-**Return:** `true` لو الـ property موجودة، `false` لو مش موجودة أو فيه error.
-
-**Key details:** بتمشي على الـ fwnode chain (primary → secondary) لو فيه chaining. لا locking مطلوب من الـ caller.
-
-**Who calls it:** أي driver محتاج يعمل conditional check قبل قراءة property اختيارية، مثلاً `if (device_property_present(dev, "wakeup-source"))`.
+- **`dev`**: الـ device المراد الاستعلام عنه.
+- **`propname`**: اسم الـ property (مثلاً `"interrupts"`, `"clock-frequency"`).
+- **Return**: `true` إذا موجودة، `false` لو مش موجودة أو الـ fwnode نفسه NULL.
+- **Caller context**: أي context، لا locking خاص، الـ fwnode backend يدير الـ locking الداخلي.
 
 ---
 
@@ -1400,66 +1473,70 @@ bool device_property_present(const struct device *dev, const char *propname);
 bool device_property_read_bool(const struct device *dev, const char *propname);
 ```
 
-بتقرأ boolean property صريحة. الفرق عن `_present`: ممكن الـ property تكون موجودة وقيمتها false.
+بتقرأ boolean property — يعني property موجودها وجودها هو القيمة نفسها (مثل `"big-endian"` في DT). بترجع `true` لو الـ property موجودة وقيمتها true، وإلا `false`.
 
-**Parameters:**
-- `dev` — الـ device
-- `propname` — اسم الـ property
-
-**Return:** قيمة الـ boolean property.
-
-**Key details:** في DT، boolean properties بتكون موجودة = `true`، مش موجودة = `false`. في ACPI فيه فرق حقيقي بين وجود الـ property وقيمتها.
+- **Return**: الـ boolean value مباشرة.
+- **Key detail**: في DT، الـ boolean property بتكون مجرد present/absent. في ACPI، ممكن تكون integer بقيمة 1/0.
 
 ---
 
-#### `device_property_read_u8_array` (و u16/u32/u64 variants)
+#### `device_property_read_u8_array` / `u16` / `u32` / `u64`
 
 ```c
-int device_property_read_u8_array(const struct device *dev, const char *propname,
+int device_property_read_u8_array(const struct device *dev,
+                                  const char *propname,
                                   u8 *val, size_t nval);
 ```
 
-بتقرأ array من قيم integer من الـ firmware property. الـ variants الأربعة مختلفة بس في حجم العنصر.
+بتقرأ array من integer values. لو `val == NULL` و `nval == 0`، بترجع عدد العناصر المتاحة بدل ما تقرأ (discovery mode). لو `val != NULL`، بتملي الـ buffer.
 
-**Parameters:**
-- `dev` — الـ device
-- `propname` — اسم الـ property
-- `val` — الـ buffer اللي هيتكتب فيه، لو `NULL` والـ `nval == 0` بترجع عدد العناصر
-- `nval` — عدد العناصر المطلوب قراءتهم، لو `0` بترجع عدد العناصر
+- **`val`**: buffer لاستقبال القيم، أو NULL لمعرفة العدد.
+- **`nval`**: عدد العناصر المطلوبة، أو 0 للاستعلام.
+- **Return**: 0 عند النجاح، عدد العناصر المتاحة لو `val == NULL`، أو error code سلبي (`-EINVAL`, `-ENODATA`, `-EOVERFLOW`).
+- **Error paths**: `-EOVERFLOW` لو الـ buffer أصغر من عدد العناصر، `-ENODATA` لو الـ property غير موجودة.
 
-**Return:** `0` عند النجاح، أو عدد العناصر لو `val == NULL && nval == 0`. عند الفشل: `-EINVAL` (اسم غلط)، `-ENODATA` (property موجودة بس فاضية)، `-EOVERFLOW` (الـ array أكبر من الـ buffer)، `-ENXIO` (مش موجودة).
+---
 
-**Key details:** الـ trick الأساسي — تمرير `NULL, 0` بيحوّل الدالة لـ "count" function بدون allocation. الـ endianness conversion بيحصل داخلياً حسب الـ firmware backend.
+#### `device_property_read_u8` / `u16` / `u32` / `u64` (inline wrappers)
 
-**Who calls it:** الـ drivers اللي بتقرأ numeric arrays من DT/ACPI زي interrupt configurations, timing tables.
-
-**Pseudocode:**
+```c
+static inline int device_property_read_u32(const struct device *dev,
+                                           const char *propname, u32 *val)
+{
+    return device_property_read_u32_array(dev, propname, val, 1);
+}
 ```
-device_property_read_u8_array(dev, prop, val, nval):
-    fwnode = dev_fwnode(dev)
-    return fwnode_property_read_u8_array(fwnode, prop, val, nval)
-        → calls fwnode->ops->property_read_int_array(fwnode, prop, sizeof(u8), val, nval)
+
+الـ scalar versions مجرد wrappers تستدعي الـ array version بـ `nval=1`. الـ kernel prefer استخدام هذه بدلاً من الـ array version مباشرة للـ single-value properties.
+
+---
+
+#### `device_property_count_u8` / `u16` / `u32` / `u64` (inline)
+
+```c
+static inline int device_property_count_u32(const struct device *dev,
+                                            const char *propname)
+{
+    return device_property_read_u32_array(dev, propname, NULL, 0);
+}
 ```
+
+بتستعمل الـ discovery mode (val=NULL, nval=0) لمعرفة عدد العناصر. بترجع العدد كـ positive int أو error code سلبي. مفيدة قبل الـ `kmalloc` لتخصيص buffer بالحجم الصح.
 
 ---
 
 #### `device_property_read_string`
 
 ```c
-int device_property_read_string(const struct device *dev, const char *propname,
+int device_property_read_string(const struct device *dev,
+                                const char *propname,
                                 const char **val);
 ```
 
-بتقرأ أول string من property. الـ pointer اللي بترجعه بيشاور على الـ firmware data نفسه، مش نسخة.
+بتقرأ أول string من الـ property وبتحط pointer إليها في `*val`. الـ pointer بيشاور على الـ string داخل الـ firmware data مباشرة — مش copied — لذا لا تحرر الـ pointer.
 
-**Parameters:**
-- `dev` — الـ device
-- `propname` — اسم الـ property
-- `val` — pointer لـ pointer هيشاور على الـ string
-
-**Return:** `0` عند النجاح، `-errno` عند الفشل.
-
-**Key details:** الـ string مش mutable، ومش محتاج تعمل `kfree` عليها.
+- **Return**: 0 عند النجاح أو error سلبي.
+- **Key detail**: الـ string lifetime مرتبط بالـ fwnode نفسه.
 
 ---
 
@@ -1467,40 +1544,47 @@ int device_property_read_string(const struct device *dev, const char *propname,
 
 ```c
 int device_property_match_string(const struct device *dev,
-                                 const char *propname, const char *string);
+                                 const char *propname,
+                                 const char *string);
 ```
 
-بتدور على `string` جوا property اسمها `propname` اللي بتحتوي على string list. بتعمل exact string match.
+بتبحث عن `string` في كل عناصر string array property. بترجع الـ index (0-based) لو لقتها، أو error سلبي (`-ENODATA`, `-ENOENT`).
 
-**Parameters:**
-- `dev` — الـ device
-- `propname` — الـ property اللي فيها list من strings
-- `string` — الـ string اللي بندور عليها
-
-**Return:** الـ index (≥ 0) لو لقتها، `-ENODATA` لو الـ property فاضية، `-EILSEQ` لو مش لاقي match.
-
-**Who calls it:** common pattern في الـ PHY subsystem والـ clock drivers لتحديد operating mode من string list.
+- **Real-world**: مستخدمة في `of_property_match_string` style lookups لـ clock names أو PHY modes.
 
 ---
 
-#### `device_property_count_u8/16/32/64` و `device_property_string_array_count`
+#### `device_property_match_property_string` (inline)
 
 ```c
-static inline int device_property_count_u32(const struct device *dev, const char *propname)
-{
-    return device_property_read_u32_array(dev, propname, NULL, 0);
-}
+static inline int device_property_match_property_string(
+    const struct device *dev, const char *propname,
+    const char * const *array, size_t n);
 ```
 
-بتستغل الـ trick الخاصة بالـ `_array` functions: لو `val == NULL` و `nval == 0`، بترجع عدد العناصر. الـ inline wrapper بيوضّح النية.
-
-**Return:** عدد العناصر (≥ 0) أو `-errno`.
+بتقرأ الـ property كـ string وبتبحث فيها في array ثابت موجود في الـ driver code. عكس `match_string` اللي بيبحث في الـ firmware data، هنا الـ driver هو اللي عنده قائمة الـ valid values.
 
 ---
 
-### Group 2: fwnode Property Functions
+### Group 2: fwnode Property Read
 
-الـ device_property_* functions كلها مجرد thin wrappers فوق الـ `fwnode_property_*`. الـ fwnode API هو الـ real implementation layer اللي بيتكلم مع الـ backend (OF, ACPI, software nodes).
+**الغرض:** نفس الـ Group 1 تمامًا لكن بتشتغل على `fwnode_handle *` مباشرة بدل `struct device *`. دي الـ low-level API اللي الـ device variants تستدعيها. الـ fwnode backend (DT, ACPI, swnode) بيوفر الـ `fwnode_operations` vtable اللي بتنفذ الـ actual reads.
+
+**pseudocode flow للـ fwnode_property_read_u32_array:**
+
+```
+fwnode_property_read_u32_array(fwnode, propname, val, nval):
+    if fwnode has secondary:
+        try primary fwnode first
+        if failed, try secondary fwnode
+    call fwnode->ops->property_read_int_array(fwnode, propname,
+                                              sizeof(u32), val, nval)
+    return result
+```
+
+الـ secondary fwnode مهم جدًا — بيسمح بالـ fallback chain (مثلاً ACPI + software node كـ overlay).
+
+---
 
 #### `fwnode_property_present`
 
@@ -1509,9 +1593,164 @@ bool fwnode_property_present(const struct fwnode_handle *fwnode,
                              const char *propname);
 ```
 
-بتفحص وجود property في fwnode معين بشكل مباشر. بتستدعي `fwnode->ops->property_present` عبر الـ `fwnode_call_bool_op` macro.
+بتستدعي `fwnode_call_bool_op(fwnode, property_present, propname)`. لو الـ fwnode عنده secondary، بتجرب الاتنين. بترجع `true` لو الـ property موجودة في أي منهم.
 
-**Key details:** لو الـ fwnode `NULL` أو `IS_ERR`، بترجع `false` automatically بسبب `fwnode_call_bool_op`.
+---
+
+#### `fwnode_property_read_u32_array`
+
+```c
+int fwnode_property_read_u32_array(const struct fwnode_handle *fwnode,
+                                   const char *propname, u32 *val,
+                                   size_t nval);
+```
+
+الـ workhorse الأساسي. بتمرر `elem_size = sizeof(u32)` للـ vtable op. الـ backend (مثلاً `of_fwnode_ops`) عارف إزاي يفسر الـ binary data بناءً على الـ element size. لو `nval=0 && val=NULL`، بيرجع عدد العناصر.
+
+---
+
+### Group 3: fwnode Navigation
+
+**الغرض:** الـ fwnode graph هو شجرة nodes — كل node ممكن يكون له parent وأبناء. الـ navigation functions دي بتسمح بالتنقل في هذه الشجرة بطريقة آمنة مع إدارة الـ refcounting.
+
+---
+
+#### `fwnode_get_parent`
+
+```c
+struct fwnode_handle *fwnode_get_parent(const struct fwnode_handle *fwnode);
+```
+
+بترجع reference جديدة للـ parent node (refcount مزوّد). المستدعي مسؤول عن استدعاء `fwnode_handle_put()` على النتيجة.
+
+- **Return**: pointer للـ parent أو NULL لو الـ node هو الـ root.
+
+---
+
+#### `fwnode_get_next_parent`
+
+```c
+struct fwnode_handle *fwnode_get_next_parent(struct fwnode_handle *fwnode);
+```
+
+**مختلفة عن `get_parent`!** — بتـ drop الـ reference على `fwnode` المُمرَّر وبترجع reference على الـ parent. مصممة للاستخدام في iterator patterns. الـ macro `fwnode_for_each_parent_node` تعتمد عليها.
+
+- **Side effect**: تحرير الـ `fwnode` المُمرَّر (drop refcount).
+- **Key detail**: لو المستدعي عنده reference على الـ node الحالي، لازم `get` قبل ما يمرره لهذه الـ function.
+
+---
+
+#### `fwnode_get_nth_parent`
+
+```c
+struct fwnode_handle *fwnode_get_nth_parent(struct fwnode_handle *fwn,
+                                            unsigned int depth);
+```
+
+بترجع الـ ancestor على عمق `depth` في الشجرة. `depth=0` بيرجع الـ node نفسه، `depth=1` بيرجع الـ parent، إلخ. بتستخدم داخليًا `fwnode_get_next_parent` في loop.
+
+---
+
+#### `fwnode_get_next_child_node`
+
+```c
+struct fwnode_handle *fwnode_get_next_child_node(
+    const struct fwnode_handle *fwnode, struct fwnode_handle *child);
+```
+
+Iterator على الـ children. لو `child == NULL`، بترجع أول child. لو `child != NULL`، بترجع الـ next child بعده وبتـ drop reference على `child`. مبنية للاستخدام في `fwnode_for_each_child_node`.
+
+---
+
+#### `fwnode_get_next_available_child_node`
+
+```c
+struct fwnode_handle *fwnode_get_next_available_child_node(
+    const struct fwnode_handle *fwnode, struct fwnode_handle *child);
+```
+
+نفس `get_next_child_node` لكن بتتخطى الـ nodes اللي `status != "okay"` أو مش available. مفيدة لـ drivers اللي تهمهم الـ hardware الـ active فقط.
+
+---
+
+#### `fwnode_get_named_child_node`
+
+```c
+struct fwnode_handle *fwnode_get_named_child_node(
+    const struct fwnode_handle *fwnode, const char *childname);
+```
+
+بتبحث عن child بالاسم مباشرة. بترجع reference جديدة (refcount++) أو NULL.
+
+---
+
+#### Iterator Macros
+
+```c
+/* تنقل على كل الـ children */
+#define fwnode_for_each_child_node(fwnode, child)
+/* تنقل على الـ children المتاحة فقط */
+#define fwnode_for_each_available_child_node(fwnode, child)
+/* تنقل على children باسم محدد */
+#define fwnode_for_each_named_child_node(fwnode, child, name)
+
+/* scoped versions — تحرر الـ child تلقائيًا بنهاية الـ scope */
+#define fwnode_for_each_child_node_scoped(fwnode, child)
+#define fwnode_for_each_available_child_node_scoped(fwnode, child)
+```
+
+الـ **scoped** versions تستخدم `__free(fwnode_handle)` attribute (من `DEFINE_FREE` macro) لضمان تحرير الـ reference تلقائيًا لو الـ loop خرج بـ `break` أو `return`. دي أكثر أمانًا وتمنع الـ reference leaks.
+
+**مهم:** في الـ non-scoped versions، لو خرجت من الـ loop بـ `break`، لازم تستدعي `fwnode_handle_put(child)` يدويًا.
+
+---
+
+#### `fwnode_count_parents` / `fwnode_get_child_node_count` / `fwnode_get_named_child_node_count`
+
+```c
+unsigned int fwnode_count_parents(const struct fwnode_handle *fwn);
+unsigned int fwnode_get_child_node_count(const struct fwnode_handle *fwnode);
+unsigned int fwnode_get_named_child_node_count(const struct fwnode_handle *fwnode,
+                                               const char *name);
+```
+
+helper functions للحساب. بتتنقل في الشجرة وبتعد بدون تعديل. `get_named_child_node_count` مفيدة لمعرفة عدد الـ sub-nodes بنفس الاسم (مثلاً كل الـ `"port@N"` nodes).
+
+---
+
+### Group 4: fwnode Reference Management
+
+**الغرض:** الـ fwnode هو reference-counted object. أي function بترجع fwnode pointer بترجع reference جديدة (+1 refcount). المستدعي ملزم بتحرير هذه الـ reference.
+
+---
+
+#### `fwnode_handle_get`
+
+```c
+struct fwnode_handle *fwnode_handle_get(struct fwnode_handle *fwnode);
+```
+
+بتزيد الـ refcount. بتستدعي `fwnode_call_ptr_op(fwnode, get)`. بترجع الـ fwnode نفسه (يسهل الـ chaining). آمنة على NULL.
+
+---
+
+#### `fwnode_handle_put` (inline)
+
+```c
+static inline void fwnode_handle_put(struct fwnode_handle *fwnode)
+{
+    fwnode_call_void_op(fwnode, put);
+}
+```
+
+بتنقص الـ refcount. لو وصل صفر، الـ backend بيحرر الـ memory. الأكثر استخدامًا في الـ kernel. آمنة على NULL بسبب `fwnode_call_void_op` اللي بيتحقق من NULL.
+
+```c
+/* DEFINE_FREE تجعل التنظيف التلقائي ممكنًا */
+DEFINE_FREE(fwnode_handle, struct fwnode_handle *, fwnode_handle_put(_T))
+```
+
+هذا يُسجّل cleanup function للاستخدام مع `__free(fwnode_handle)` في الـ scoped macros.
 
 ---
 
@@ -1519,35 +1758,22 @@ bool fwnode_property_present(const struct fwnode_handle *fwnode,
 
 ```c
 int fwnode_property_get_reference_args(const struct fwnode_handle *fwnode,
-                                       const char *prop, const char *nargs_prop,
-                                       unsigned int nargs, unsigned int index,
+                                       const char *prop,
+                                       const char *nargs_prop,
+                                       unsigned int nargs,
+                                       unsigned int index,
                                        struct fwnode_reference_args *args);
 ```
 
-دي من أهم الـ APIs لأنها بتقرأ phandle references مع arguments زي ما بتيجي في DT. مثال: `clocks = <&clk_ctrl 2 0>` — هنا الـ phandle هو `&clk_ctrl` والـ `2` و `0` هم arguments.
+بتقرأ reference property (مثل `clocks`, `interrupts`, `gpios`) وبتملي `fwnode_reference_args` بالـ fwnode المُشار إليه والـ arguments الإضافية.
 
-**Parameters:**
-- `fwnode` — الـ consumer node
-- `prop` — اسم الـ property اللي فيها الـ reference (مثلاً `"clocks"`)
-- `nargs_prop` — اسم الـ property في الـ provider اللي بيحدد عدد الـ args (مثلاً `"#clock-cells"`)، ممكن `NULL`
-- `nargs` — عدد ثابت للـ args لو `nargs_prop == NULL`
-- `index` — رقم الـ entry في الـ list (لو فيه أكثر من reference)
-- `args` — الـ output struct، بتتملى بـ `fwnode` الـ provider والـ `args[]`
-
-**Return:** `0` عند النجاح، `-errno` عند الفشل.
-
-**Key details:** بتبقى essential لكل subsystem بيستخدم reference cells: clock, GPIO, interrupts, DMA, reset.
-
-**Pseudocode:**
-```
-fwnode_property_get_reference_args(fwnode, prop, nargs_prop, nargs, index, args):
-    call fwnode->ops->get_reference_args(...)
-    if success:
-        args->fwnode = resolved_provider_fwnode  // refcount incremented
-        args->nargs = actual_nargs
-        args->args[] = extracted values
-    return 0 or -errno
-```
+- **`prop`**: اسم الـ property اللي فيها الـ references (مثل `"clocks"`).
+- **`nargs_prop`**: اسم الـ property اللي بتحدد عدد الـ args (مثل `"#clock-cells"`) أو NULL.
+- **`nargs`**: عدد ثابت من الـ args لو `nargs_prop == NULL`.
+- **`index`**: index الـ reference المطلوبة (0-based) لو الـ property فيها أكثر من reference.
+- **`args`**: struct يُملي بالنتيجة — `args->fwnode` هو الـ referenced node (برجع مع refcount++).
+- **Return**: 0 أو error سلبي.
+- **Caller**: المستدعي مسؤول عن `fwnode_handle_put(args->fwnode)`.
 
 ---
 
@@ -1559,117 +1785,17 @@ struct fwnode_handle *fwnode_find_reference(const struct fwnode_handle *fwnode,
                                             unsigned int index);
 ```
 
-بتجيب reference node من property بالاسم والـ index بدون arguments. أبسط من `get_reference_args` للحالات اللي فيها reference بس من غير cells.
-
-**Return:** `fwnode_handle *` مع refcount مرفوع، أو `ERR_PTR(-errno)`.
+بتبحث عن reference property بالاسم والـ index. أبسط من `get_reference_args` لأنها ما بتجيبش الـ args. بترجع fwnode مع refcount++ أو ERR_PTR.
 
 ---
 
-### Group 3: Tree Navigation
+### Group 5: fwnode Graph (Media / V4L2 Topology)
 
-الـ group ده بيوفر الـ API لاستعراض شجرة الـ firmware nodes.
-
-#### `fwnode_get_parent`
-
-```c
-struct fwnode_handle *fwnode_get_parent(const struct fwnode_handle *fwnode);
-```
-
-بتعيد الـ parent node مع زيادة الـ refcount. الـ caller مسؤول عن استدعاء `fwnode_handle_put()`.
-
-**Return:** `fwnode_handle *` الـ parent أو `NULL` لو مفيش parent.
-
----
-
-#### `fwnode_get_next_parent`
-
-```c
-struct fwnode_handle *fwnode_get_next_parent(struct fwnode_handle *fwnode);
-```
-
-بتعيد الـ parent وفي نفس الوقت بتعمل `put` على الـ fwnode اللي اتبعتلها. ده بيخليها مناسبة للاستخدام في loops.
-
-**Key details:** الفرق عن `fwnode_get_parent`: الـ input fwnode بيتعمله `put` جوا الدالة. ده بيسمح بـ iteration without leaks.
-
-```c
-// مثال: المشي لفوق في الشجرة
-struct fwnode_handle *fwnode = fwnode_handle_get(start);
-fwnode_for_each_parent_node(start, fwnode) {
-    // fwnode هو parent حالي
-    // الـ put بيحصل automatically في الـ loop
-}
-```
-
----
-
-#### `fwnode_get_next_child_node`
-
-```c
-struct fwnode_handle *fwnode_get_next_child_node(
-    const struct fwnode_handle *fwnode, struct fwnode_handle *child);
-```
-
-بتعيد الـ child التالي في الـ iteration. لو `child == NULL`، بتبدأ من أول child.
-
-**Key details:** `child` السابق بيتعمله `put` جوا الدالة. لو خرجت من الـ loop بـ `break`، لازم تعمل `fwnode_handle_put(child)` يدوياً أو تستخدم الـ `_scoped` variant.
-
-**Who calls it:** مباشرة عن طريق الـ `fwnode_for_each_child_node` macro.
-
----
-
-#### `fwnode_for_each_child_node_scoped` (macro)
-
-```c
-#define fwnode_for_each_child_node_scoped(fwnode, child)            \
-    for (struct fwnode_handle *child __free(fwnode_handle) =        \
-            fwnode_get_next_child_node(fwnode, NULL);               \
-         child; child = fwnode_get_next_child_node(fwnode, child))
-```
-
-بيستخدم الـ cleanup attribute (`__free(fwnode_handle)`) عشان الـ `child` يتعمله `put` automatically عند الخروج من الـ scope — سواء بـ `break`، `return`، أو error. هو أكثر أماناً من `fwnode_for_each_child_node` العادي.
-
----
-
-#### `fwnode_handle_get` / `fwnode_handle_put`
-
-```c
-struct fwnode_handle *fwnode_handle_get(struct fwnode_handle *fwnode);
-
-static inline void fwnode_handle_put(struct fwnode_handle *fwnode)
-{
-    fwnode_call_void_op(fwnode, put);
-}
-```
-
-الـ reference counting الأساسي. `get` بيزود الـ refcount، `put` بيقلله وممكن يعمل free.
-
-**Key details:**
-- `DEFINE_FREE(fwnode_handle, struct fwnode_handle *, fwnode_handle_put(_T))` بيعرّف الـ cleanup destructor للـ `__free` attribute.
-- لازم كل `get` يقابله `put`.
-
----
-
-#### `fwnode_get_nth_parent`
-
-```c
-struct fwnode_handle *fwnode_get_nth_parent(struct fwnode_handle *fwn,
-                                            unsigned int depth);
-```
-
-بتجيب الـ ancestor على بُعد `depth` من الـ node. `depth == 0` بيعيد الـ node نفسه مع `get`، `depth == 1` بيعيد الـ parent.
-
-**Key details:** بتعمل `fwnode_handle_put` على الـ intermediate nodes جوا الـ loop.
-
----
-
-### Group 4: fwnode Graph API
-
-الـ fwnode graph API بتعكس نموذج الـ **OF graph** اللي اتعمل أصلاً لـ V4L2 و media pipelines. كل device ممكن يكون عنده **ports**، وكل port عنده **endpoints**. الـ endpoint بيربط على endpoint تاني في device تاني.
+**الغرض:** الـ fwnode graph API بتوفر abstraction للـ endpoint-based hardware topology المستخدمة في V4L2, MIPI CSI, DisplayPort وغيرها. كل device بتكون ليها `ports` وكل port بيكون فيه `endpoints` تتصل بـ endpoints في devices تانية.
 
 ```
-Device A                    Device B
-  └─ port@0                   └─ port@0
-       └─ endpoint@0 ←────────── endpoint@0
+                 [ Device A ]                    [ Device B ]
+          port@0/endpoint@0  ◄───────────►  port@0/endpoint@0
 ```
 
 ---
@@ -1681,24 +1807,18 @@ struct fwnode_handle *fwnode_graph_get_next_endpoint(
     const struct fwnode_handle *fwnode, struct fwnode_handle *prev);
 ```
 
-بتعمل iteration على كل الـ endpoints في device. لو `prev == NULL`، بتبدأ من أول endpoint.
-
-**Return:** الـ endpoint التالي مع refcount مرفوع، أو `NULL` لو خلصوا.
-
-**Key details:** `prev` بيتعمله `put` جوا الدالة زي الـ child iteration. استخدم الـ `fwnode_graph_for_each_endpoint` macro.
+Iterator على endpoints. `prev == NULL` يبدأ من أول endpoint. بتـ drop reference على `prev` وبترجع reference على الـ next. بتتنقل عبر كل الـ ports وكل الـ endpoints.
 
 ---
 
-#### `fwnode_graph_get_remote_endpoint`
+#### `fwnode_graph_get_port_parent`
 
 ```c
-struct fwnode_handle *fwnode_graph_get_remote_endpoint(
+struct fwnode_handle *fwnode_graph_get_port_parent(
     const struct fwnode_handle *fwnode);
 ```
 
-بتعيد الـ endpoint الـ remote اللي الـ local endpoint ده متصل بيه.
-
-**Return:** `fwnode_handle *` للـ remote endpoint أو `NULL`.
+بترجع الـ device fwnode اللي يحتوي الـ port. `fwnode` هنا هو endpoint أو port node.
 
 ---
 
@@ -1709,31 +1829,33 @@ struct fwnode_handle *fwnode_graph_get_remote_port_parent(
     const struct fwnode_handle *fwnode);
 ```
 
-بتعيد الـ **device** اللي الـ remote endpoint ينتمي له (مش الـ port، مش الـ endpoint — الـ device كلها). ده الأكثر استخداماً في الـ media drivers عشان يعرفوا مين الـ device المتصلة.
+من endpoint محلي، بتجيب الـ device الـ remote (الطرف الآخر من الوصلة). هذا هو الـ most commonly used function في media drivers لإيجاد الـ connected component.
 
-**Who calls it:** V4L2 subdev drivers, MIPI CSI drivers, display controllers.
+---
+
+#### `fwnode_graph_get_remote_endpoint`
+
+```c
+struct fwnode_handle *fwnode_graph_get_remote_endpoint(
+    const struct fwnode_handle *fwnode);
+```
+
+من endpoint محلي، بترجع الـ remote endpoint (مش الـ device، الـ endpoint نفسه). بيستخدمها الـ driver لقراءة properties من الـ remote endpoint مباشرة.
 
 ---
 
 #### `fwnode_graph_get_endpoint_by_id`
 
 ```c
-struct fwnode_handle *
-fwnode_graph_get_endpoint_by_id(const struct fwnode_handle *fwnode,
-                                u32 port, u32 endpoint, unsigned long flags);
+struct fwnode_handle *fwnode_graph_get_endpoint_by_id(
+    const struct fwnode_handle *fwnode,
+    u32 port, u32 endpoint, unsigned long flags);
 ```
 
-بتجيب endpoint محدد بـ port ID وendpoint ID.
+بتبحث عن endpoint بـ `port` number وـ `endpoint` ID محددين.
 
-**Parameters:**
-- `fwnode` — الـ device node
-- `port` — رقم الـ port
-- `endpoint` — رقم الـ endpoint في الـ port
-- `flags` — `FWNODE_GRAPH_ENDPOINT_NEXT` أو `FWNODE_GRAPH_DEVICE_DISABLED`
-
-**Key details:**
-- `FWNODE_GRAPH_ENDPOINT_NEXT`: لو مش لاقي exact match، بياخد الـ endpoint اللي عنده ID أكبر.
-- `FWNODE_GRAPH_DEVICE_DISABLED`: بيرجع endpoints حتى لو الـ remote device disabled.
+- **`flags`**: `FWNODE_GRAPH_ENDPOINT_NEXT` للبحث عن أقرب endpoint أكبر من الـ ID المطلوب. `FWNODE_GRAPH_DEVICE_DISABLED` لقبول endpoints من devices disabled.
+- **Real-world**: بيستخدمها driver لإيجاد endpoint معين من DT node.
 
 ---
 
@@ -1744,9 +1866,87 @@ int fwnode_graph_parse_endpoint(const struct fwnode_handle *fwnode,
                                 struct fwnode_endpoint *endpoint);
 ```
 
-بتملأ `struct fwnode_endpoint` بالـ `port` و `id` و `local_fwnode` من الـ endpoint node. ده الـ parsing step الأساسي في أي media driver.
+بتملي `struct fwnode_endpoint` بالـ `port` number والـ `id`. بتستدعي الـ backend op مباشرة. بيستخدمها الـ graph framework داخليًا.
 
-**Return:** `0` عند النجاح.
+---
+
+#### `fwnode_graph_is_endpoint` (inline)
+
+```c
+static inline bool fwnode_graph_is_endpoint(const struct fwnode_handle *fwnode)
+{
+    return fwnode_property_present(fwnode, "remote-endpoint");
+}
+```
+
+بتتحقق إذا كان الـ node هو endpoint بالبحث عن property `"remote-endpoint"`. بسيطة وفعالة.
+
+---
+
+### Group 6: Device Capabilities
+
+---
+
+#### `fwnode_device_is_available`
+
+```c
+bool fwnode_device_is_available(const struct fwnode_handle *fwnode);
+```
+
+بتتحقق من الـ `status` property. في DT، `status = "okay"` أو غياب الـ status يعني available. في ACPI، بتتحقق من الـ `_STA` method. مستخدمة داخليًا في `get_next_available_child_node`.
+
+---
+
+#### `fwnode_device_is_big_endian` (inline)
+
+```c
+static inline bool fwnode_device_is_big_endian(const struct fwnode_handle *fwnode)
+{
+    if (fwnode_property_present(fwnode, "big-endian"))
+        return true;
+    if (IS_ENABLED(CONFIG_CPU_BIG_ENDIAN) &&
+        fwnode_property_present(fwnode, "native-endian"))
+        return true;
+    return false;
+}
+```
+
+بتتحقق من اتنين حالات: `"big-endian"` يعني BE دايمًا. `"native-endian"` يعني BE بس لو الـ CPU نفسه BE. الـ driver بيستخدمها لاختيار `ioread32be` vs `readl`.
+
+---
+
+#### `device_dma_supported` / `device_get_dma_attr`
+
+```c
+bool device_dma_supported(const struct device *dev);
+enum dev_dma_attr device_get_dma_attr(const struct device *dev);
+```
+
+بتستعلم عن DMA capabilities من الـ firmware. `get_dma_attr` بترجع واحد من:
+- `DEV_DMA_NOT_SUPPORTED`
+- `DEV_DMA_NON_COHERENT`
+- `DEV_DMA_COHERENT`
+
+---
+
+#### `device_get_match_data`
+
+```c
+const void *device_get_match_data(const struct device *dev);
+```
+
+بترجع الـ `data` field من الـ matching entry في `of_device_id` أو `acpi_device_id`. بتستخدمها الـ drivers بدل ما يعملوا custom matching. بيرجع NULL لو ما فيش match.
+
+---
+
+#### `device_get_phy_mode` / `fwnode_get_phy_mode`
+
+```c
+int device_get_phy_mode(struct device *dev);
+int fwnode_get_phy_mode(const struct fwnode_handle *fwnode);
+```
+
+بتقرأ `"phy-mode"` أو `"phy-connection-type"` property وبترجع `phy_interface_t` enum value. بتستخدمها الـ Ethernet/network drivers لتحديد الـ PHY interface (RGMII, SGMII, MII, إلخ). بترجع error سلبي لو الـ mode مش معروف.
 
 ---
 
@@ -1756,9 +1956,7 @@ int fwnode_graph_parse_endpoint(const struct fwnode_handle *fwnode,
 void __iomem *fwnode_iomap(struct fwnode_handle *fwnode, int index);
 ```
 
-بتعمل map لـ MMIO region محددة بـ index من الـ fwnode. الـ ACPI backend بيستخدم الـ `_CRS` resources.
-
-**Return:** `void __iomem *` pointer أو `NULL` عند الفشل.
+بتعمل iomap للـ memory region الـ `index` المحددة في الـ fwnode. بتستدعي الـ backend op. بترجع NULL لو الـ op مش مدعومة. بتستخدمها devices في ACPI world بشكل رئيسي.
 
 ---
 
@@ -1769,13 +1967,15 @@ int fwnode_irq_get(const struct fwnode_handle *fwnode, unsigned int index);
 int fwnode_irq_get_byname(const struct fwnode_handle *fwnode, const char *name);
 ```
 
-بيجيبوا الـ Linux IRQ number. `fwnode_irq_get` بيستخدم رقم index، `_byname` بيستخدم اسم الـ interrupt من `interrupt-names` property.
-
-**Return:** IRQ number (> 0) عند النجاح، `-errno` عند الفشل.
+بيجيبوا الـ Linux virtual IRQ number. `by_index` عن طريق رقم ترتيبي. `byname` بيبحث في `"interrupt-names"` property. بيرجعوا الـ IRQ number (양موجب) أو error سلبي.
 
 ---
 
-### Group 5: Connection Find Match
+### Group 7: Connection Matching
+
+**الغرض:** الـ connection API بيسمح للـ drivers بالبحث عن connections لـ device مع devices تانية (مثلاً sensor متصل بـ camera controller) بطريقة firmware-agnostic.
+
+---
 
 #### `fwnode_connection_find_match`
 
@@ -1785,17 +1985,16 @@ void *fwnode_connection_find_match(const struct fwnode_handle *fwnode,
                                    devcon_match_fn_t match);
 ```
 
-بتدور على connections ربطها الـ firmware ودى الـ match function callback لكل واحدة. أول ما الـ callback يرجع non-NULL قيمة، الـ function بترجعها.
+بتبحث عن أول connection تطابق الـ `con_id` وبتستدعي الـ `match` callback على كل candidate. الـ `match` function بتاخد `(fwnode, id, data)` وبترجع non-NULL لو لقت match.
 
-**Parameters:**
-- `fwnode` — الـ consumer
-- `con_id` — connection ID string (مثلاً `"default"` للـ pinctrl)
-- `data` — بيتمرر as-is للـ match callback
-- `match` — الـ callback: `typedef void *(*devcon_match_fn_t)(const struct fwnode_handle *fwnode, const char *id, void *data)`
+```c
+typedef void *(*devcon_match_fn_t)(const struct fwnode_handle *fwnode,
+                                   const char *id, void *data);
+```
 
-**Return:** أول non-NULL result من الـ match callback.
-
-**Who calls it:** regulator framework، pinctrl، phy consumers.
+- **`con_id`**: connection identifier (مثل `"i2c"`, `"spi"`).
+- **`data`**: arbitrary data يتمرر للـ match callback.
+- **Return**: نتيجة الـ match callback أو NULL.
 
 ---
 
@@ -1808,19 +2007,46 @@ int fwnode_connection_find_matches(const struct fwnode_handle *fwnode,
                                    void **matches, unsigned int matches_len);
 ```
 
-زي السابق بس بيجمع **كل** الـ matches في array بدل ما توقف عند أول واحدة.
+نفس السابقة لكن بتجمع كل الـ matches في array. `matches` buffer بيُملي بنتائج الـ match callbacks. `matches_len` هو حجم الـ buffer.
 
-**Parameters:**
-- `matches` — array هيتملى بالـ results
-- `matches_len` — حجم الـ array
-
-**Return:** عدد الـ matches اللي اتلقوا أو `-errno`.
+- **Return**: عدد الـ matches الفعلية أو error سلبي.
 
 ---
 
-### Group 6: Software Nodes
+### Group 8: Software Nodes
 
-الـ **software nodes** بيحلوا مشكلة الـ devices اللي مش موصوفة في DT أو ACPI — زي الـ I2C devices اللي بتتعرفها بـ PCI ID. بيوفروا نفس الـ fwnode interface بس من memory structures ثابتة في الـ kernel.
+**الغرض:** الـ software nodes بتحل مشكلة الـ hardware اللي ما عندهاش firmware description كاملة. بدل ما تحتاج DT node أو ACPI table، الـ driver أو platform code بيعرّف properties في الـ C code مباشرة كـ static data أو dynamic allocation، وبيضيفها على الـ device.
+
+```
+struct software_node {
+    const char *name;
+    const struct software_node *parent;   /* شجرة nodes */
+    const struct property_entry *properties;
+};
+```
+
+---
+
+#### `is_software_node` / `to_software_node` / `software_node_fwnode`
+
+```c
+bool is_software_node(const struct fwnode_handle *fwnode);
+const struct software_node *to_software_node(const struct fwnode_handle *fwnode);
+struct fwnode_handle *software_node_fwnode(const struct software_node *node);
+```
+
+الـ type checking والـ casting utilities. `to_software_node` بيستخدم `container_of` داخليًا. `software_node_fwnode` بيرجع الـ embedded fwnode_handle.
+
+---
+
+#### `software_node_find_by_name`
+
+```c
+const struct software_node *software_node_find_by_name(
+    const struct software_node *parent, const char *name);
+```
+
+بتبحث في الـ registered software nodes عن node باسم معين تحت parent معين. `parent == NULL` بيبحث في الـ root level.
 
 ---
 
@@ -1831,58 +2057,67 @@ int software_node_register(const struct software_node *node);
 void software_node_unregister(const struct software_node *node);
 ```
 
-بيسجّل node واحد في الـ software node global registry. بعد التسجيل، الـ node بقى accessible عبر الـ fwnode API.
-
-**Key details:**
-- لازم الـ parent يتسجل قبل الـ children.
-- الـ unregister: لازم تشيل الـ children الأول.
-- الـ registration بيعمل `fwnode_init` للـ embedded `fwnode_handle`.
+بيسجلوا/بيلغوا تسجيل node واحد في الـ global software node registry. الـ node لازم يكون `static` أو مضمون إنه موجود طول فترة التسجيل. يُستخدم للـ nodes الـ static.
 
 ---
 
-#### `software_node_register_node_group`
+#### `software_node_register_node_group` / `software_node_unregister_node_group`
 
 ```c
 int software_node_register_node_group(const struct software_node * const *node_group);
+void software_node_unregister_node_group(const struct software_node * const *node_group);
 ```
 
-بتسجل array من pointers لـ `software_node` (منتهية بـ `NULL`). بيسهل تسجيل hierarchy كاملة دفعة واحدة.
-
-**Return:** `0` عند النجاح، `-errno` لو في node فيها error — مع **rollback** تلقائي لكل اللي اتسجلوا قبلها.
+بيسجلوا/بيلغوا مجموعة كاملة من الـ nodes في ضربة واحدة. الـ `node_group` هو NULL-terminated array من pointers. الـ register بيتوقف على أول error وبيـ unregister اللي سجله قبله.
 
 ---
 
 #### `fwnode_create_software_node`
 
 ```c
-struct fwnode_handle *
-fwnode_create_software_node(const struct property_entry *properties,
-                            const struct fwnode_handle *parent);
+struct fwnode_handle *fwnode_create_software_node(
+    const struct property_entry *properties,
+    const struct fwnode_handle *parent);
 ```
 
-بتنشئ software node ديناميكياً من `property_entry` array. الـ node بيتنشئ في الـ heap، مش static كالـ `software_node_register`.
+بتخلق software node ديناميكي (مع `kmalloc` داخليًا). مفيدة لما تحتاج تنشئ node في runtime بدون static struct. الـ properties بتتنسخ (`property_entries_dup` داخليًا).
 
-**Parameters:**
-- `properties` — array من `property_entry` منتهية بـ empty entry
-- `parent` — الـ parent fwnode (اختياري، ممكن `NULL`)
+- **Return**: fwnode مع refcount=1 أو ERR_PTR.
+- **Caller**: لازم يستدعي `fwnode_remove_software_node` لما يخلص.
 
-**Return:** `fwnode_handle *` الجديد أو `ERR_PTR(-errno)`.
+---
 
-**Who calls it:** الـ drivers اللي محتاجة تضيف properties runtime مثل platform glue code.
+#### `fwnode_remove_software_node`
+
+```c
+void fwnode_remove_software_node(struct fwnode_handle *fwnode);
+```
+
+بتحرر الـ dynamically created software node. بتستدعي `fwnode_handle_put` اللي لما الـ refcount يوصل صفر بتعمل `kfree`.
 
 ---
 
 #### `device_add_software_node`
 
 ```c
-int device_add_software_node(struct device *dev, const struct software_node *node);
+int device_add_software_node(struct device *dev,
+                             const struct software_node *node);
 ```
 
-بتربط software node بـ device موجودة. الـ device الـ `fwnode` بتاعها بتتبدل أو بتتسلسل مع الـ node الجديدة.
+بتربط software node بـ device. بتحط الـ fwnode كـ secondary للـ existing device fwnode. بعدها، الـ `device_property_*` calls على هذا الـ device هتلاقي properties من الـ software node.
 
-**Return:** `0` أو `-errno`.
+- **Locking**: يُستدعى قبل `device_add()` عادةً.
+- **Return**: 0 أو error سلبي.
 
-**Key details:** لو الـ device عندها فعلاً fwnode، الـ software node بيتحط كـ secondary fwnode. ده بيخلي الـ properties من الاتنين accessible.
+---
+
+#### `device_remove_software_node`
+
+```c
+void device_remove_software_node(struct device *dev);
+```
+
+بتفك ربط الـ software node من الـ device وبتنزل الـ reference. لازم يتستدعى في cleanup.
 
 ---
 
@@ -1894,141 +2129,59 @@ int device_create_managed_software_node(struct device *dev,
                                         const struct software_node *parent);
 ```
 
-بتجمع الإنشاء والربط في خطوة واحدة، والأهم إنها **managed** — يعني الـ node بيتحذف تلقائياً لما الـ device تتـ destroy عبر الـ devres framework.
-
-**Who calls it:** الـ bus drivers اللي بتضيف properties لـ devices اتعرفت من PCI/USB IDs.
+بتجمع `fwnode_create_software_node` + `device_add_software_node` في خطوة واحدة، مع **devres management**. يعني لما الـ device بتـ unbind أو بتتحذف، الـ node بيتحرر تلقائيًا. الأسهل والأكثر أمانًا في الـ drivers الحديثة.
 
 ---
 
-#### `is_software_node` / `to_software_node`
+### Group 9: Property Entry Macros
 
-```c
-bool is_software_node(const struct fwnode_handle *fwnode);
-const struct software_node *to_software_node(const struct fwnode_handle *fwnode);
-```
-
-**الـ** `is_software_node` بيتحقق إن الـ ops pointer بتاع الـ fwnode هو الـ software node ops. الـ `to_software_node` بيعمل `container_of` للوصول للـ parent struct.
-
-**Key details:** `to_software_node` بترجع `NULL` لو الـ fwnode مش software node.
-
----
-
-### Group 7: dev_fwnode و Endianness Helpers
-
-#### `dev_fwnode` (macro)
-
-```c
-#define dev_fwnode(dev)                             \
-    _Generic((dev),                                 \
-             const struct device *: __dev_fwnode_const, \
-             struct device *: __dev_fwnode)(dev)
-```
-
-الـ macro ده بيستخدم C11 `_Generic` للـ type-safe dispatch. لو الـ input `const struct device *`، بيستدعي `__dev_fwnode_const` اللي بترجع `const fwnode_handle *`. ده بيمنع الـ const-correctness violations في الـ type system.
-
-**Who calls it:** كل الـ `device_property_*` و `device_get_*` functions جوا تنفيذها.
-
----
-
-#### `device_is_big_endian`
-
-```c
-static inline bool device_is_big_endian(const struct device *dev)
-{
-    return fwnode_device_is_big_endian(dev_fwnode(dev));
-}
-```
-
-#### `fwnode_device_is_big_endian`
-
-```c
-static inline bool fwnode_device_is_big_endian(const struct fwnode_handle *fwnode)
-{
-    if (fwnode_property_present(fwnode, "big-endian"))
-        return true;
-    if (IS_ENABLED(CONFIG_CPU_BIG_ENDIAN) &&
-        fwnode_property_present(fwnode, "native-endian"))
-        return true;
-    return false;
-}
-```
-
-بتحدد إذا كانت registers الجهاز big-endian. الـ logic:
-1. لو فيه `big-endian` property → دايماً BE
-2. لو فيه `native-endian` → BE بس لو الـ kernel اتبنى لـ BE
-
-**Who calls it:** الـ network و USB controllers اللي عندها byte-swapped register access (`ioread32be`/`iowrite32be`).
-
----
-
-### Group 8: property_entry Macros والـ Structs
-
-#### `struct property_entry`
+**الغرض:** الـ `struct property_entry` بيمثل property واحدة في الـ software node. الـ macros بتسهّل إنشاء الـ static arrays من هذه الـ properties.
 
 ```c
 struct property_entry {
     const char *name;
     size_t length;
-    bool is_inline;
+    bool is_inline;          /* القيمة مخزنة inline في الـ struct نفسه */
     enum dev_prop_type type;
     union {
-        const void *pointer;   // for arrays (non-inline)
+        const void *pointer; /* للـ arrays والـ external data */
         union {
             u8  u8_data[8];
             u16 u16_data[4];
             u32 u32_data[2];
             u64 u64_data[1];
-            const char *str[1]; // on 64-bit: 1 pointer fits
-        } value;               // for inline scalar values
+            const char *str[...];
+        } value;             /* للـ inline scalars */
     };
 };
 ```
 
-ده الـ representation الأساسي للـ property في الـ memory. الـ `is_inline` flag بيحدد إذا القيمة مخزنة جوا الـ struct (في `value`) أو بتشاور على external buffer (في `pointer`).
-
-**Key details:**
-- الـ `is_inline = false` + `length = 0` = boolean property (مجرد وجودها = `true`)
-- الـ inline storage محدودة بـ 8 bytes (حجم `u64`)
-- الـ arrays بتستخدم الـ `pointer` field دايماً
-
 ---
 
-#### `PROPERTY_ENTRY_U32` (و variants)
+#### Scalar Inline Macros
 
 ```c
-#define PROPERTY_ENTRY_U32(_name_, _val_)   \
-    __PROPERTY_ENTRY_ELEMENT(_name_, u32_data, U32, _val_)
+PROPERTY_ENTRY_U8(_name_, _val_)
+PROPERTY_ENTRY_U16(_name_, _val_)
+PROPERTY_ENTRY_U32(_name_, _val_)
+PROPERTY_ENTRY_U64(_name_, _val_)
+PROPERTY_ENTRY_STRING(_name_, _val_)
 ```
 
-**الـ** internal macro `__PROPERTY_ENTRY_ELEMENT`:
+بيخزنوا القيمة مباشرة في الـ `value` union (is_inline=true). ما فيش dynamic allocation. مثال:
 
 ```c
-#define __PROPERTY_ENTRY_ELEMENT(_name_, _elem_, _Type_, _val_)  \
-(struct property_entry) {                                        \
-    .name = _name_,                                              \
-    .length = sizeof_field(struct property_entry, value._elem_[0]), \
-    .is_inline = true,                                           \
-    .type = DEV_PROP_##_Type_,                                   \
-    { .value = { ._elem_[0] = _val_ } },                        \
-}
-```
-
-بيبني compound literal مباشرة. مناسب للـ static initialization في الـ driver code.
-
-**مثال كامل:**
-```c
-static const struct property_entry my_dev_props[] = {
+static const struct property_entry my_props[] = {
     PROPERTY_ENTRY_U32("clock-frequency", 400000),
-    PROPERTY_ENTRY_STRING("label", "my-sensor"),
+    PROPERTY_ENTRY_STRING("label", "my-device"),
     PROPERTY_ENTRY_BOOL("wakeup-source"),
-    PROPERTY_ENTRY_U32_ARRAY("reg-io-width", ((u32[]){1, 4})),
-    { }  // sentinel
+    { }  /* sentinel */
 };
 ```
 
 ---
 
-#### `PROPERTY_ENTRY_BOOL`
+#### Boolean Macro
 
 ```c
 #define PROPERTY_ENTRY_BOOL(_name_)     \
@@ -2038,31 +2191,37 @@ static const struct property_entry my_dev_props[] = {
 }
 ```
 
-بيبني boolean property. لاحظ إن `length == 0` و `type == 0` (DEV_PROP_U8). الـ interpretation هي: لو الـ property موجودة في الـ array → `true`.
+بـ `is_inline=true` وبدون type محدد، الـ framework بيعاملها كـ boolean present property.
 
 ---
 
-#### `PROPERTY_ENTRY_REF`
+#### Array Macros
 
 ```c
-#define PROPERTY_ENTRY_REF(_name_, _ref_, ...)                    \
-(struct property_entry) {                                         \
-    .name = _name_,                                               \
-    .length = sizeof(struct software_node_ref_args),              \
-    .type = DEV_PROP_REF,                                         \
-    { .pointer = &SOFTWARE_NODE_REFERENCE(_ref_, ##__VA_ARGS__) },\
-}
+PROPERTY_ENTRY_U32_ARRAY(_name_, _val_)        /* حجم تلقائي بـ ARRAY_SIZE */
+PROPERTY_ENTRY_U32_ARRAY_LEN(_name_, _val_, _len_)  /* حجم يدوي */
 ```
 
-بيبني reference property تشاور على software node أو fwnode تاني مع optional integer arguments. الـ `SOFTWARE_NODE_REFERENCE` macro بيستخدم `_Generic` للتمييز بين `software_node *` و `fwnode_handle *`.
+بيستخدموا `pointer` field بدل `value` — بيشاوروا على الـ array الخارجية. الـ array لازم تكون static أو موجودة طول عمر الـ property. `property_entries_dup` بتعمل deep copy لو احتجت.
 
-**مثال:**
+---
+
+#### Reference Macros
+
 ```c
-// reference لـ software node بدون args
-PROPERTY_ENTRY_REF("power-domains", &my_power_domain_node),
+#define PROPERTY_ENTRY_REF(_name_, _ref_, ...)
+#define PROPERTY_ENTRY_REF_ARRAY(_name_, _val_)
+```
 
-// reference مع argument
-PROPERTY_ENTRY_REF("clocks", &my_clk_node, 2),
+بيخلقوا reference property تشاور على `software_node` أو `fwnode_handle`. بيستخدم `SOFTWARE_NODE_REFERENCE` macro داخليًا.
+
+```c
+/* مثال: device-a بيتوصل بـ device-b */
+static const struct software_node dev_b_node = { .name = "device-b", ... };
+static const struct property_entry dev_a_props[] = {
+    PROPERTY_ENTRY_REF("connected-to", &dev_b_node),
+    { }
+};
 ```
 
 ---
@@ -2070,357 +2229,295 @@ PROPERTY_ENTRY_REF("clocks", &my_clk_node, 2),
 #### `property_entries_dup` / `property_entries_free`
 
 ```c
-struct property_entry *
-property_entries_dup(const struct property_entry *properties);
+struct property_entry *property_entries_dup(const struct property_entry *properties);
 void property_entries_free(const struct property_entry *properties);
 ```
 
-`property_entries_dup` بتعمل deep copy لـ array من `property_entry` في الـ heap، بما في ذلك الـ strings والـ data pointers. ضروري لأن الـ original array ممكن تبقى على الـ stack.
+`property_entries_dup` بتعمل deep copy للـ array — بتنسخ الـ names والـ data والـ string arrays كلها. بترجع pointer للـ copy الجديدة أو ERR_PTR.
 
-`property_entries_free` بتحرر الـ heap memory اللي `dup` خصصها.
+`property_entries_free` بتحرر الـ copy الناتجة عن `dup`. **لا تستدعيها على static arrays.**
 
-**Key details:** الـ copy بيشمل الـ name strings والـ pointed-to data — مش مجرد shallow copy.
-
-**Who calls it:** الـ `device_create_managed_software_node` والـ `fwnode_create_software_node` بيستخدموا `property_entries_dup` جوا تنفيذهم.
+- **Caller**: `fwnode_create_software_node` بتستدعي `dup` داخليًا، و`fwnode_remove_software_node` بتستدعي `free` تلقائيًا.
 
 ---
 
-### Group 9: Device-Level Utility Functions
+### ملاحظات Architectural مهمة
 
-#### `device_dma_supported` / `device_get_dma_attr`
+1. **الـ vtable pattern**: كل الـ fwnode operations بتمر بـ `fwnode_operations` vtable. الـ `fwnode_call_*_op` macros بتتحقق من NULL fwnode وغياب الـ op قبل الاستدعاء.
 
-```c
-bool device_dma_supported(const struct device *dev);
-enum dev_dma_attr device_get_dma_attr(const struct device *dev);
-```
+2. **الـ secondary fwnode**: الـ `fwnode_handle.secondary` بيسمح بـ chaining — لو الـ primary فشل في البحث عن property، بيجرب الـ secondary. هذا هو الآلية اللي بتخلي software nodes تعمل كـ overlay فوق DT/ACPI nodes.
 
-`device_dma_supported` بتعيد `true` لو الـ firmware وصف الـ device بإنها تدعم DMA. `device_get_dma_attr` بترجع نوع الـ coherency: `DEV_DMA_NOT_SUPPORTED`، `DEV_DMA_NON_COHERENT`، أو `DEV_DMA_COHERENT`.
+3. **الـ refcounting**: كل function بترجع `fwnode_handle *` بترجع reference جديدة (+1). المستدعي لازم يعمل `fwnode_handle_put` في كل code paths. الـ scoped macros بتتعامل مع هذا تلقائيًا.
 
-**Who calls it:** الـ DMA subsystem initialization، IOMMU setup code.
-
----
-
-#### `device_get_match_data`
-
-```c
-const void *device_get_match_data(const struct device *dev);
-```
-
-بترجع الـ driver-specific data المرتبطة بالـ device ID table entry اللي اتعرف بيها الجهاز. مثلاً في DT، الـ `of_device_id.data` pointer.
-
-**Return:** `const void *` pointer للـ data أو `NULL`.
-
-**Who calls it:** شائع جداً في الـ drivers عشان يجيب per-variant configuration بدون switch/case على compatible strings.
-
-```c
-// typical driver usage
-const struct my_config *cfg = device_get_match_data(dev);
-```
-
----
-
-#### `device_get_phy_mode` / `fwnode_get_phy_mode`
-
-```c
-int device_get_phy_mode(struct device *dev);
-int fwnode_get_phy_mode(const struct fwnode_handle *fwnode);
-```
-
-بيقرأوا `phy-mode` أو `phy-connection-type` property من الـ firmware ويحوّلوها لـ enum value من `PHY_INTERFACE_MODE_*` (معرّفة في `linux/phy.h`).
-
-**Return:** قيمة enum موجبة عند النجاح، `-errno` عند الفشل.
-
-**Who calls it:** Ethernet MAC drivers لتحديد ما إذا كانت الـ interface MII/RMII/RGMII/SGMII...إلخ.
-
----
-
-### Iteration Macros — ملخص
-
-| Macro | الوصف | Safe break? |
-|---|---|---|
-| `fwnode_for_each_child_node` | iterate كل children | لا، لازم manual put |
-| `fwnode_for_each_available_child_node` | iterate المتاحين فقط | لا، لازم manual put |
-| `fwnode_for_each_named_child_node` | iterate children باسم معين | لا |
-| `fwnode_for_each_child_node_scoped` | iterate مع auto-cleanup | نعم (`__free`) |
-| `fwnode_for_each_available_child_node_scoped` | available + auto-cleanup | نعم |
-| `fwnode_for_each_parent_node` | iterate parents للأعلى | لا |
-| `device_for_each_child_node` | من device مباشرة | لا |
-| `device_for_each_child_node_scoped` | من device مع cleanup | نعم |
-| `device_for_each_named_child_node` | من device باسم | لا |
-| `device_for_each_named_child_node_scoped` | من device باسم + cleanup | نعم |
-| `fwnode_graph_for_each_endpoint` | iterate endpoints في graph | لا |
-
-**القاعدة:** أي macro بينتهي بـ `_scoped` آمن للـ `break`/`return` لأنه بيستخدم الـ `__free(fwnode_handle)` cleanup attribute. الباقي لازم `fwnode_handle_put(child)` قبل الخروج.
+4. **الـ NULL safety**: الـ `fwnode_call_*_op` macros آمنة على NULL fwnode — بترجع error مناسب بدل crash.
 ## Phase 5: دليل الـ Debugging الشامل
+
+الـ subsystem اللي بندرسه هو **Unified Device Property Interface** — الكود في `include/linux/property.h` وتنفيذه في `drivers/base/property.c` و`drivers/base/swnode.c`. ده الـ layer اللي بيوحد الوصول للـ device properties سواء من Device Tree أو ACPI أو Software Nodes.
 
 ---
 
 ### Software Level
 
-#### 1. مدخلات الـ debugfs
+#### 1. مداخل الـ debugfs
 
-**الـ `fwnode`** والـ `software_node` مش بيعملوا entries في debugfs بشكل مباشر، لكن الـ device model نفسه بيعمل حاجات مفيدة جداً:
-
-```bash
-# شوف كل الـ fwnode links (supplier/consumer relationships)
-cat /sys/kernel/debug/device_component/devices
-
-# الـ fw_devlink — أهم مصدر لمشاكل الـ probe defer
-cat /sys/kernel/debug/devices_deferred
-
-# شوف شجرة الـ software nodes (kernel >= 5.8)
-ls /sys/kernel/debug/software_nodes/
-
-# لو عندك OF (Device Tree):
-ls /sys/kernel/debug/devicetree/
-cat /sys/kernel/debug/devicetree/dynamic
-```
-
-##### إزاي تقرأهم:
+الـ property subsystem نفسه مش ليه debugfs entries مخصصة، بس الـ fwnode graph والـ software nodes ممكن نتتبعهم من خلال:
 
 ```bash
-# كل سطر في devices_deferred بيقولك اسم الـ device والسبب
-# مثال:
-# spi-0:  Driver spi-gpio is not ready
-# i2c-1:  Supplier /soc/i2c@... is not ready
+# mount debugfs لو مش mounted
+mount -t debugfs none /sys/kernel/debug
 
-# software_nodes — بيشوفك الـ nodes المسجلة حالياً:
-ls /sys/kernel/debug/software_nodes/
-# my-sensor
-# my-regulator
+# شوف device links المرتبطة بالـ fwnode
+ls /sys/kernel/debug/device_component/
 
-cat /sys/kernel/debug/software_nodes/my-sensor/properties
-# speed-hz: 1000000
-# compatible: vendor,my-sensor
+# firmware node graph (لو driver بيستخدم graph API)
+ls /sys/kernel/debug/
 ```
 
----
+| debugfs Entry | الـ Content | طريقة القراءة |
+|---|---|---|
+| `/sys/kernel/debug/device_component/` | device component matching | `cat /sys/kernel/debug/device_component/<dev>` |
+| `/sys/kernel/debug/acpi/` | ACPI namespace nodes (ACPI backend) | `cat /sys/kernel/debug/acpi/<path>/properties` |
+| `/sys/kernel/debug/of_dump` | OF/DT node dump (DT backend) | يستلزم `CONFIG_OF_DEBUG` |
 
-#### 2. مدخلات الـ sysfs
+#### 2. مداخل الـ sysfs
 
 ```bash
-# الـ fwnode الخاص بـ device معين
-ls /sys/bus/platform/devices/my-device/
-# of_node -> رابط لـ DT node (لو OF)
-# firmware_node -> رابط لـ ACPI node (لو ACPI)
-# driver_override
+# إقرأ الـ firmware node path لأي device
+cat /sys/devices/<path>/firmware_node/path 2>/dev/null
 
-# اقرأ property مباشرة من sysfs لـ DT:
-cat /sys/firmware/devicetree/base/soc/i2c@40005400/clock-frequency
+# DMA support
+cat /sys/devices/<path>/dma_mask_bits 2>/dev/null
 
-# شوف الـ compatible string:
-cat /sys/bus/platform/devices/my-device/of_node/compatible
+# properties من OF backend
+ls /sys/firmware/devicetree/base/<node>/
+cat /sys/firmware/devicetree/base/<node>/<prop_name>
 
-# الـ software nodes (kernel >= 5.17):
-ls /sys/firmware/software_nodes/
+# ACPI backend
+ls /sys/firmware/acpi/tables/
+cat /sys/bus/acpi/devices/<HID>/properties 2>/dev/null
 
-# الـ devlink state لكل device:
-cat /sys/bus/platform/devices/my-device/power/runtime_status
+# software nodes المسجلة
+ls /sys/firmware/swnode/ 2>/dev/null
 ```
 
----
-
-#### 3. استخدام الـ ftrace
-
-##### تفعيل الـ tracepoints المهمة:
+**مثال عملي** — اقرأ property من DT node مباشرة:
 
 ```bash
-# --- تفعيل kprobes على دوال الـ property API ---
-
-# تتبع كل قراءة property
-echo 'p:probe_prop_read device_property_read_u32_array dev=%di propname=%si' \
-    > /sys/kernel/debug/tracing/kprobe_events
-
-echo 1 > /sys/kernel/debug/tracing/events/kprobes/probe_prop_read/enable
-echo 1 > /sys/kernel/debug/tracing/tracing_on
-cat /sys/kernel/debug/tracing/trace_pipe
-
-# --- تفعيل فعاليات الـ fwnode graph ---
-echo 1 > /sys/kernel/debug/tracing/events/device_driver/enable
-
-# تتبع مشاكل الـ probe deferral
-echo 1 > /sys/kernel/debug/tracing/events/devres/enable
+# لو عندك node اسمه /soc/i2c@ff160000 وعنده property clock-frequency
+xxd /sys/firmware/devicetree/base/soc/i2c@ff160000/clock-frequency
+# output: 00000000: 0006 1a80  ← big-endian u32 = 400000 Hz = 400 KHz
 ```
 
-##### تتبع `fwnode_property_present` و `fwnode_device_is_available`:
+#### 3. الـ ftrace — Tracepoints وEvents
+
+الـ property API مش ليها tracepoints built-in، بس نقدر نتتبع الـ function calls مباشرة:
 
 ```bash
-# بـ function_graph tracer
-echo function_graph > /sys/kernel/debug/tracing/current_tracer
-echo 'fwnode_property_present
-fwnode_device_is_available
-device_property_read_u32_array
-software_node_register' > /sys/kernel/debug/tracing/set_ftrace_filter
-
-echo 1 > /sys/kernel/debug/tracing/tracing_on
-# شغّل الـ driver ثم:
-cat /sys/kernel/debug/tracing/trace | grep -E 'fwnode|property|swnode'
+# شغّل function tracer على device_property_read_u32
+cd /sys/kernel/debug/tracing
+echo function > current_tracer
+echo 'device_property_read_u32_array' > set_ftrace_filter
+echo 'fwnode_property_read_u32_array' >> set_ftrace_filter
+echo 'fwnode_property_present' >> set_ftrace_filter
+echo 'software_node_register' >> set_ftrace_filter
+echo 1 > tracing_on
+# شغّل الـ driver
+echo 0 > tracing_on
+cat trace
 ```
 
----
+```bash
+# تتبع كل الـ fwnode operations باستخدام function_graph
+echo function_graph > current_tracer
+echo 'fwnode_*' > set_ftrace_filter
+echo 'device_property_*' >> set_ftrace_filter
+echo 1 > tracing_on
+modprobe <your_driver>
+echo 0 > tracing_on
+cat trace | head -100
+```
+
+**مثال على output متوقع:**
+
+```
+# tracer: function_graph
+ 0) | fwnode_property_present() {
+ 0) | fwnode_call_bool_op() {
+ 0)   0.312 us    | of_fwnode_property_present();
+ 0)   1.105 us    | }
+ 0)   1.890 us    | }
+```
 
 #### 4. الـ printk والـ Dynamic Debug
 
-##### تفعيل dynamic debug للـ property subsystem:
+```bash
+# فعّل dynamic debug لـ property subsystem
+echo 'file drivers/base/property.c +p' > /sys/kernel/debug/dynamic_debug/control
+echo 'file drivers/base/swnode.c +p' >> /sys/kernel/debug/dynamic_debug/control
+
+# أو فعّل كل drivers/base
+echo 'file drivers/base/* +p' > /sys/kernel/debug/dynamic_debug/control
+
+# تحقق إيه اللي مفعّل
+cat /sys/kernel/debug/dynamic_debug/control | grep property
+
+# لو محتاج OF/DT debug
+echo 'file drivers/of/property.c +p' > /sys/kernel/debug/dynamic_debug/control
+echo 'file drivers/of/base.c +p' >> /sys/kernel/debug/dynamic_debug/control
+
+# ACPI property debug
+echo 'file drivers/acpi/property.c +p' > /sys/kernel/debug/dynamic_debug/control
+```
+
+**من الـ kernel command line** لتفعيل debug بدري في الـ boot:
 
 ```bash
-# تفعيل كل رسائل الـ debug في ملفات الـ property
-echo 'file drivers/base/property.c +p' > /sys/kernel/debug/dynamic_debug/control
-echo 'file drivers/base/swnode.c +p'   > /sys/kernel/debug/dynamic_debug/control
-echo 'file drivers/base/fwnode.c +p'   > /sys/kernel/debug/dynamic_debug/control
-
-# تفعيل بالـ module name (مثلاً driver بيستخدم property API)
-echo 'module my_driver +p' > /sys/kernel/debug/dynamic_debug/control
-
-# شوف الـ dynamic debug الفعّالة حالياً
-cat /sys/kernel/debug/dynamic_debug/control | grep property
-```
-
-##### من الـ bootloader (kernel cmdline):
-
-```
+# في /etc/default/grub أو kernel cmdline
 dyndbg="file drivers/base/property.c +p; file drivers/base/swnode.c +p"
 ```
 
-##### في الـ driver نفسه — استخدام `dev_dbg`:
+#### 5. Kernel Config Options للـ Debugging
 
-```c
-/* قبل تسجيل الـ software node */
-dev_dbg(dev, "registering software node '%s'\n", node->name);
+| Config Option | الغرض | متى تفعّله |
+|---|---|---|
+| `CONFIG_OF` | دعم Device Tree | دايماً على embedded |
+| `CONFIG_OF_DYNAMIC` | إضافة/حذف DT nodes runtime | debugging dynamic DT |
+| `CONFIG_ACPI_DEBUG` | ACPI debug messages | ACPI property issues |
+| `CONFIG_ACPI_DEBUGGER` | ACPI interactive debugger | ACPI namespace problems |
+| `CONFIG_DEBUG_DRIVER` | driver core debug messages | device/fwnode binding |
+| `CONFIG_PROVE_LOCKING` | detect locking bugs | reference count races |
+| `CONFIG_KASAN` | detect use-after-free | fwnode_handle_put bugs |
+| `CONFIG_UBSAN` | detect undefined behavior | property type mismatches |
+| `CONFIG_DEBUG_OBJECTS` | track object lifecycles | fwnode reference leaks |
+| `CONFIG_DEBUG_OBJECTS_WORK` | track work_struct objects | deferred probe issues |
+| `CONFIG_SOFTIRQ_REENTRANT` | reentrancy checks | — |
+| `CONFIG_FWNODE_MDIO` | MDIO fwnode support | networking property debug |
 
-/* بعد قراءة property */
-ret = device_property_read_u32(dev, "clock-frequency", &freq);
-dev_dbg(dev, "clock-frequency=%u ret=%d\n", freq, ret);
+```bash
+# تحقق من الـ config الحالي
+zcat /proc/config.gz | grep -E 'CONFIG_(OF|ACPI_DEBUG|DEBUG_DRIVER|KASAN)'
+# أو
+grep -E 'CONFIG_(OF|ACPI_DEBUG|DEBUG_DRIVER)' /boot/config-$(uname -r)
 ```
-
----
-
-#### 5. الـ Kernel Config Options للـ Debugging
-
-| Config | الوظيفة |
-|---|---|
-| `CONFIG_OF` | يفعّل دعم Device Tree |
-| `CONFIG_OF_DYNAMIC` | يسمح بـ DT overlays ديناميكية |
-| `CONFIG_OF_OVERLAY` | دعم DT overlays كاملاً |
-| `CONFIG_ACPI` | يفعّل ACPI firmware node |
-| `CONFIG_DEBUG_FS` | مطلوب للـ debugfs entries |
-| `CONFIG_TRACING` | مطلوب للـ ftrace |
-| `CONFIG_DYNAMIC_DEBUG` | يفعّل `dev_dbg` / dynamic debug |
-| `CONFIG_DEBUG_DEVRES` | يتتبع leaks في الـ managed resources |
-| `CONFIG_PROVE_LOCKING` | يكشف deadlocks في الـ fwnode locking |
-| `CONFIG_DEBUG_OBJECTS` | يكشف use-after-free في الـ fwnode objects |
-| `CONFIG_KASAN` | يكشف memory corruption في الـ property arrays |
-| `CONFIG_KCSAN` | يكشف race conditions على الـ fwnode flags |
-| `CONFIG_BOOT_PRINTK_DELAY` | مفيد لو المشكلة بتحصل early في الـ boot |
-| `CONFIG_FW_DEVLINK` | يتحكم في الـ device link behavior |
-
----
 
 #### 6. أدوات خاصة بالـ Subsystem
 
-##### فحص الـ Device Tree من userspace:
+**أداة `dtc` لقراءة الـ Device Tree:**
 
 ```bash
-# dtc — اعمل dump للـ DT الحي
-dtc -I fs /sys/firmware/devicetree/base > /tmp/live.dts
+# فك compile الـ DTB الحالي
+dtc -I dtb -O dts -o /tmp/current.dts /sys/firmware/fdt 2>/dev/null
+# أو
+dtc -I fs -O dts /sys/firmware/devicetree/base 2>/dev/null | head -200
 
-# fdtdump — لو عندك binary DT file
-fdtdump /boot/dtb/my-board.dtb | grep -A5 "my-sensor"
-
-# شوف الـ DT properties بشكل human-readable
-ls /sys/firmware/devicetree/base/soc/
-hexdump -C /sys/firmware/devicetree/base/soc/my-sensor/reg
+# اقرأ node معين
+cat /sys/firmware/devicetree/base/compatible | tr '\0' '\n'
 ```
 
-##### فحص الـ ACPI:
+**أداة `acpidump` للـ ACPI:**
 
 ```bash
-# dump ACPI tables
-acpidump > /tmp/acpi.dat
-acpixtract -a /tmp/acpi.dat
-iasl -d DSDT.dat  # decompile إلى DSL
+# dump كل ACPI tables
+acpidump -o /tmp/acpi.dat
 
-# شوف الـ ACPI device properties
-cat /sys/bus/acpi/devices/*/status
+# استخرج الـ DSDT
+acpidump -n DSDT | acpixtract -a
+iasl -d dsdt.dat
+# ابحث في الـ DSDT المفكوك عن properties
+grep -i 'DSD\|_DSD' dsdt.dsl
 ```
 
-##### فحص الـ software nodes:
+**فحص الـ software nodes:**
 
 ```bash
-# لو kernel بيدعم software_nodes في sysfs
-ls /sys/firmware/software_nodes/
-cat /sys/firmware/software_nodes/my-sensor/properties/speed-hz
+# شوف الـ software nodes المسجلة عبر sysfs
+find /sys -name "software_node" -type d 2>/dev/null
+# أو ابحث في dmesg
+dmesg | grep -i 'software.node\|swnode'
 ```
 
-##### فحص الـ fwnode connections:
+**الـ `devlink` مش مرتبط بالـ property API مباشرة، بس لو بتعمل debug لـ net device properties:**
 
 ```bash
-# شوف graph connections (camera pipelines مثلاً)
-media-ctl -p  # لو عندك V4L2 media controller
+devlink dev info
+devlink dev param show
 ```
 
----
+#### 7. جدول رسائل الـ Errors الشائعة
 
-#### 7. جدول رسائل الـ Error الشائعة
-
-| رسالة الـ kernel log | المعنى | الحل |
+| رسالة الـ Kernel Log | المعنى | الحل |
 |---|---|---|
-| `device_property_read_u32: -EINVAL` | الـ fwnode نفسه NULL أو مفيهوش ops | تأكد إن `dev_fwnode(dev)` مش NULL قبل الاستدعاء |
-| `device_property_read_u32: -ENODATA` | الـ property موجودة بس فاضية | صحح الـ DTS أو الـ software_node |
-| `device_property_read_u32: -ENXIO` | الـ fwnode مش بيدعم العملية دي | الـ fwnode_ops مش بيوفر `property_read_int_array` |
-| `device_property_read_u32: -EOVERFLOW` | الـ array أكبر من الـ nval المطلوب | زوّد الـ buffer أو استخدم `_count` أولاً |
-| `fwnode_handle_put: already freed` | double free على الـ fwnode | استخدم `__free(fwnode_handle)` أو اتأكد من lifecycle |
-| `software_node_register: -EEXIST` | node باسم مسجل قبل كده | تحقق من uniqueness أو call `unregister` أولاً |
-| `fwnode_graph_get_next_endpoint: NULL` | مفيش graph endpoints | تحقق إن الـ DTS فيه `port` و `endpoint` nodes صح |
-| `device ... not ready, waiting for supplier` | الـ fw_devlink مش لاقي supplier | تحقق من الـ DT phandle أو سجّل الـ software node الـ supplier أولاً |
-| `fwnode_property_present: fwnode is NULL` | بيتسأل على device مش متهيأ | تحقق من ترتيب الـ init وإن الـ of_node/acpi_node اتعيّن |
-| `property_entries_dup: -ENOMEM` | نفد الـ memory | فحص memory leaks، قلل عدد الـ properties |
-| `fwnode_connection_find_match: no match` | الـ connection ID مش موجود | تحقق من الـ con_id string في الـ DTS والـ driver |
+| `fwnode_property_read ... -EINVAL` | الـ fwnode نفسه NULL أو invalid | تحقق من `dev_fwnode(dev)` إنه مش NULL قبل الاستخدام |
+| `fwnode_property_read ... -ENXIO` | الـ backend مش عنده الـ op ده | الـ fwnode type مش بيدعم العملية دي |
+| `fwnode_property_read ... -ENODATA` | الـ property موجودة بس فاضية | تحقق من DT/ACPI/swnode تعريف الـ property |
+| `fwnode_property_read ... -EPROTO` | type mismatch — قرأت u32 من string | غيّر الـ function للنوع الصح |
+| `fwnode_property_read ... -EOVERFLOW` | الـ array أصغر من عدد العناصر | زوّد `nval` أو استخدم `count` أولاً |
+| `software_node_register: -EEXIST` | الـ node مسجّل قبل كده | تأكد من unregister قبل re-register |
+| `device_add_software_node: -EBUSY` | الـ device عنده fwnode بالفعل | استخدم `device_remove_software_node` الأول |
+| `ERROR: Bad cell-index ...` | الـ phandle reference index غلط | تحقق من `nargs_prop` في DT |
+| `fwnode_graph_get_endpoint_by_id: invalid endpoint` | port/endpoint IDs مش موجودين | تحقق من الـ DT graph bindings |
+| `fwnode_handle reference count leak` | `fwnode_handle_put` مش اتعمل | استخدم `fwnode_for_each_*_scoped` أو `__free(fwnode_handle)` |
 
----
-
-#### 8. نقاط استراتيجية لـ `dump_stack()` و `WARN_ON()`
+#### 8. نقاط استراتيجية لـ dump_stack() و WARN_ON()
 
 ```c
-/* في drivers/base/property.c — عند قراءة property بـ fwnode مشبوه */
-int fwnode_property_read_u32_array(const struct fwnode_handle *fwnode,
-                                   const char *propname, u32 *val, size_t nval)
+/* في driver يقرأ property — تحقق قبل الاستخدام */
+static int my_driver_probe(struct platform_device *pdev)
 {
-    /* WARN لو الـ fwnode وصلنا بـ NULL — دايماً علامة bug في الـ caller */
-    if (WARN_ON(!fwnode))
+    struct fwnode_handle *fwnode = dev_fwnode(&pdev->dev);
+
+    /* نقطة 1: تحقق من وجود الـ fwnode */
+    if (WARN_ON(!fwnode)) {
+        dev_err(&pdev->dev, "no firmware node!\n");
         return -EINVAL;
-    /* ... */
+    }
+
+    u32 val;
+    int ret = device_property_read_u32(&pdev->dev, "clock-frequency", &val);
+
+    /* نقطة 2: log القيمة المقروءة للتحقق */
+    dev_dbg(&pdev->dev, "clock-frequency = %u (ret=%d)\n", val, ret);
+
+    /* نقطة 3: تحقق من child nodes */
+    struct fwnode_handle *child;
+    unsigned int count = fwnode_get_child_node_count(fwnode);
+    dev_dbg(&pdev->dev, "child node count = %u\n", count);
+
+    fwnode_for_each_child_node(fwnode, child) {
+        /* نقطة 4: تحقق من الـ child اسمه إيه */
+        dev_dbg(&pdev->dev, "child: %s available=%d\n",
+                fwnode_get_name(child),
+                fwnode_device_is_available(child));
+
+        /* نقطة 5: WARN لو الـ child مش available وإنت متوقع يكون */
+        WARN_ON(!fwnode_device_is_available(child));
+    }
+    return 0;
 }
 
-/* في device_add_software_node — لو الـ device خلاص عنده node */
-int device_add_software_node(struct device *dev, const struct software_node *node)
+/* نقطة 6: في cleanup — تحقق من reference count */
+static void my_cleanup(struct fwnode_handle *fwnode)
 {
-    WARN_ON(dev_fwnode(dev) != NULL); /* مش المفروض نضيف على فوق node موجودة */
-    /* ... */
+    WARN_ON(IS_ERR_OR_NULL(fwnode));
+    fwnode_handle_put(fwnode);  /* لازم يتعمل دايماً */
 }
+```
 
-/* في كود الـ driver — عند استخدام fwnode_for_each_child_node */
-fwnode_for_each_child_node(fwnode, child) {
-    if (unlikely(!child->ops)) {
-        WARN_ON(1);  /* child بـ NULL ops — مشكلة خطيرة */
-        break;
-    }
-}
+**نقاط dump_stack() المفيدة:**
 
-/* عند break مبكر من loop — لازم تعمل put يدوي */
-device_for_each_child_node(dev, child) {
-    if (some_condition) {
-        fwnode_handle_put(child);  /* mandatory — وإلا leak */
-        break;
-    }
-}
-
-/* نقطة مناسبة لـ dump_stack في driver init */
-ret = device_property_read_u32(dev, "reg", &addr);
+```c
+/* لو فيه software_node register/unregister race */
+int ret = software_node_register(node);
 if (ret) {
-    dev_err(dev, "failed to read 'reg': %d\n", ret);
-    dump_stack();  /* مفيد لو الـ probe بيتسمى من مكان غير متوقع */
-    return ret;
+    pr_err("swnode register failed: %d\n", ret);
+    dump_stack();  /* يكشف من اللي استدعى الـ register */
+}
+
+/* لو fwnode_graph endpoint مش لاقي remote */
+struct fwnode_handle *remote = fwnode_graph_get_remote_endpoint(ep);
+if (!remote) {
+    dev_warn(dev, "no remote endpoint for port %u\n", ep_data.port);
+    dump_stack();  /* لتتبع من طلب الـ endpoint */
 }
 ```
 
@@ -2428,188 +2525,238 @@ if (ret) {
 
 ### Hardware Level
 
-#### 1. التحقق إن حالة الـ hardware بتطابق حالة الـ kernel
+#### 1. التحقق من إن الـ Hardware State بيتطابق مع الـ Kernel State
+
+الـ property API بيوفر الـ metadata بس، المشكلة دايماً بين القيمة اللي في الـ DT/ACPI وإيه اللي على الـ hardware فعلاً.
 
 ```bash
-# خطوة 1: اقرأ الـ property من الـ DTS/ACPI
-cat /sys/firmware/devicetree/base/soc/spi@40013000/cs-gpios
-# أو
-hexdump -C /sys/firmware/devicetree/base/soc/spi@40013000/clock-frequency
+# تحقق من compatible string يتطابق مع اللي على الـ silicon
+cat /sys/firmware/devicetree/base/<node>/compatible | tr '\0' '\n'
+# قارن بالـ datasheet part number
 
-# خطوة 2: قارن مع ما قرأه الـ driver فعلاً
-dmesg | grep -i "spi\|clock-frequency\|cs-gpio"
+# تحقق من reg property (base address) يتطابق مع الـ hardware manual
+xxd /sys/firmware/devicetree/base/<node>/reg
+# output: big-endian address + size
 
-# خطوة 3: تحقق من الـ gpio state الفعلي
-cat /sys/kernel/debug/gpio  # شوف كل GPIO direction/value
-
-# خطوة 4: تحقق من الـ clock فعلاً شغّال
-cat /sys/kernel/debug/clk/clk_summary | grep spi
+# تحقق إن الـ clock-frequency property بتتطابق مع إيه اللي الـ hardware بيشتغل عليه
+cat /sys/firmware/devicetree/base/<node>/clock-frequency | od -An -tx4
 ```
 
----
+**مثال: I2C controller** — قارن الـ property مع الـ hardware:
+
+```bash
+# من DT
+xxd /sys/firmware/devicetree/base/soc/i2c@ff160000/clock-frequency
+# من kernel (ما تم read فعلاً)
+dmesg | grep -i 'i2c.*ff160000\|ff160000.*i2c'
+# من hardware register (SCL frequency divider register)
+devmem2 0xff160014 w  # مثلاً CLKDIV register
+```
 
 #### 2. تقنيات الـ Register Dump
 
 ```bash
-# devmem2 — اقرأ/اكتب registers بشكل مباشر
-# مثال: اقرأ SPI base address من DTS ثم تحقق منه
-SPI_BASE=$(cat /sys/firmware/devicetree/base/soc/spi@40013000/reg | \
-           od -An -tx4 | awk '{print "0x"$1}')
+# devmem2 — قراءة register واحد
+devmem2 <phys_addr> [b|h|w|q]
 
-devmem2 $SPI_BASE    # قرأ CR1
-devmem2 $((SPI_BASE + 4))  # CR2
-devmem2 $((SPI_BASE + 8))  # SR
+# مثال: اقرأ 4 registers بدءاً من 0xFF160000
+for offset in 0 4 8 c; do
+    addr=$((0xFF160000 + 0x$offset))
+    printf "0x%08X: " $addr
+    devmem2 $addr w 2>/dev/null | grep -o '0x[0-9A-Fa-f]*$'
+done
 
-# /dev/mem مع dd
-dd if=/dev/mem bs=4 count=1 skip=$((0x40013000/4)) 2>/dev/null | od -tx4
+# /dev/mem مع dd (لـ range كامل)
+dd if=/dev/mem bs=4 count=64 skip=$((0xFF160000/4)) 2>/dev/null | xxd
 
 # io utility (من package ioport)
-io -4 -r 0x40013000
+io -4 -r 0xFF160000
 
-# في kernel module — ioread/iowrite
-void __iomem *base = fwnode_iomap(fwnode, 0);
-pr_info("CR1=0x%08x SR=0x%08x\n",
-        ioread32(base),
-        ioread32(base + 0x08));
+# من داخل kernel module — ioread32 بعد ioremap
+void __iomem *base = ioremap(0xFF160000, 0x1000);
+dev_info(dev, "REG0=0x%08x\n", ioread32(base));
+iounmap(base);
 ```
 
----
+**مثال على استخدام `fwnode_iomap`:**
 
-#### 3. نصائح الـ Logic Analyzer والـ Oscilloscope
-
-```
-مشكلة شائعة: الـ driver قرأ "spi-max-frequency = <10000000>" من الـ DTS
-              لكن الـ bus شغّال بـ 1MHz فعلاً.
-
-خطوة 1: وصّل الـ logic analyzer على SCK
-خطوة 2: ابعت transaction بسيط
-خطوة 3: قيس الـ frequency الفعلية
-
-لو مختلفة → ابحث عن:
-  a) الـ clock divider في الـ parent clock مش صح في DTS
-  b) الـ SoC datasheet بيقول max = 5MHz بس الـ DTS قال 10MHz
-  c) الـ driver مش بيحترم fwnode_get_phy_mode() وبيستخدم قيمة default
-
-لـ I2C:
-  - تأكد من الـ pull-up resistors قيمتهم تتوافق مع "clock-frequency"
-  - 100kHz → 4.7kΩ, 400kHz → 2.2kΩ, 1MHz → 1kΩ
-
-لـ GPIO:
-  - استخدم oscilloscope على الـ CS pin
-  - تحقق إن polarity في DTS (active-low) بتوافق الـ hardware
+```c
+/* الـ API نفسه بيوفر iomap مع الـ fwnode */
+void __iomem *regs = fwnode_iomap(fwnode, 0);  /* index 0 = أول reg range */
+if (!regs) {
+    dev_err(dev, "iomap failed — check 'reg' property in DT\n");
+    return -ENOMEM;
+}
+u32 val = ioread32(regs);
+dev_info(dev, "first register = 0x%08x\n", val);
+iounmap(regs);
 ```
 
----
+#### 3. Logic Analyzer وOscilloscope
 
-#### 4. مشاكل الـ hardware الشائعة وأنماطها في الـ kernel log
+**للـ I2C devices** اللي بتستخدم property API:
 
-| مشكلة الـ HW | النمط في الـ dmesg | السبب |
+```
+Oscilloscope tips:
+─────────────────
+- قيس الـ SCL frequency وقارنها بـ "clock-frequency" property
+- لو الـ property بتقول 400KHz والـ scope بيقيس 100KHz → غلط في الـ divider register
+- ابحث عن clock stretching مفرط → يدل على mismatch في timing properties
+
+Logic Analyzer (مثلاً Saleae):
+──────────────────────────────
+- الـ "interrupts" property في DT → تأكد الـ IRQ line بيطلع على الـ trigger المحدد (edge/level)
+- فعّل الـ protocol decoder المناسب (I2C/SPI/UART) وقارن الـ timing بالـ properties
+```
+
+**ASCII diagram — مقارنة property مع hardware:**
+
+```
+DT property: clock-frequency = <400000>
+                │
+                ▼
+    ┌─────────────────────┐
+    │  driver reads val   │  device_property_read_u32(dev,"clock-frequency",&hz)
+    │  hz = 400000        │
+    └────────┬────────────┘
+             │ calculates divider
+             ▼
+    ┌─────────────────────┐
+    │  hardware register  │  CLKDIV = APB_CLK / (5 * desired_freq)
+    │  write to HW        │
+    └────────┬────────────┘
+             │
+             ▼
+    ┌─────────────────────┐
+    │   oscilloscope      │  measure actual SCL frequency
+    │   measure SCL       │  should match 400KHz ± tolerance
+    └─────────────────────┘
+```
+
+#### 4. Common Hardware Issues وكيف تظهر في الـ Kernel Log
+
+| المشكلة الـ Hardware | الـ Kernel Log Pattern | الـ Root Cause |
 |---|---|---|
-| غلط في الـ IRQ number في DTS | `irq: no irq domain found for /soc/foo@0` | الـ interrupt-parent مش صح |
-| الـ GPIO controller مش موجود | `gpio request failed: -EPROBE_DEFER` | الـ gpiochip لسه مش registered |
-| clock parent غلط | `clk: failed to reparent` | الـ clocks property في DTS غلط |
-| regulator voltage مش صح | `regulator: invalid voltage range` | `voltage-ranges` في DTS مش بيطابق الـ HW spec |
-| مشكلة في الـ pinmux | `pinctrl: request pin failed` | الـ pinctrl-0 في DTS بيتعارض مع device تاني |
-| الـ MMIO address غلط | `ioremap failed for 0x...` | الـ reg property في DTS مش بيطابق الـ SoC memory map |
-| DMA channel مش متاح | `dma: no DMA channel available` | الـ dmas property فيها index غلط |
+| الـ `reg` property خطأ (address غلط) | `ioremap: invalid phys address` أو `fwnode_iomap failed` | الـ DT/ACPI reg range مش بيوافق الـ hardware manual |
+| الـ IRQ number خطأ | `irq: type mismatch, failed to map` | `interrupts` property في DT غلط |
+| الـ `compatible` مش متطابق مع الـ driver | `Driver 'xxx' was not added` أو device مش probe | نسخة خاطئة من `compatible` string |
+| `status = "disabled"` في DT بالغلط | Device مش بيظهر في `/sys/bus/` | فعّل الـ node بـ `status = "okay"` |
+| مشكلة endianness — property big-endian بس driver بيقرأ كـ LE | قيم عشوائية خاطئة | استخدم `fwnode_device_is_big_endian()` واضبط الـ accessors |
+| phandle reference لـ non-existent node | `fwnode_property_get_reference_args: -EINVAL` | الـ node المشار إليه مش موجود في DT |
+| clock-frequency خارج نطاق الـ hardware | `clk: set rate failed` في الـ clk driver | راجع الـ hardware limits في الـ datasheet |
 
----
-
-#### 5. تصحيح مشاكل الـ Device Tree
+#### 5. Device Tree Debugging
 
 ```bash
-# الخطوة الأولى: تحقق إن الـ DT اتحمل صح
-dmesg | grep -E "OF|DTB|devicetree"
-# المفروض تشوف: "OF: fdt: Machine model: My Board Rev 1.0"
+# 1. تحقق إن الـ DTB اتحمل صح
+ls -la /sys/firmware/fdt  # لازم يكون موجود
+md5sum /sys/firmware/fdt   # قارن مع الـ dtb file
 
-# قارن الـ DT المُفسَّر بالـ source
-dtc -I fs /sys/firmware/devicetree/base -O dts > /tmp/live.dts
-diff /tmp/live.dts my-board.dts
+# 2. فك compile الـ DTB الحي وقارنه بالـ source
+dtc -I dtb -O dts /sys/firmware/fdt -o /tmp/live.dts 2>/dev/null
+diff /tmp/live.dts /path/to/source.dts | head -50
 
-# تحقق من وجود property معينة
-grep -r "my-sensor" /sys/firmware/devicetree/base/ 2>/dev/null
+# 3. تحقق من overlays المطبّقة
+ls /sys/firmware/devicetree/overlays/ 2>/dev/null
 
-# فحص الـ phandles — لو فيه reference لـ node مش موجودة
-# ظهور -ENODEV أو NULL fwnode من fwnode_find_reference()
-# الحل: تأكد إن الـ node المرجوع إليها موجودة فعلاً في الـ DTS
+# 4. تحقق من node معين موجود وخصائصه صح
+# الـ 'status' property
+cat /sys/firmware/devicetree/base/<path>/status 2>/dev/null || echo "no status (ok by default)"
 
-# تحقق من الـ status property
-cat /sys/firmware/devicetree/base/soc/my-device/status
-# يجب أن يكون: "okay" مش "disabled"
+# 5. اقرأ كل properties لـ node
+for f in /sys/firmware/devicetree/base/<node>/*; do
+    name=$(basename $f)
+    printf "%-30s: " "$name"
+    xxd $f 2>/dev/null | head -1 || echo "(dir)"
+done
 
-# فحص الـ compatible string بدقة (case-sensitive, dash-sensitive)
-cat /sys/firmware/devicetree/base/soc/my-device/compatible | strings
-# مقارنة مع ما في الـ driver's of_match_table
+# 6. تحقق من compatible يتطابق مع driver table
+cat /sys/firmware/devicetree/base/<node>/compatible | tr '\0' '\n'
+# قارن بالـ of_device_id table في source الـ driver
 
-# فحص الـ DT overlay بعد تطبيقه
-cat /sys/kernel/config/device-tree/overlays/my-overlay/status
+# 7. تحقق من phandle references
+xxd /sys/firmware/devicetree/base/<node>/clocks  # يرجع phandle (u32 big-endian)
+# قيمة الـ phandle ابحث عنها في
+grep -r "phandle" /sys/firmware/devicetree/base/ 2>/dev/null | head
+
+# 8. لو بتستخدم software_node بدل DT — تحقق من التسجيل
+dmesg | grep -E 'swnode|software.node'
+```
+
+**مثال تحقق من `fwnode_device_is_available`:**
+
+```bash
+# لو device مش بيظهر رغم وجود الـ node في DT
+python3 -c "
+import os
+node = '/sys/firmware/devicetree/base/soc/i2c@ff160000'
+status_file = os.path.join(node, 'status')
+if os.path.exists(status_file):
+    val = open(status_file,'rb').read().rstrip(b'\x00').decode()
+    print(f'status = {repr(val)}')
+else:
+    print('no status property → device is available (okay by default)')
+"
 ```
 
 ---
 
 ### Practical Commands
 
-#### Section A: فحص سريع للـ property subsystem
+#### أوامر جاهزة للنسخ
+
+**1. اقرأ كل properties لأي device عبر sysfs:**
 
 ```bash
 #!/bin/bash
-# === property_debug.sh === فحص شامل وسريع ===
-
-DEVICE=${1:-"my-device"}
-
-echo "=== [1] Device fwnode type ==="
-ls -la /sys/bus/platform/devices/$DEVICE/of_node 2>/dev/null && echo "OF (DT)" \
-  || ls -la /sys/bus/platform/devices/$DEVICE/firmware_node 2>/dev/null && echo "ACPI" \
-  || echo "Software Node or Unknown"
-
-echo ""
-echo "=== [2] DT properties (if OF) ==="
-ls /sys/firmware/devicetree/base/**/$DEVICE/ 2>/dev/null | head -20
-
-echo ""
-echo "=== [3] Deferred probe reason ==="
-grep $DEVICE /sys/kernel/debug/devices_deferred 2>/dev/null || echo "Not deferred"
-
-echo ""
-echo "=== [4] Recent kernel messages ==="
-dmesg --since "5 minutes ago" | grep -i "$DEVICE\|fwnode\|swnode\|property" | tail -30
-
-echo ""
-echo "=== [5] Software nodes ==="
-ls /sys/kernel/debug/software_nodes/ 2>/dev/null || echo "No software_nodes debugfs"
-
-echo ""
-echo "=== [6] GPIO state ==="
-grep $DEVICE /sys/kernel/debug/gpio 2>/dev/null || echo "No GPIO for $DEVICE"
+# usage: ./read_props.sh <device_path>
+# example: ./read_props.sh /sys/firmware/devicetree/base/soc/i2c@ff160000
+NODE="${1:-/sys/firmware/devicetree/base}"
+for f in "$NODE"/*; do
+    [ -f "$f" ] || continue
+    name=$(basename "$f")
+    size=$(wc -c < "$f")
+    printf "%-35s [%3d bytes]: " "$name" "$size"
+    if [ "$size" -le 64 ]; then
+        xxd "$f" | head -2
+    else
+        xxd "$f" | head -1
+        echo "  ..."
+    fi
+done
 ```
 
-##### تشغيل:
+**2. فعّل كل dynamic debug للـ property subsystem:**
+
 ```bash
-bash property_debug.sh spi-0
+#!/bin/bash
+set -e
+DBG=/sys/kernel/debug/dynamic_debug/control
+for f in \
+    "file drivers/base/property.c +p" \
+    "file drivers/base/swnode.c +p" \
+    "file drivers/of/property.c +p" \
+    "file drivers/acpi/property.c +p" \
+    "file drivers/base/core.c +p"
+do
+    echo "$f" > "$DBG" 2>/dev/null && echo "OK: $f" || echo "SKIP: $f"
+done
+echo "Dynamic debug enabled. Watch: dmesg -w"
 ```
 
----
-
-#### Section B: تفعيل الـ tracing لـ property reads
+**3. ftrace لـ property API:**
 
 ```bash
-# === تفعيل شامل ===
-cd /sys/kernel/debug/tracing
-
-# صفّر الـ trace
-echo 0 > tracing_on
-echo > trace
-
-# اختر الـ tracer
-echo function > current_tracer
-
-# filter على دوال الـ property API
-cat > set_ftrace_filter << 'EOF'
+#!/bin/bash
+TDIR=/sys/kernel/debug/tracing
+echo 0 > $TDIR/tracing_on
+echo function_graph > $TDIR/current_tracer
+cat > $TDIR/set_ftrace_filter << 'EOF'
 device_property_read_u32_array
 device_property_read_string
+device_property_present
 fwnode_property_present
 fwnode_property_read_u32_array
-fwnode_device_is_available
 software_node_register
 software_node_unregister
 device_add_software_node
@@ -2617,245 +2764,261 @@ device_remove_software_node
 fwnode_graph_get_next_endpoint
 fwnode_graph_parse_endpoint
 EOF
-
-echo 1 > tracing_on
-# trigger the driver probe
-echo "my_driver" > /sys/bus/platform/drivers/my_driver/bind 2>/dev/null
-sleep 2
-echo 0 > tracing_on
-
-# اقرأ النتيجة
-cat trace | head -100
+echo 1 > $TDIR/tracing_on
+echo "Tracing active. Run: cat $TDIR/trace_pipe"
+echo "Stop with: echo 0 > $TDIR/tracing_on"
 ```
 
----
-
-#### Section C: فحص graph endpoints
+**4. تحقق من software nodes المسجلة:**
 
 ```bash
-# شوف كل الـ endpoints في الـ system
-find /sys/firmware/devicetree/base -name "endpoint*" -type d 2>/dev/null
+# كل kernel objects المرتبطة بـ swnode
+ls /sys/kernel/ | grep -i node
 
-# تحقق من remote-endpoint references
-find /sys/firmware/devicetree/base -name "remote-endpoint" | while read f; do
-    echo "=== $f ==="
-    cat "$f" | od -tx4  # الـ phandle value
+# دور على software node في dmesg
+dmesg | grep -iE 'swnode|software.node|property.*registered'
+
+# لو عندك device اسمه مثلاً "touchscreen"
+DEVPATH=$(find /sys/devices -name "firmware_node" -type d 2>/dev/null | head -5)
+for p in $DEVPATH; do
+    echo "=== $p ==="
+    cat "$p/path" 2>/dev/null || ls "$p/" 2>/dev/null
 done
-
-# لو عندك V4L2 / media devices
-media-ctl --print-topology 2>/dev/null
-v4l2-ctl --list-devices 2>/dev/null
 ```
 
----
-
-#### Section D: فحص مشاكل الـ fw_devlink
+**5. تحقق من endpoint graph:**
 
 ```bash
-# شوف الـ devlink strict mode
-cat /proc/sys/kernel/fw_devlink
-
-# مؤقتاً عطّل الـ strict devlink لـ debugging
-echo "permissive" > /proc/sys/kernel/fw_devlink
-
-# تحقق من الـ suppliers
-cat /sys/kernel/debug/devices_deferred
-
-# شوف links لـ device معين
-ls /sys/bus/platform/devices/my-device/
-# consumer_links  supplier_links  ...
-
-ls /sys/bus/platform/devices/my-device/consumer_links/
-ls /sys/bus/platform/devices/my-device/supplier_links/
+# ابحث عن كل endpoints في DT
+find /sys/firmware/devicetree/base -name "endpoint*" -type d 2>/dev/null | while read ep; do
+    echo "=== $ep ==="
+    # اقرأ remote-endpoint phandle
+    re="$ep/remote-endpoint"
+    if [ -f "$re" ]; then
+        phandle=$(xxd "$re" | awk '{print $2$3}' | head -1)
+        echo "  remote-endpoint phandle: 0x$phandle"
+    fi
+    # اقرأ port وendpoint IDs
+    for prop in reg bus-type; do
+        pf="$ep/$prop"
+        [ -f "$pf" ] && printf "  %-20s: " "$prop" && xxd "$pf" | head -1
+    done
+done
 ```
 
----
+**6. تحقق من DMA support:**
 
-#### Section E: مثال output وتفسيره
+```bash
+# لأي device
+for dev in /sys/devices/platform/*; do
+    name=$(basename "$dev")
+    dma=$(cat "$dev/dma_mask_bits" 2>/dev/null)
+    [ -n "$dma" ] && echo "$name: dma_mask_bits=$dma"
+done
+```
+
+#### مثال على Output وكيف تفسره
+
+**Output من `dmesg` بعد تفعيل dynamic debug:**
 
 ```
-# مثال: dmesg بعد تفعيل dynamic_debug على swnode.c
-
-[    2.341234] swnode: software_node_register: registering node 'mpu6050'
-[    2.341235] swnode: swnode_property_read_int_array: 'i2c-addr' 1 elements
-[    2.341310] swnode: software_node_register: registering node 'bmp280'
-
-# تفسير:
-# - 'mpu6050' اتسجّل كـ software node
-# - الـ driver قرأ property 'i2c-addr' وطلب element واحد (u32)
-# - 'bmp280' اتسجّل بعديه
-
-# مثال: مشكلة probe defer
-[    3.452100] i2c i2c-1: Driver i2c-mpu6050 is waiting for supplier /soc/i2c@40005400
-
-# تفسير:
-# الـ fw_devlink شاف إن 'i2c-1' محتاجة supplier هو /soc/i2c@40005400
-# الـ supplier ده لسه مش bound → probe اتأجّل
-# الحل: تأكد إن الـ parent I2C controller driver اتحمل أولاً
-# أو تحقق إن الـ phandle في DTS صح
-
-# مثال: property مش موجودة
-[    3.891234] my_driver my-device: device_property_read_u32 'clock-frequency' failed: -EINVAL
-# تفسير: الـ fwnode نفسه NULL → مش بس الـ property مش موجودة
-# الحل: تحقق من of_node أو acpi_node على الـ device قبل الـ probe
-
-# مثال صح:
-[    3.891300] my_driver my-device: clock-frequency = 1000000 Hz
-[    3.891301] my_driver my-device: probe success
+[   12.345678] property: device_property_read_u32 dev=ff160000.i2c propname="clock-frequency" nval=1
+[   12.345701] swnode: software_node_register: node "touchscreen-params"
+[   12.345712] property: fwnode_property_present fwnode=(of) prop="big-endian" → false
+[   12.345780] property: fwnode_property_read_u32_array: prop="interrupts" ret=0 val[0]=45
 ```
+
+**تفسير الـ output:**
+
+```
+ff160000.i2c        → اسم الـ platform device (address.type)
+clock-frequency     → اسم الـ property اللي اتقرأت
+nval=1              → طلب قراءة عنصر واحد
+ret=0               → نجح
+val[0]=45           → الـ IRQ number اللي اتقرأ
+(of)                → الـ backend هو OF/Device Tree
+→ false             → الـ property "big-endian" مش موجودة = little-endian
+```
+
+**Output من ftrace:**
+
+```
+ 1)               |  device_property_read_u32_array() {
+ 1)               |    fwnode_property_read_u32_array() {
+ 1)               |      of_fwnode_property_read_int_array() {
+ 1)   0.541 us    |        of_find_property();
+ 1)   0.102 us    |        of_property_read_u32_index();
+ 1)   1.876 us    |      }
+ 1)   2.934 us    |    }
+ 1)   3.712 us    |  }
+```
+
+**تفسير:** الـ `device_property_read_u32_array` استدعت الـ OF backend مباشرة، ووجدت الـ property في `0.541 µs`. لو `of_find_property` بترجع NULL وإنت شايل الـ `-ENODATA` → الـ property مش موجودة في الـ DT node ده.
 ## Phase 6: سيناريوهات من الحياة العملية
 
 ---
 
-### السيناريو 1: Industrial Gateway على RK3562 — SPI لا بيشتغل بعد bring-up
+### السيناريو 1: Industrial Gateway على RK3562 — I2C Sensor مش بيتشاف
 
 #### العنوان
-**الـ SPI controller مش بيحصل probe على industrial gateway بـ RK3562**
+**الـ I2C temperature sensor مش بيظهر على نظام Industrial Gateway بسبب غلطة في `device_property_read_u32`**
 
 #### السياق
-فريق بيعمل bring-up لـ industrial gateway مبني على RK3562. البورد بيحتوي على SPI flash خارجي متوصل بـ SPI2. الـ DTS موجود، الـ kernel بيبوت، لكن الـ SPI device مش ظاهر في `/sys/bus/spi/devices/`.
+شركة بتعمل industrial gateway على RK3562 للـ factory automation. الـ gateway بتقرأ بيانات حرارة من sensor خارجي متوصل على I2C2. الـ DT موجود وصح، لكن الـ driver بيفشل في الـ probe ومش بيقرأ الـ `clock-frequency`.
 
 #### المشكلة
-الدرايفر بيعمل `device_property_read_u32(dev, "num-cs", &num_cs)` ورجع `-EINVAL`. الـ probe اتوقف ورجع error.
+الـ driver بيعمل:
+```c
+u32 freq;
+ret = device_property_read_u32(dev, "clock-frequency", &freq);
+if (ret) {
+    dev_err(dev, "failed to read clock-frequency: %d\n", ret);
+    return ret;
+}
+```
+الـ log بيظهر:
+```
+failed to read clock-frequency: -22
+```
+الـ `-22` ده `EINVAL` — مش `ENOENT`.
 
 #### التحليل
-**الـ `device_property_read_u32`** في `property.h` هو inline wrapper:
-
+**الـ `device_property_read_u32`** في `property.h` هي inline تستدعي:
 ```c
 static inline int device_property_read_u32(const struct device *dev,
                                            const char *propname, u32 *val)
 {
-    /* بتقرأ عنصر واحد من array size=1 */
     return device_property_read_u32_array(dev, propname, val, 1);
 }
 ```
+اللي بيروح لـ `fwnode_property_read_u32_array` عبر `dev_fwnode(dev)`.
 
-**الـ `device_property_read_u32_array`** بتروح لـ `fwnode_property_read_u32_array` عبر `dev_fwnode(dev)`:
+المشكلة إن الـ DT node فيه:
+```dts
+clock-frequency = <0x61A80>;  /* 400000 صح */
+```
+لكن الـ node اتعمله `status = "disabled"` في الـ overlay بتاع production، فـ `fwnode_device_is_available()` بترجع `false`، والـ kernel مش بيربط الـ fwnode بالـ device صح، فالـ `dev_fwnode(dev)` بيرجع `NULL` أو secondary fwnode فاضي.
 
+لما `dev_fwnode` يرجع `NULL`:
 ```c
-#define dev_fwnode(dev)                         \
-    _Generic((dev),                             \
-             const struct device *: __dev_fwnode_const,  \
+#define dev_fwnode(dev)   \
+    _Generic((dev),       \
+             const struct device *: __dev_fwnode_const, \
              struct device *: __dev_fwnode)(dev)
 ```
-
-الـ `_Generic` بيختار الـ const-correct version تلقائياً. المشكلة إن الـ `fwnode_handle` للـ device كان `NULL` — يعني الـ DTS node مش متوصل صح بالـ device.
-
-التحقيق كشف إن اسم الـ node في DTS كان `spi@fe610000` لكن الـ `compatible` كان `"rockchip,rk3562-spi"` وفي نفس الوقت الـ `status` كان `"disabled"` — فـ `fwnode_device_is_available()` رجع `false` والـ framework ما ربطش الـ fwnode بالـ device.
-
+وجوا `fwnode_call_int_op`:
 ```c
-/* property.h */
-bool fwnode_device_is_available(const struct fwnode_handle *fwnode);
+#define fwnode_call_int_op(fwnode, op, ...)    \
+    (fwnode_has_op(fwnode, op) ?               \
+     (fwnode)->ops->op(fwnode, ## __VA_ARGS__) : \
+     (IS_ERR_OR_NULL(fwnode) ? -EINVAL : -ENXIO))
 ```
+لما `fwnode` يكون `NULL`، `IS_ERR_OR_NULL` بترجع `true` → `-EINVAL`.
 
 #### الحل
-
 ```bash
-# تحقق من الـ fwnode
-cat /sys/bus/platform/devices/fe610000.spi/of_node/status
-# Output: disabled  <-- هنا المشكلة
-
-# أو عبر debugfs
-grep -r "fe610000" /sys/firmware/devicetree/base/ 2>/dev/null
+# تأكد إن الـ node enabled في الـ DT
+grep -r "clock-frequency\|status" arch/arm64/boot/dts/rockchip/rk3562-gateway.dts
 ```
 
+في الـ DT:
 ```dts
-/* الإصلاح في DTS */
-&spi2 {
-    status = "okay";   /* كانت "disabled" */
-    num-cs = <1>;
-    pinctrl-names = "default";
-    pinctrl-0 = <&spi2m0_pins>;
+&i2c2 {
+    status = "okay";
+
+    temp_sensor: tmp102@48 {
+        compatible = "ti,tmp102";
+        reg = <0x48>;
+        status = "okay";   /* كان "disabled" */
+        clock-frequency = <400000>;
+    };
 };
 ```
 
+أو لو الـ driver نفسه محتاج يتحقق:
+```c
+/* تأكد إن الـ fwnode موجود قبل القراءة */
+if (!dev_fwnode(dev)) {
+    dev_warn(dev, "no fwnode, using default freq\n");
+    freq = 100000; /* default */
+} else {
+    ret = device_property_read_u32(dev, "clock-frequency", &freq);
+    if (ret)
+        freq = 100000;
+}
+```
+
 #### الدرس المستفاد
-**الـ `fwnode_device_is_available()`** بيتحقق من property `"status"` قبل ما أي `device_property_*` يشتغل. لو الـ node `disabled`، الـ fwnode مش بيتوصل بالـ device أصلاً، وكل قراءة property بترجع `-EINVAL`. دايماً افحص `status = "okay"` أول حاجة في الـ bring-up.
+**الـ `-EINVAL` من `device_property_read_*` مش معناها إن الـ property مش موجودة** — ممكن تعني إن الـ `fwnode` نفسه `NULL` بسبب disabled node. دايمًا افحص `dev_fwnode(dev)` أولًا وتأكد إن الـ `status = "okay"`.
 
 ---
 
-### السيناريو 2: Android TV Box على Allwinner H616 — HDMI مش بيشوف الشاشة
+### السيناريو 2: Android TV Box على Allwinner H616 — HDMI مش شغال بسبب `fwnode_graph`
 
 #### العنوان
-**الـ HDMI output مش بيشتغل على Android TV box بسبب خطأ في graph endpoint**
+**الـ HDMI output مش بيظهر على Android TV Box بسبب غلطة في `fwnode_graph_get_remote_endpoint`**
 
 #### السياق
-منتج Android TV box مبني على Allwinner H616. الـ display pipeline: `DE2 → TCON → HDMI`. الـ kernel بيبوت والـ HDMI كودك موجود، لكن الشاشة فاضية.
+مصنع بيعمل Android TV Box رخيص على Allwinner H616. الـ display pipeline: DE2 → TCON → HDMI. كل حاجة متوصلة في DT عبر `ports/port/endpoint`. لكن بعد update في الـ DT، الشاشة وقفت تشتغل تمامًا.
 
 #### المشكلة
-الدرايفر بتاع HDMI بيعمل `fwnode_graph_get_remote_endpoint()` عشان يلاقي الـ TCON port، لكن الـ function بترجع `NULL`. الـ display pipeline مش متوصل.
+الـ HDMI driver بيعمل:
+```c
+struct fwnode_handle *remote;
+remote = fwnode_graph_get_remote_endpoint(dev_fwnode(dev));
+if (!remote) {
+    dev_err(dev, "no remote endpoint found\n");
+    return -ENODEV;
+}
+```
+بيطلع في الـ dmesg:
+```
+sunxi-hdmi: no remote endpoint found
+```
 
 #### التحليل
-الـ API المستخدم من `property.h`:
-
+**الـ `fwnode_graph_get_remote_endpoint`** معرفة في `property.h`:
 ```c
 struct fwnode_handle *fwnode_graph_get_remote_endpoint(
     const struct fwnode_handle *fwnode);
-
-struct fwnode_handle *fwnode_graph_get_next_endpoint(
-    const struct fwnode_handle *fwnode, struct fwnode_handle *prev);
 ```
 
-والـ macro للـ iteration:
-
-```c
-#define fwnode_graph_for_each_endpoint(fwnode, child)              \
-    for (child = fwnode_graph_get_next_endpoint(fwnode, NULL); child; \
-         child = fwnode_graph_get_next_endpoint(fwnode, child))
-```
-
-الـ `fwnode_graph_is_endpoint()` بتتحقق عبر:
-
+الـ `fwnode_graph_is_endpoint` بتشوف:
 ```c
 static inline bool fwnode_graph_is_endpoint(const struct fwnode_handle *fwnode)
 {
-    /* بتدور على property اسمها "remote-endpoint" */
     return fwnode_property_present(fwnode, "remote-endpoint");
 }
 ```
 
-المشكلة: في الـ DTS، الـ `remote-endpoint` في node الـ HDMI بيشاور على `phandle` غلط — بيشاور على الـ port node مش على الـ endpoint node جوّاه.
+المشكلة: المطور اللي عدّل الـ DT نسي يضيف `remote-endpoint` في الـ endpoint الخاص بـ HDMI:
 
 ```dts
-/* غلط */
-hdmi_in: port {
-    hdmi_in_tcon: endpoint {
-        remote-endpoint = <&tcon_out>;  /* بيشاور على port مش endpoint */
-    };
-};
-
-/* صح */
-hdmi_in: port {
-    hdmi_in_tcon: endpoint {
-        remote-endpoint = <&tcon_out_hdmi>;  /* endpoint-to-endpoint */
+/* الـ DT الغلط */
+&hdmi {
+    ports {
+        port@0 {
+            hdmi_in: endpoint {
+                /* remote-endpoint ناقص! */
+            };
+        };
     };
 };
 ```
+
+بدون `remote-endpoint`، الـ `fwnode_graph_is_endpoint` بترجع `false`، والـ graph traversal بيفشل.
+
+**الـ `fwnode_graph_get_next_endpoint`** بتتحرك على endpoints اللي عندها `remote-endpoint` property، فلما تيجي تعدي الـ HDMI endpoint مش بتلاقيه.
 
 #### الحل
-
-```bash
-# افحص الـ graph links
-find /sys/firmware/devicetree/base -name "remote-endpoint" | while read f; do
-    echo "=== $f ==="; cat "$f" | xxd | head -2
-done
-
-# استخدم fwnode_graph_parse_endpoint للـ debug
-# في kernel driver مؤقت:
-struct fwnode_endpoint ep;
-fwnode_graph_parse_endpoint(endpoint_fwnode, &ep);
-pr_info("port=%u id=%u\n", ep.port, ep.id);
-```
-
 ```dts
-/* الإصلاح الكامل */
-&tcon0 {
+/* الـ DT الصح */
+&tcon_top {
     ports {
-        tcon_out: port@1 {
-            reg = <1>;
+        port@1 {
             tcon_out_hdmi: endpoint@1 {
                 reg = <1>;
-                remote-endpoint = <&hdmi_in_tcon>;
+                remote-endpoint = <&hdmi_in>;
             };
         };
     };
@@ -2863,49 +3026,164 @@ pr_info("port=%u id=%u\n", ep.port, ep.id);
 
 &hdmi {
     ports {
-        hdmi_in: port@0 {
-            reg = <0>;
-            hdmi_in_tcon: endpoint@0 {
-                reg = <0>;
-                remote-endpoint = <&tcon_out_hdmi>;
+        port@0 {
+            hdmi_in: endpoint {
+                remote-endpoint = <&tcon_out_hdmi>;  /* ده اللي كان ناقص */
             };
         };
     };
 };
 ```
 
+تحقق بعد الإصلاح:
+```bash
+# تأكد إن الـ graph links صح
+cat /sys/kernel/debug/of_graph
+# أو
+dtc -I fs /sys/firmware/devicetree/base | grep -A5 "hdmi"
+```
+
 #### الدرس المستفاد
-**الـ `fwnode_graph_*` API** بيشتغل على مستوى endpoint-to-endpoint مش port-to-port. الـ `remote-endpoint` لازم يشاور على الـ `endpoint` node نفسه. استخدم `fwnode_graph_parse_endpoint()` لتأكيد إن الـ port/id صح.
+**الـ `fwnode_graph_*` functions** كلها تعتمد على وجود `remote-endpoint` property عشان تعرف إن الـ node ده endpoint. غياب الـ property = الـ graph مش بيشوف الـ node خالص، مش بس مش بيتربط.
 
 ---
 
-### السيناريو 3: IoT Sensor على STM32MP1 — قراءة I2C sensor بترجع قيم غلط
+### السيناريو 3: IoT Sensor Node على STM32MP1 — Software Node بعد Board Bring-up
 
 #### العنوان
-**درايفر I2C sensor على STM32MP1 بيقرأ endianness غلط**
+**إضافة SPI sensor بدون DT عن طريق `software_node` على STM32MP157 custom board**
 
 #### السياق
-board بتشغّل IoT environmental sensor (temperature + pressure) متوصل بـ I2C على STM32MP1. الـ sensor بيرجع big-endian data. الدرايفر بيقرأ القيم لكن الأرقام معكوسة تماماً.
+فريق bring-up بيشتغل على custom board معتمدة على STM32MP157. الـ PCB فيها SPI accelerometer (ADXL345) متوصل على SPI3، لكن الـ DT الأصلي مش فيه أي mention لهذا الـ sensor عشان الـ board كانت prototype. محدش عايز يعدل الـ DT في هذه المرحلة، فالفريق قرر يستخدم `software_node`.
 
 #### المشكلة
-الدرايفر بيستخدم `readl/writel` العادية (little-endian) بدل `ioread32be`. المطور ما كانش عارف إن الـ device DTS عنده `big-endian` property.
+المطور عمل software_node غلط وجه `-ENOENT` لما حاول يقرأ الـ properties.
 
 #### التحليل
-**الـ `device_is_big_endian()`** في `property.h`:
+الكود الغلط:
+```c
+static const struct property_entry adxl345_props[] = {
+    PROPERTY_ENTRY_U32("spi-max-frequency", 5000000),
+    PROPERTY_ENTRY_BOOL("spi-cpol"),
+    /* نسي الإنهاء بـ {} */
+};
 
+static const struct software_node adxl345_node = {
+    .name = "adxl345",
+    .properties = adxl345_props,
+};
+```
+
+**الـ `struct property_entry`** معرّفة في `property.h`:
+```c
+struct property_entry {
+    const char *name;
+    size_t length;
+    bool is_inline;
+    enum dev_prop_type type;
+    union {
+        const void *pointer;
+        union {
+            u8 u8_data[sizeof(u64) / sizeof(u8)];
+            /* ... */
+        } value;
+    };
+};
+```
+
+الـ array بيتمشى عليها بالـ loop وبيوقف لما `name == NULL`. بدون الـ terminator `{}` في الآخر، الـ loop بتاخد garbage memory كـ name → `ENOENT` أو kernel crash.
+
+أيضًا، `PROPERTY_ENTRY_BOOL` بتعمل:
+```c
+#define PROPERTY_ENTRY_BOOL(_name_)  \
+(struct property_entry) {            \
+    .name = _name_,                  \
+    .is_inline = true,               \
+}
+```
+`length = 0`، `type` = 0 = `DEV_PROP_U8` — ده مقصود، الـ bool بتتعرف بـ `is_inline=true` و`length=0`.
+
+#### الحل
+```c
+static const struct property_entry adxl345_props[] = {
+    PROPERTY_ENTRY_U32("spi-max-frequency", 5000000),
+    PROPERTY_ENTRY_BOOL("spi-cpol"),
+    { }  /* terminator — ضروري */
+};
+
+static const struct software_node adxl345_node = {
+    .name = "adxl345",
+    .properties = adxl345_props,
+};
+
+/* في الـ module init */
+static int __init adxl345_swnode_init(void)
+{
+    int ret;
+
+    ret = software_node_register(&adxl345_node);
+    if (ret) {
+        pr_err("failed to register adxl345 swnode: %d\n", ret);
+        return ret;
+    }
+
+    ret = device_add_software_node(&spi_dev->dev, &adxl345_node);
+    if (ret)
+        software_node_unregister(&adxl345_node);
+
+    return ret;
+}
+```
+
+تحقق:
+```bash
+ls /sys/bus/platform/devices/ | grep adxl
+cat /sys/bus/spi/devices/spi0.0/properties/spi-max-frequency
+```
+
+#### الدرس المستفاد
+**الـ `property_entry` array** لازم تنتهي بـ `{ }` زي بالظبط `struct file_operations`. والـ `PROPERTY_ENTRY_BOOL` مش بتحتاج value — وجود الـ name كفاية كما في DT. الـ `software_node` مثالية لـ prototype boards أو لما الـ hardware description تيجي من firmware خارجي.
+
+---
+
+### السيناريو 4: Automotive ECU على i.MX8QM — `device_is_big_endian` بيعمل data corruption
+
+#### العنوان
+**بيانات CAN bus غلط على i.MX8QM automotive ECU بسبب سوء فهم `device_is_big_endian`**
+
+#### السياق
+شركة automotive بتطور ECU على NXP i.MX8QM. الـ ECU بتتكلم مع CAN transceiver خارجي عبر SPI. الـ SPI driver بيقرأ registers من الـ transceiver. الداتا اللي بتيجي بتكون corrupted بشكل ثابت — قيم معكوسة byte-order.
+
+#### المشكلة
+المطور شاف إن الـ datasheet بيقول إن الـ transceiver بيستخدم Big-Endian registers، فأضاف `big-endian` للـ DT node وعمل:
+
+```c
+u32 reg_val;
+spi_read(spi, &reg_val, sizeof(reg_val));
+
+if (device_is_big_endian(&spi->dev))
+    reg_val = be32_to_cpu(reg_val);
+else
+    reg_val = le32_to_cpu(reg_val);
+```
+
+الداتا لسه غلط.
+
+#### التحليل
+**الـ `device_is_big_endian`** معرّفة في `property.h`:
 ```c
 static inline bool device_is_big_endian(const struct device *dev)
 {
-    /* بتفوّض لـ fwnode version */
     return fwnode_device_is_big_endian(dev_fwnode(dev));
 }
+```
 
+اللي بترجع لـ:
+```c
 static inline bool fwnode_device_is_big_endian(const struct fwnode_handle *fwnode)
 {
-    /* الحالة 1: property صريحة "big-endian" */
     if (fwnode_property_present(fwnode, "big-endian"))
         return true;
-    /* الحالة 2: kernel compiled as BE + device له "native-endian" */
     if (IS_ENABLED(CONFIG_CPU_BIG_ENDIAN) &&
         fwnode_property_present(fwnode, "native-endian"))
         return true;
@@ -2913,565 +3191,461 @@ static inline bool fwnode_device_is_big_endian(const struct fwnode_handle *fwnod
 }
 ```
 
-الـ DTS كان صح:
+المشكلة إن `device_is_big_endian` بتقول لك إن **registers الـ device** Big-Endian — ده معيار الـ Linux device tree لـ memory-mapped registers. لكن الـ SPI transaction نفسها، الـ CPU (i.MX8QM = Little-Endian ARM64) بيبعتها كـ LE. الـ `be32_to_cpu` على LE CPU بتعمل byte-swap، لكن المطور عمل swap مرتين!
+
+الـ transceiver بيستقبل data بـ SPI bit order واضح في الـ datasheet (MSB first). الـ SPI controller بيتحكم في ده بـ `spi-lsb-first` property، مش `big-endian`.
+
+الكود الصح:
+```c
+/* الـ SPI data جاية صح — المشكلة في كيفية التفسير فقط */
+u32 reg_val;
+spi_read(spi, &reg_val, sizeof(reg_val));
+/* SPI بيجيب BE data في buffer، نحوّلها للـ CPU endianness */
+reg_val = be32_to_cpu(*((__be32 *)&reg_val));
+```
+
+#### الحل
+احذف `big-endian` من DT node الـ SPI device لأنها مش معناها إيه تتوقع في SPI transactions:
+
 ```dts
-&i2c2 {
-    sensor@76 {
-        compatible = "bosch,bmp280";
-        reg = <0x76>;
-        big-endian;   /* property موجودة */
+&ecspi2 {
+    status = "okay";
+
+    can_transceiver: mcp2518fd@0 {
+        compatible = "microchip,mcp2518fd";
+        reg = <0>;
+        spi-max-frequency = <20000000>;
+        /* احذف big-endian — مش مناسبة هنا */
+        /* الـ driver هو المسؤول عن be32_to_cpu للـ register values */
     };
 };
 ```
 
-لكن الدرايفر ما كانش بيسأل:
-
+وفي الـ driver:
 ```c
-/* الكود الغلط */
-static int bmp280_read_raw(struct iio_dev *indio_dev, ...)
+/* قرا Register كـ Big-Endian صح */
+static int mcp251xfd_reg_read(struct spi_device *spi, u16 addr, u32 *val)
 {
-    /* ما بيتحققش من endianness */
-    *val = readl(dev->regs + BMP280_REG_DATA);
-}
-```
-
-#### الحل
-
-```c
-/* الكود الصح */
-static int bmp280_probe(struct i2c_client *client)
-{
-    struct bmp280_data *data = ...;
-
-    /* بنسأل property.h API */
-    data->big_endian = device_is_big_endian(&client->dev);
-
-    dev_info(&client->dev, "endian mode: %s\n",
-             data->big_endian ? "big" : "little");
-}
-
-static int bmp280_read_raw(struct iio_dev *indio_dev, ...)
-{
-    u32 raw;
-    if (data->big_endian)
-        raw = ioread32be(data->regs + BMP280_REG_DATA);
-    else
-        raw = ioread32(data->regs + BMP280_REG_DATA);
-    *val = raw;
-}
-```
-
-```bash
-# تحقق من الـ property
-cat /sys/firmware/devicetree/base/soc/i2c@5c002000/sensor@76/big-endian
-# لو الملف موجود (حتى لو فاضي) = property موجودة = big-endian
-```
-
-#### الدرس المستفاد
-**`device_is_big_endian()`** بيشيل عنك كل التعقيد: big-endian explicit أو native-endian على BE kernel. دايماً استخدمها في بداية الـ probe واحفظ النتيجة في driver state.
-
----
-
-### السيناريو 4: Automotive ECU على i.MX8 — software_node لـ UART بدون DTS
-
-#### العنوان
-**إضافة UART configuration لـ automotive ECU بـ i.MX8 بدون تعديل DTS**
-
-#### السياق
-automotive ECU مبني على i.MX8QM. الـ UART3 متوصل بـ LIN transceiver. الـ board manufacturer ما وفّرش DTS source، بس الـ binary DTB موجود. الفريق محتاج يضيف properties إضافية للـ UART3 driver بدون إعادة compile الـ DTB.
-
-#### المشكلة
-الـ LIN transceiver driver محتاج property اسمها `"lin-mode"` بـ value `<1>` و`"transceiver-speed"` بـ value `<19200>`. مش موجودين في الـ DTB.
-
-#### التحليل
-**الـ Software Node API** في `property.h` بيحل المشكلة دي بالظبط:
-
-```c
-/* struct software_node */
-struct software_node {
-    const char *name;
-    const struct software_node *parent;
-    const struct property_entry *properties;  /* array of properties */
-};
-
-/* device_add_software_node */
-int device_add_software_node(struct device *dev,
-                             const struct software_node *node);
-
-/* device_create_managed_software_node */
-int device_create_managed_software_node(struct device *dev,
-                                        const struct property_entry *properties,
-                                        const struct software_node *parent);
-```
-
-الـ `property_entry` macros بتبني الـ properties بشكل static:
-
-```c
-/* PROPERTY_ENTRY_U32 بيبني inline property */
-#define PROPERTY_ENTRY_U32(_name_, _val_)   \
-    __PROPERTY_ENTRY_ELEMENT(_name_, u32_data, U32, _val_)
-
-/* __PROPERTY_ENTRY_ELEMENT بيضع القيمة inline في value union */
-#define __PROPERTY_ENTRY_ELEMENT(_name_, _elem_, _Type_, _val_)  \
-(struct property_entry) {                                         \
-    .name = _name_,                                               \
-    .length = sizeof_field(struct property_entry, value._elem_[0]), \
-    .is_inline = true,                                            \
-    .type = DEV_PROP_##_Type_,                                    \
-    { .value = { ._elem_[0] = _val_ } },                         \
-}
-```
-
-#### الحل
-
-```c
-/* في driver أو platform init code */
-#include <linux/property.h>
-
-static const struct property_entry lin_uart_props[] = {
-    PROPERTY_ENTRY_U32("lin-mode", 1),
-    PROPERTY_ENTRY_U32("transceiver-speed", 19200),
-    PROPERTY_ENTRY_STRING("transceiver-type", "tja1021"),
-    PROPERTY_ENTRY_BOOL("lin-checksum-enhanced"),
-    { }  /* sentinel */
-};
-
-static int imx8_lin_attach(struct platform_device *pdev)
-{
-    struct device *uart_dev;
-    int ret;
-
-    /* نلاقي الـ UART device */
-    uart_dev = bus_find_device_by_name(&platform_bus_type,
-                                       NULL, "30890000.serial");
-    if (!uart_dev)
-        return -ENODEV;
-
-    /* بنضيف software node فوق الـ DT node الموجود */
-    ret = device_create_managed_software_node(uart_dev,
-                                              lin_uart_props, NULL);
-    if (ret) {
-        dev_err(uart_dev, "failed to add sw node: %d\n", ret);
-        put_device(uart_dev);
-        return ret;
-    }
-
-    /* دلوقتي الـ LIN driver يقدر يقرأ */
-    u32 speed;
-    if (!device_property_read_u32(uart_dev, "transceiver-speed", &speed))
-        dev_info(uart_dev, "LIN speed: %u bps\n", speed);
-
-    put_device(uart_dev);
+    __be32 be_val;
+    /* ... SPI transfer ... */
+    *val = be32_to_cpup(&be_val);  /* conversion واحدة بس */
     return 0;
 }
 ```
 
-```bash
-# التحقق من الـ software node
-ls /sys/bus/platform/devices/30890000.serial/software_node/
-# properties  name  ...
-
-cat /sys/bus/platform/devices/30890000.serial/software_node/properties/lin-mode
-```
-
 #### الدرس المستفاد
-**الـ software node API** (`device_add_software_node`, `device_create_managed_software_node`) بيخليك تضيف أو تعدّل device properties في runtime بدون مس الـ DTB. مثالي لـ closed-source BSP أو automotive platforms اللي الـ DTS مش متاح. الـ **managed** version بتعمل cleanup أوتوماتيك مع device lifecycle.
+**`device_is_big_endian`** مخصوص لـ **MMIO registers** — بتقول `ioread32be` vs `readl`. بالنسبة لـ SPI/I2C protocols، الـ byte order بيتحكم فيها الـ protocol نفسه والـ driver. استخدام `big-endian` في DT node لـ SPI device غلط semantically وبيسبب confusion.
 
 ---
 
-### السيناريو 5: Custom Board Bring-up على AM62x — memory leak في driver بسبب fwnode reference
+### السيناريو 5: AM62x Custom Board — `fwnode_property_get_reference_args` لـ Multi-PHY Setup
 
 #### العنوان
-**Memory leak في custom sensor hub driver على AM62x بسبب نسيان `fwnode_handle_put()`**
+**RGMII Ethernet مش بيشتغل على AM62x industrial board بسبب غلطة في `phy-handle` reference**
 
 #### السياق
-فريق بيكتب driver لـ custom sensor hub board مبني على AM62x (Texas Instruments). الـ hub بيضم 4 sensors متوصلين بـ I2C، كل sensor عنده child node في DTS. الـ driver بيدور على الـ child nodes ويـ configure كل sensor.
+فريق bring-up بيشتغل على custom industrial board معتمدة على TI AM62x. الـ board فيها اتنين Ethernet ports، كل واحدة متوصلة بـ PHY مختلفة عبر RGMII. الـ driver بيستخدم `fwnode_property_get_reference_args` عشان يجيب الـ PHY handle من DT.
 
 #### المشكلة
-بعد شهور من production، الـ system بدأ يحتاج restart دوري. الـ kmemleak بيرجع objects من نوع `fwnode_handle` مش بتتحرر. الـ driver بيعمل `device_for_each_child_node` ويعمل `break` جوّا الـ loop من غير ما يعمل `fwnode_handle_put`.
+الـ first port بيشتغل تمام. الـ second port بيفشل في probe مع:
+```
+am65-cpsw-nuss: Failed to get phy node: -2
+```
+الـ `-2` ده `ENOENT`.
 
 #### التحليل
-الـ API في `property.h` واضح في موضوع ownership:
-
+**الـ `fwnode_property_get_reference_args`** معرّفة في `property.h`:
 ```c
-/* fwnode_handle_put - Drop reference */
-static inline void fwnode_handle_put(struct fwnode_handle *fwnode)
-{
-    fwnode_call_void_op(fwnode, put);
-}
-
-/* DEFINE_FREE بيسمح بـ __free(fwnode_handle) scoped cleanup */
-DEFINE_FREE(fwnode_handle, struct fwnode_handle *, fwnode_handle_put(_T))
+int fwnode_property_get_reference_args(const struct fwnode_handle *fwnode,
+                                       const char *prop,
+                                       const char *nargs_prop,
+                                       unsigned int nargs,
+                                       unsigned int index,
+                                       struct fwnode_reference_args *args);
 ```
 
-الكود المسرّب كان هكذا:
+الـ driver بيعمل:
+```c
+struct fwnode_reference_args phy_args;
+ret = fwnode_property_get_reference_args(dev_fwnode(dev),
+                                         "phy-handle",
+                                         NULL,  /* nargs_prop */
+                                         0,     /* nargs */
+                                         0,     /* index */
+                                         &phy_args);
+```
+
+المشكلة في الـ DT:
+
+```dts
+/* الـ DT الغلط */
+&cpsw3g {
+    pinctrl-names = "default";
+    pinctrl-0 = <&main_rgmii1_pins_default>;
+
+    cpsw3g_mdio: mdio@f00 {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        cpsw3g_phy0: ethernet-phy@0 {
+            reg = <0>;
+        };
+        cpsw3g_phy1: ethernet-phy@1 {
+            reg = <1>;
+        };
+    };
+
+    /* port@1 صح */
+    cpsw_port1: port@1 {
+        phy-handle = <&cpsw3g_phy0>;
+        phy-mode = "rgmii-rxid";
+    };
+
+    /* port@2 فيه غلطة */
+    cpsw_port2: port@2 {
+        phy-handle = <&cpsw3g_phy1>;
+        phy-mode = "rgmii-rxid";
+        status = "disabled";  /* ده هو المشكلة */
+    };
+};
+```
+
+الـ `fwnode_device_is_available` بتشوف الـ `status` property:
+```c
+bool fwnode_device_is_available(const struct fwnode_handle *fwnode);
+```
+
+لما الـ `status = "disabled"`، بعض الـ of_graph traversal functions مش بتمشي على disabled nodes. لكن المشكلة هنا أعمق: الـ driver بيعمل `device_for_each_child_node` عشان يلاقي الـ ports:
 
 ```c
-/* كود غلط - leak عند break */
-static int hub_configure_sensors(struct device *dev)
-{
-    struct fwnode_handle *child;
-    int ret = 0;
+device_for_each_child_node(dev, port_fwnode) {
+    /* بيعدي الـ disabled nodes أوتوماتيك */
+}
+```
 
-    device_for_each_child_node(dev, child) {
-        u32 sensor_id;
-        if (device_property_read_u32(dev, "sensor-id",
-                                     &sensor_id))
-            continue;
+الـ `device_for_each_child_node` بيستخدم `device_get_next_child_node` اللي بيستدعي `fwnode_get_next_child_node` — بعض الـ implementations بتعدي الـ disabled children بسبب OF core behavior.
 
-        if (sensor_id == SPECIAL_SENSOR) {
-            /* break بدون put = leak! */
-            ret = configure_special(dev, child);
-            break;
-        }
+#### الحل
+
+```dts
+/* الـ DT الصح */
+cpsw_port2: port@2 {
+    reg = <2>;
+    label = "port2";
+    phy-handle = <&cpsw3g_phy1>;
+    phy-mode = "rgmii-rxid";
+    status = "okay";  /* غيّرنا من disabled لـ okay */
+    ti,mac-only;
+};
+```
+
+لو الـ driver محتاج يتعامل مع disabled ports بشكل explicit:
+```c
+/* استخدم fwnode_for_each_child_node مش device_for_each_child_node */
+fwnode_for_each_child_node(dev_fwnode(dev), port_fwnode) {
+    /* بيمشي على كل children حتى الـ disabled */
+    if (!fwnode_device_is_available(port_fwnode)) {
+        dev_dbg(dev, "port %s is disabled, skipping\n",
+                fwnode_get_name(port_fwnode));
+        continue;
     }
-    return ret;
+    /* process port */
 }
 ```
 
-#### الحل: الطريقة الأولى — manual put
-
+أو لو عايز تعدد كل الـ child nodes بما فيها الـ disabled:
 ```c
-/* الإصلاح اليدوي */
-static int hub_configure_sensors(struct device *dev)
-{
-    struct fwnode_handle *child;
-    int ret = 0;
+unsigned int total = fwnode_get_child_node_count(dev_fwnode(dev));
+unsigned int available = 0;
 
-    device_for_each_child_node(dev, child) {
-        u32 sensor_id;
-        if (fwnode_property_read_u32(child, "sensor-id",
-                                     &sensor_id))
-            continue;
-
-        if (sensor_id == SPECIAL_SENSOR) {
-            ret = configure_special(dev, child);
-            /* لازم نعمل put قبل break */
-            fwnode_handle_put(child);
-            break;
-        }
-    }
-    return ret;
+fwnode_for_each_available_child_node(dev_fwnode(dev), child) {
+    available++;
+    fwnode_handle_put(child);
 }
+
+dev_info(dev, "total ports: %u, available: %u\n", total, available);
 ```
 
-#### الحل: الطريقة الثانية — scoped macro (الأفضل)
-
-```c
-/* الإصلاح بـ scoped version - cleanup أوتوماتيكي */
-static int hub_configure_sensors(struct device *dev)
-{
-    int ret = 0;
-
-    /* __free(fwnode_handle) بيعمل put تلقائياً عند خروج الـ scope */
-    device_for_each_child_node_scoped(dev, child) {
-        u32 sensor_id;
-        if (fwnode_property_read_u32(child, "sensor-id",
-                                     &sensor_id))
-            continue;
-
-        if (sensor_id == SPECIAL_SENSOR) {
-            ret = configure_special(dev, child);
-            break;  /* الـ __free(fwnode_handle) بيتكلم بدالنا */
-        }
-    }
-    return ret;
-}
-```
-
+تأكد من الـ DTS باستخدام:
 ```bash
-# اكتشاف الـ leak
-echo scan > /sys/kernel/debug/kmemleak
-cat /sys/kernel/debug/kmemleak | grep -A5 "fwnode"
+# على الـ target
+cat /sys/firmware/devicetree/base/bus@f0000/ethernet@8000000/port@2/status
+# لازم يطلع "okay"
 
-# أو بـ kasan
-CONFIG_KASAN=y
-# في dmesg بتلاقي stack trace للـ allocation بدون free
+# أو
+dtc -I fs /sys/firmware/devicetree/base 2>/dev/null | grep -A 20 "port@2"
 ```
 
 #### الدرس المستفاد
-كل `fwnode_handle` بترجعه `device_for_each_child_node` أو `fwnode_get_next_child_node` عنده refcount. لو بتعمل `break` أو `return` من جوّا الـ loop، **لازم** تعمل `fwnode_handle_put()` قبلها. الحل الأسهل والأأمن هو استخدام **`_scoped`** versions من الـ macros (`device_for_each_child_node_scoped`, `fwnode_for_each_available_child_node_scoped`) اللي بتستخدم `DEFINE_FREE` وبتعمل cleanup أوتوماتيكي.
+**`device_for_each_child_node`** و **`fwnode_for_each_available_child_node`** بيتعديان الـ `disabled` nodes أوتوماتيكيًا. لو عايز تعدد الـ disabled nodes كمان، استخدم **`fwnode_for_each_child_node`** واتحقق من الـ availability يدويًا بـ `fwnode_device_is_available`. فهم الفرق بين الـ macros الثلاثة حيوي لـ multi-port drivers.
 ## Phase 7: مصادر ومراجع
 
 ### مقالات LWN.net
 
-دي أهم المقالات اللي بتغطي الـ unified device property framework بشكل مباشر:
+دي أهم المقالات اللي بتغطي تطور الـ unified device property interface والـ fwnode API في الـ Linux kernel:
 
-| المقال | الأهمية |
-|--------|---------|
-| [Add ACPI _DSD and unified device properties support](https://lwn.net/Articles/612062/) | الـ patch series الأصلية اللي قدمت الـ `property.h` API — Rafael Wysocki + Mika Westerberg |
-| [device property: Introducing software nodes](https://lwn.net/Articles/770825/) | إزاي اتغيرت الـ `struct property_set` لـ `software_node` المستقلة |
-| [Software fwnode references](https://lwn.net/Articles/789099/) | إضافة دعم الـ `software_node_ref_args` وعمل `fwnode_property_get_reference_args()` مع الـ software nodes |
-| [ACPI graph support](https://lwn.net/Articles/718184/) | إزاي اتضافت الـ port/endpoint graph بالـ `_DSD` في ACPI — نفس الـ `fwnode_graph_*` API |
-| [Unified fwnode endpoint parser](https://lwn.net/Articles/734838/) | توحيد الـ endpoint parser بين DT وACPI باستخدام `fwnode_graph_parse_endpoint()` |
-| [Dynamic DT device nodes](https://lwn.net/Articles/872164/) | الـ software nodes كبديل للـ DT الديناميكي |
-| [introduce fwnode in the I2C subsystem](https://lwn.net/Articles/889236/) | مثال عملي على استخدام الـ `fwnode_handle` في subsystem حقيقي |
-
----
-
-### توثيق الـ Kernel الرسمي
-
-الملفات دي موجودة في شجرة الـ kernel تحت `Documentation/`:
-
-```
-Documentation/firmware-guide/acpi/
-├── dsd/
-│   ├── graph.rst          # الـ fwnode graph API مع ACPI _DSD
-│   └── leds.rst           # مثال على properties مع LEDs
-├── enumeration.rst        # ACPI-based device enumeration
-└── index.rst
-
-Documentation/devicetree/
-├── usage-model.rst        # إزاي الـ DT properties بتتقرأ
-└── kernel-api.rst         # OF API مقارنةً بـ fwnode API
-```
-
-**الروابط المباشرة:**
-- [Linux and the Devicetree — Usage Model](https://www.kernel.org/doc/html/latest/devicetree/usage-model.html)
-- [DeviceTree Kernel API](https://docs.kernel.org/devicetree/kernel-api.html)
-- [Graphs — ACPI DSD](https://www.kernel.org/doc/html/v5.2/firmware-guide/acpi/dsd/graph.html)
-- [ACPI Based Device Enumeration](https://docs.kernel.org/firmware-guide/acpi/enumeration.html)
-- [_DSD Device Properties Related to GPIO](https://static.lwn.net/kerneldoc/firmware-guide/acpi/gpio-properties.html)
+| المقال | الوصف |
+|--------|-------|
+| [Add ACPI _DSD and unified device properties support](https://lwn.net/Articles/614319/) | أول إعلان للـ patchset اللي أدخل الـ unified property API في kernel 3.19، بقلم Rafael Wysocki و Mika Westerberg |
+| [Add ACPI _DSD and unified device properties support (earlier)](https://lwn.net/Articles/612062/) | النسخة الأقدم من نفس الـ patchset — بيوضح المناقشات الأولية حول التصميم |
+| [device property: Introducing software nodes](https://lwn.net/Articles/770825/) | إدخال الـ `software_node` كـ fwnode type مستقل بديلاً لـ `property_set` |
+| [Software fwnode references](https://lwn.net/Articles/789099/) | إضافة دعم الـ reference properties في الـ software nodes عبر `fwnode_property_get_reference_args()` |
+| [ACPI graph support](https://lwn.net/Articles/718184/) | الـ patches اللي أضافت `fwnode_graph_*` API لدعم الـ port/endpoint topology في ACPI و DT |
+| [Unified fwnode endpoint parser](https://lwn.net/Articles/737780/) | دمج الـ endpoint parser بين ACPI و OF لإنتاج API موحد لـ V4L2 والـ media subsystem |
+| [introduce fwnode in the I2C subsystem](https://lwn.net/Articles/889236/) | تبني الـ I2C subsystem للـ fwnode API بدل الاعتماد المباشر على OF أو ACPI |
+| [A fresh look at the kernel's device model](https://lwn.net/Articles/645810/) | نظرة شاملة على الـ device model بما فيها الـ property framework |
 
 ---
 
-### الملفات المصدرية الأساسية في الـ Kernel
+### التوثيق الرسمي في الـ kernel
 
-الـ API اللي في `property.h` بتتنفذ في:
+#### ملفات `Documentation/` ذات الصلة المباشرة
 
 ```
-include/linux/property.h        ← الـ header الرئيسي (الملف ده)
-include/linux/fwnode.h          ← تعريف struct fwnode_handle و ops
-drivers/base/property.c         ← تنفيذ device_property_*
-drivers/base/swnode.c           ← تنفيذ software_node_*
-drivers/base/core.c             ← ربط الـ fwnode بالـ struct device
+Documentation/driver-api/driver-model/driver.rst
+Documentation/firmware-guide/acpi/DSD-properties-rules.rst
+Documentation/firmware-guide/acpi/enumeration.rst
+Documentation/firmware-guide/acpi/dsd/graph.rst
+Documentation/firmware-guide/acpi/dsd/phy.rst
+Documentation/devicetree/bindings/
+```
+
+**الـ** `DSD-properties-rules.rst` هو المرجع الأساسي لفهم قواعد استخدام الـ `_DSD` properties مع ACPI — الـ source الأصلي للـ `DEV_PROP_*` types.
+
+روابط الـ docs الرسمية:
+
+- [_DSD Device Properties Usage Rules](https://docs.kernel.org/firmware-guide/acpi/DSD-properties-rules.html) — قواعد استخدام الـ `_DSD` object في ACPI 5.1
+- [ACPI Based Device Enumeration](https://www.kernel.org/doc/html/latest/firmware-guide/acpi/enumeration.html) — كيف يشتغل الـ `PRP0001` مع `compatible` property
+- [Graphs — ACPI DSD](https://docs.kernel.org/firmware-guide/acpi/dsd/graph.html) — توثيق الـ `fwnode_graph_*` API من ناحية ACPI
+- [Device drivers infrastructure](https://static.lwn.net/kerneldoc/driver-api/infrastructure.html) — الـ driver-api الكاملة بما فيها `driver_find_device_by_fwnode()`
+- [V4L2 fwnode kAPI](https://www.kernel.org/doc/html/latest/driver-api/media/v4l2-fwnode.html) — مثال حي على استخدام الـ fwnode API في subsystem حقيقي
+
+#### الملفات الأساسية في الـ source tree
+
+```
+include/linux/property.h       ← الـ header الرئيسي (هذا الملف)
+include/linux/fwnode.h         ← تعريف struct fwnode_handle و fwnode_operations
+drivers/base/property.c        ← implementation الـ device_property_* functions
+drivers/base/swnode.c          ← implementation الـ software_node
+drivers/base/core.c            ← ربط الـ fwnode بالـ struct device
 ```
 
 ---
 
-### Commits المهمة
+### commits مهمة في تاريخ الـ API
 
-الـ commits دي شكّلت الـ API كما هو دلوقتي:
-
-| الوصف | المرجع |
+| الحدث | المرجع |
 |-------|--------|
-| الإضافة الأولى للـ unified property API (kernel 3.19) | [patch series على narkive](https://linux.kernel.narkive.com/pNOj9vdt/patch-driver-core-implement-device-property-accessors-through-fwnode-ones) |
-| إضافة `fwnode_device_is_available()` | [Patchwork](https://patchwork.kernel.org/project/linux-acpi/patch/1496741861-8240-5-git-send-email-sakari.ailus@linux.intel.com/) |
-| تحويل `dev_fwnode()` لـ public | [stable-commits](https://www.spinics.net/lists/stable-commits/msg70095.html) |
-| fallback لـ secondary fwnode | [narkive patch](https://linux.kernel.narkive.com/XO6y722J/patch-v1-08-13-device-property-fallback-to-secondary-fwnode-if-primary-misses-the-property) |
-
-**الـ kernel.org git log الأساسي:**
-```bash
-# مشاهدة تاريخ الملف
-git log --follow include/linux/property.h
-
-# أول commit للملف
-git log --follow --diff-filter=A -- include/linux/property.h
-```
+| إدخال الـ unified device property interface (kernel 3.19) | [PATCH v6 02/12 — Rafael Wysocki على lore.kernel.org](https://lore.kernel.org/lkml/2127128.VT1Iq03xz1@vostro.rjw.lan/) |
+| شرح المحاضرة الأصلية لتصميم الـ API | [Unified Device Properties Interface — Linux Foundation slides (PDF)](https://events.static.linuxfound.org/sites/events/files/slides/unified_properties_API_0.pdf) |
+| دعم GPIO مع الـ unified property interface في Linux 3.19 | [gpio: Support for unified device properties interface](https://www.systutorials.com/linux-kernels/541953/gpio-support-for-unified-device-properties-interface-linux-3-19/) |
 
 ---
 
-### نقاشات Mailing List
+### مناقشات الـ mailing list
 
-- [LKML: fwnode_device_is_available() — Sakari Ailus](https://patchwork.kernel.org/project/linux-acpi/patch/1496741861-8240-5-git-send-email-sakari.ailus@linux.intel.com/)
-- [LKML: device property fallback to secondary fwnode](https://linux.kernel.narkive.com/XO6y722J/patch-v1-08-13-device-property-fallback-to-secondary-fwnode-if-primary-misses-the-property)
-- [Unified Device Properties Interface slides — LinuxCon](https://events.static.linuxfound.org/sites/events/files/slides/unified_properties_API_0.pdf) — عرض Rafael Wysocki الأصلي للـ API
+| الموضوع | الرابط |
+|---------|--------|
+| Fallback to secondary fwnode if primary misses property | [linux.kernel.narkive.com](https://linux.kernel.narkive.com/XO6y722J/patch-v1-08-13-device-property-fallback-to-secondary-fwnode-if-primary-misses-the-property) |
+| إضافة `fwnode_get_name()` للـ fwnode framework | [mail-archive.com — PATCH v3 04/10](https://www.mail-archive.com/linux-kernel@vger.kernel.org/msg2091140.html) |
+| Device property improvements + `%pfw` format specifier | [mail-archive.com — PATCH v9 00/12](https://www.mail-archive.com/linux-kernel@vger.kernel.org/msg2123755.html) |
+| إضافة `fwnode_graph_*` لـ software_node | [mail-archive.com — software_node graph support](https://www.mail-archive.com/linux-kernel@vger.kernel.org/msg2312505.html) |
+| كيفية inject fwnode/oftree/acpi data من platform driver | [mail-archive.com — How to inject fwnode](https://www.mail-archive.com/linux-kernel@vger.kernel.org/msg2023615.html) |
+| استخدام fwnode API للـ node names في vsprintf | [mail-archive.com — PATCH v4 08/11](https://www.mail-archive.com/linux-kernel@vger.kernel.org/msg2093902.html) |
+
+الأرشيف الكامل للـ LKML: [lkml.org](https://lkml.org/) — ابحث بـ "device property fwnode" أو "software_node" أو "property_entry".
 
 ---
 
-### كتب مُوصى بيها
+### كتب مقترحة
 
 #### Linux Device Drivers, 3rd Edition (LDD3)
-- **الفصل 14**: The Linux Device Model
-  - بيشرح الـ `struct device`، الـ `kobject`، والـ sysfs
-  - الـ `property.h` API بتبني فوق الـ device model ده
-- متاح مجانًا: [lwn.net/Kernel/LDD2](https://lwn.net/Kernel/LDD2/)
+- **الفصول ذات الصلة:** Chapter 14 — *The Linux Device Model*
+- بيشرح الـ `kobject`، الـ `bus_type`، وكيف اتبنى الـ device model اللي فوقه اتبنى الـ fwnode
+- متاح مجاناً: [https://lwn.net/Kernel/LDD3/](https://lwn.net/Kernel/LDD3/)
 
-#### Linux Kernel Development — Robert Love (3rd Ed.)
-- **الفصل 17**: Devices and Modules
-  - الـ device model، الـ bus، الـ driver registration
-  - السياق اللي بيتشتغل فيه الـ `device_property_*`
+> ملاحظة: LDD3 قديم (kernel 2.6) ومش بيغطي الـ `fwnode` API مباشرةً، لكنه أساس لفهم الـ device model.
 
-#### Embedded Linux Primer — Christopher Hallinan
-- **الفصل 16**: Kernel Initialization
-- **الفصل 17**: Device Drivers
-  - بيشرح الـ Device Tree properties في سياق الـ embedded systems
-  - قريب جدًا من الاستخدام الفعلي للـ `fwnode` على ARM
+#### Linux Kernel Development, 3rd Edition — Robert Love
+- **الفصل ذو الصلة:** Chapter 17 — *Devices and Modules*
+- بيغطي الـ device model والـ sysfs، وهي البنية التحتية اللي بيشتغل فوقها الـ property interface
+
+#### Embedded Linux Primer, 2nd Edition — Christopher Hallinan
+- **الفصول ذات الصلة:** Chapter 7 — *Bootloaders*، Chapter 11 — *BusyBox*، وChapter 15 — *Debugging Embedded Linux*
+- بيغطي الـ Device Tree من ناحية عملية لأنظمة embedded، وهو السياق الأصلي للـ fwnode في DT
 
 #### Professional Linux Kernel Architecture — Wolfgang Mauerer
-- **الفصل 6**: Device Drivers
-  - coverage كامل للـ device model وكيفية ربط الـ firmware descriptions
+- يغطي الـ driver model بعمق أكبر من LDD3، مع تفاصيل الـ `kobject` و `device` structures
 
 ---
 
-### مراجع eLinux.org
+### مصادر eLinux.org
 
-- [Device Tree Reference](https://elinux.org/Device_Tree_Reference) — مرجع شامل للـ DT properties اللي بيوصل ليها `fwnode_property_read_*`
-- [Device Tree Mysteries](https://elinux.org/Device_Tree_Mysteries) — شرح للـ `#xxx-cells` properties اللي بتتعامل معاها `fwnode_property_get_reference_args()`
-
----
-
-### مراجع KernelNewbies.org
-
-| إصدار | التغيير المهم |
-|-------|--------------|
-| [Linux 3.14](https://kernelnewbies.org/Linux_3.14) | أول إضافة للـ unified device property API |
-| [Linux 5.6](https://kernelnewbies.org/Linux_5.6) | تحديثات الـ device property framework |
-| [Linux 6.1](https://kernelnewbies.org/Linux_6.1) | دعم firmware properties في input drivers |
-| [Linux 6.3](https://kernelnewbies.org/Linux_6.3) | تحديثات wireless drivers لاستخدام `fwnode` |
-| [Linux 6.17](https://kernelnewbies.org/Linux_6.17) | Rust bindings لـ `device_property_read_*` |
+| الصفحة | الوصف |
+|--------|-------|
+| [Device Tree Reference](https://elinux.org/Device_Tree_Reference) | مرجع شامل لصيغة الـ DT ومفهوم الـ properties كـ key-value pairs |
+| [Device Tree Mysteries](https://elinux.org/Device_Tree_Mysteries) | شرح عملي لإشكاليات الـ DT properties وكيف تُفسَّر |
+| [Linux Drivers Device Tree Guide](https://elinux.org/Linux_Drivers_Device_Tree_Guide) | دليل الـ drivers في استخدام DT properties — مثال حي على ما يعتمد عليه الـ fwnode DT backend |
+| [Device Tree frowand](https://elinux.org/Device_Tree_frowand) | أدوات تحليل DT properties والـ access patterns |
+| [Linux Kernel Resources](https://elinux.org/Linux_Kernel_Resources) | روابط موارد تطوير الـ kernel بشكل عام |
 
 ---
 
-### مصطلحات البحث
+### kernelnewbies.org
 
-لو عايز تعرف أكتر، استخدم الكلمات دي في البحث:
+- [LinuxChanges](https://kernelnewbies.org/LinuxChanges) — تتبع التغييرات في كل إصدار kernel، ابحث عن "device property" أو "fwnode" في إصدارات 3.19، 4.x، 5.x
+- [Drivers](https://kernelnewbies.org/Drivers) — نقطة بداية لكتابة drivers تستخدم الـ property API
+- [KernelGlossary](https://kernelnewbies.org/KernelGlossary) — تعريفات المصطلحات بما فيها DT و ACPI
+- [Documents](https://kernelnewbies.org/Documents) — فهرس التوثيق المتاح
 
-```
-# للـ API العامة
-"unified device property" linux kernel
-"fwnode_handle" "property.h" linux
-"device_property_read" ACPI "device tree"
+---
 
-# للـ software nodes
-"software_node" linux kernel driver
-"property_entry" "PROPERTY_ENTRY_U32" driver example
+### أدوات البحث في الـ source code
 
-# للـ graph API
-"fwnode_graph" port endpoint linux
-"fwnode_graph_get_next_endpoint" v4l2
+```bash
+# البحث عن كل المواضع اللي بتستخدم device_property_read_u32
+grep -r "device_property_read_u32" drivers/ --include="*.c" | head -30
 
-# للـ ACPI side
-"ACPI _DSD" device properties linux
-"acpi_device_data" fwnode
+# عرض implementation الـ software_node كاملة
+less drivers/base/swnode.c
 
-# لمناقشات الـ mailing list
-site:lkml.org "property.h" fwnode "software_node"
-site:patchwork.kernel.org "device property"
+# تتبع تاريخ الـ property.h في git
+git log --oneline include/linux/property.h
+
+# البحث عن الـ commit الأصلي للـ API
+git log --oneline --all | grep -i "unified device property"
+
+# مشاهدة كل الـ symbols المصدّرة من property.c
+grep "EXPORT_SYMBOL" drivers/base/property.c
 ```
 
 ---
 
-### ملخص خريطة الـ Subsystems
+### كلمات البحث الموصى بها
+
+للبحث في Google أو DuckDuckGo أو lore.kernel.org:
 
 ```
-property.h
-    │
-    ├── Device Tree (OF)
-    │       └── drivers/of/property.c
-    │           Documentation/devicetree/
-    │
-    ├── ACPI
-    │       └── drivers/acpi/property.c
-    │           Documentation/firmware-guide/acpi/
-    │
-    └── Software Nodes
-            └── drivers/base/swnode.c
-                (لما الـ firmware description مش موجودة)
+linux kernel fwnode_handle device property
+linux kernel software_node property_entry
+linux kernel unified device properties ACPI DT
+Rafael Wysocki Mika Westerberg device property interface
+linux kernel fwnode_graph endpoint port
+linux kernel device_property_read_u32 driver example
+linux kernel ACPI _DSD properties driver
+linux kernel swnode software node registration
+linux kernel property_entries_dup software node
+linux kernel fwnode_connection_find_match
 ```
+
+للبحث في Elixir Cross Reference (أفضل أداة للـ kernel source):
+
+- [https://elixir.bootlin.com/linux/latest/source/include/linux/property.h](https://elixir.bootlin.com/linux/latest/source/include/linux/property.h)
+- [https://elixir.bootlin.com/linux/latest/source/drivers/base/property.c](https://elixir.bootlin.com/linux/latest/source/drivers/base/property.c)
+- [https://elixir.bootlin.com/linux/latest/source/drivers/base/swnode.c](https://elixir.bootlin.com/linux/latest/source/drivers/base/swnode.c)
 ## Phase 8: Writing simple module
 
-### الهدف
+### الفكرة
 
-هنعمل module بيستخدم **kprobe** على الـ `device_property_read_u32_array` — دي من أكتر functions الـ property API استخداماً، بيتنادى عليها من drivers زي I2C و SPI و platform devices عشان يقرأ قيم زي clock-frequency أو reg أو interrupt numbers. الـ hook هيطبع اسم الـ device والـ property اللي اتطلبت وعدد العناصر المطلوبة.
+هنعمل kprobe على الدالة `device_property_present` — دالة exported مهمة بتتسأل "هل الـ property دي موجودة في الـ firmware node بتاع الـ device ده؟". بتتاخد في كتير من الـ drivers أثناء الـ probe لتحديد capabilities الجهاز. الـ hook هيطبع اسم الـ device واسم الـ property اللي بيتسأل عنها.
 
 ---
 
 ### الكود الكامل
 
 ```c
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-License-Identifier: GPL-2.0
 /*
- * prop_probe.c — kprobe on device_property_read_u32_array()
- *
- * Logs every call: which device asked for which u32 property and how many
- * elements were requested.
+ * kprobe_dev_prop.c
+ * Trace every call to device_property_present():
+ * prints the device name and the property being queried.
  */
 
-#include <linux/module.h>      /* MODULE_* macros, module_init/exit          */
-#include <linux/kernel.h>      /* pr_info, pr_err                            */
-#include <linux/kprobes.h>     /* struct kprobe, register_kprobe, ...        */
-#include <linux/device.h>      /* struct device, dev_name()                  */
-#include <linux/property.h>    /* prototype of the probed function           */
+#include <linux/module.h>       /* MODULE_LICENSE, module_init/exit */
+#include <linux/kprobes.h>      /* struct kprobe, register_kprobe */
+#include <linux/device.h>       /* struct device, dev_name() */
+#include <linux/kernel.h>       /* pr_info */
 
-/* ------------------------------------------------------------------ */
-/* kprobe callback — called just before device_property_read_u32_array */
-/* ------------------------------------------------------------------ */
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Kernel Student");
+MODULE_DESCRIPTION("kprobe on device_property_present — log property queries");
 
 /*
- * Function signature we are probing:
- *   int device_property_read_u32_array(const struct device *dev,
- *                                      const char *propname,
- *                                      u32 *val, size_t nval);
+ * device_property_present() signature:
+ *   bool device_property_present(const struct device *dev, const char *propname);
  *
- * On x86-64 the arguments land in registers:
- *   regs->di = dev   (arg0)
- *   regs->si = propname (arg1)
- *   regs->dx = val   (arg2)
- *   regs->cx = nval  (arg3)
+ * On x86-64:  rdi = dev,  rsi = propname
+ * On arm64:   x0  = dev,  x1  = propname
+ * We read them from pt_regs via regs_get_kernel_argument().
  */
 static int handler_pre(struct kprobe *p, struct pt_regs *regs)
 {
-    /* Cast register values back to their original C types */
-    const struct device *dev      = (const struct device *)regs->di;
-    const char          *propname = (const char *)regs->si;
-    size_t               nval     = (size_t)regs->cx;
+    /* First argument: pointer to struct device */
+    const struct device *dev =
+        (const struct device *)regs_get_kernel_argument(regs, 0);
 
-    /* nval == 0 means the caller just wants to know the array length */
-    if (nval == 0) {
-        pr_info("prop_probe: [count-query] dev=%s prop=\"%s\"\n",
-                dev ? dev_name(dev) : "(null)",
-                propname ? propname : "(null)");
-    } else {
-        pr_info("prop_probe: dev=%s prop=\"%s\" nval=%zu\n",
-                dev ? dev_name(dev) : "(null)",
-                propname ? propname : "(null)",
-                nval);
-    }
+    /* Second argument: property name string */
+    const char *propname =
+        (const char *)regs_get_kernel_argument(regs, 1);
 
-    return 0; /* 0 = let the real function run normally */
+    if (!dev || !propname)
+        return 0;
+
+    /* dev_name() returns the kobject name — safe to call in probe context */
+    pr_info("device_property_present: dev=\"%s\"  prop=\"%s\"\n",
+            dev_name(dev), propname);
+
+    return 0; /* 0 = let the original function run normally */
 }
 
-/* ------------------------------------------------------------------ */
-/* kprobe struct                                                        */
-/* ------------------------------------------------------------------ */
-
+/* kprobe descriptor — one per probed symbol */
 static struct kprobe kp = {
-    .symbol_name = "device_property_read_u32_array",
+    .symbol_name = "device_property_present",
     .pre_handler = handler_pre,
 };
 
-/* ------------------------------------------------------------------ */
-/* module_init / module_exit                                           */
-/* ------------------------------------------------------------------ */
-
-static int __init prop_probe_init(void)
+static int __init kp_devprop_init(void)
 {
     int ret;
 
     ret = register_kprobe(&kp);
     if (ret < 0) {
-        pr_err("prop_probe: register_kprobe failed: %d\n", ret);
+        pr_err("register_kprobe failed: %d\n", ret);
         return ret;
     }
 
-    pr_info("prop_probe: planted kprobe on %s at %p\n",
+    pr_info("kprobe planted at %s (%px)\n",
             kp.symbol_name, kp.addr);
     return 0;
 }
 
-static void __exit prop_probe_exit(void)
+static void __exit kp_devprop_exit(void)
 {
+    /* Must unregister before the module is unloaded;
+     * otherwise the pre_handler pointer becomes a dangling pointer
+     * inside the kernel's kprobe table → instant panic on next hit. */
     unregister_kprobe(&kp);
-    pr_info("prop_probe: kprobe removed\n");
+    pr_info("kprobe removed from %s\n", kp.symbol_name);
 }
 
-module_init(prop_probe_init);
-module_exit(prop_probe_exit);
+module_init(kp_devprop_init);
+module_exit(kp_devprop_exit);
+```
 
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Kernel Doc Project");
-MODULE_DESCRIPTION("kprobe demo: trace device_property_read_u32_array calls");
+---
+
+### Makefile
+
+```makefile
+obj-m += kprobe_dev_prop.o
+
+KDIR ?= /lib/modules/$(shell uname -r)/build
+
+all:
+	make -C $(KDIR) M=$(PWD) modules
+
+clean:
+	make -C $(KDIR) M=$(PWD) clean
 ```
 
 ---
@@ -3480,80 +3654,53 @@ MODULE_DESCRIPTION("kprobe demo: trace device_property_read_u32_array calls");
 
 #### الـ includes
 
-```c
-#include <linux/kprobes.h>
-#include <linux/device.h>
-#include <linux/property.h>
-```
+| Header | ليه موجود |
+|--------|-----------|
+| `linux/module.h` | ماكروهات `module_init` / `module_exit` و `MODULE_LICENSE` |
+| `linux/kprobes.h` | **`struct kprobe`** و `register_kprobe` / `unregister_kprobe` |
+| `linux/device.h` | **`struct device`** و `dev_name()` |
+| `linux/kernel.h` | `pr_info` / `pr_err` |
 
-الـ `kprobes.h` بيجيب `struct kprobe` وكل الـ API الخاص بالـ hooking. الـ `device.h` محتاجه عشان `dev_name()` تشتغل صح. الـ `property.h` مش إلزامي للتشغيل لكن بيوضح أن الـ prototype اللي بنـ probe عليه موجود في الـ build.
+#### الـ `handler_pre`
 
-#### الـ `handler_pre` والـ arguments
+الـ kprobe بيشغّل الـ `pre_handler` قبل ما تتنفذ الـ instruction الأولى في الدالة المستهدفة، يعني الـ arguments لسه موجودة في الـ registers. **`regs_get_kernel_argument(regs, N)`** دي helper محمولة بتجيب الـ N-th argument من الـ `pt_regs` بغض النظر عن الـ architecture (x86-64 أو arm64). بناخد `dev` و`propname` منها ونطبعهم.
 
-**الـ `pt_regs`** بيحمل state الـ CPU لحظة الـ probe. على x86-64، الـ calling convention بيحط أول 4 arguments في `rdi, rsi, rdx, rcx` — فبنقرأهم من `regs->di` وما بعده مباشرةً من غير ما نغير أي حاجة في الـ stack.
-
-الـ check على `nval == 0` مهم لأن الـ callers بيبعتوا صفر عمداً عشان يستعلموا عن حجم الـ array الأول — ده pattern موجود في كل الـ device property API.
+الـ return value لازم يكون `0` عشان الـ kernel يكمل تنفيذ الدالة الأصلية — لو رجّعنا `1` هيـ skip الدالة وده خطر.
 
 #### الـ `struct kprobe`
 
-```c
-static struct kprobe kp = {
-    .symbol_name = "device_property_read_u32_array",
-    .pre_handler = handler_pre,
-};
-```
-
-**الـ `symbol_name`** بيخلي الـ kernel يحل عنوان الـ function تلقائياً من الـ symbol table في وقت الـ register. الـ `pre_handler` بيتشغل قبل الـ function الأصلية بالظبط — يعني قبل ما تبدأ تتنفذ.
+**`symbol_name`** بيقول للـ kprobe subsystem يحل عنوان الدالة بالاسم وقت الـ registration. `addr` بييجي مملّي أوتوماتيك.
 
 #### الـ `module_init`
 
-بنسجل الـ kprobe وبنطبع العنوان الفعلي اللي انحُل (`kp.addr`) كتأكيد إن الـ hook اشتغل. لو `register_kprobe` رجع error (مثلاً الـ function مش exported أو CONFIG_KPROBES=n) بنفشل بشكل نظيف.
+بنسجّل الـ kprobe فيه. لو فشل (مثلاً الدالة inlined أو `CONFIG_KPROBES=n`) بنرجّع الـ error لـ `insmod` فيطبعها وما يحمّلش الـ module.
 
 #### الـ `module_exit`
 
-**`unregister_kprobe`** إلزامي هنا — لو المودول اتأزل من غير ما ينزع الـ hook، الـ kernel هيستمر في الـ jump لكود اتمحى من الذاكرة وده يعمل panic فوري.
+الـ `unregister_kprobe` ضروري قبل تفريغ الـ module من الذاكرة. لو ما عملناهوش، الـ kernel هيفضل يستدعي `handler_pre` اللي رمزه اتمسح → **kernel panic**. ده الـ cleanup الأساسي لأي kprobe.
 
 ---
 
-### Makefile للبناء
-
-```makefile
-obj-m += prop_probe.o
-
-KDIR ?= /lib/modules/$(shell uname -r)/build
-
-all:
-	$(MAKE) -C $(KDIR) M=$(PWD) modules
-
-clean:
-	$(MAKE) -C $(KDIR) M=$(PWD) clean
-```
-
-### تشغيل واختبار
+### تشغيل وقراءة النتيجة
 
 ```bash
-# بناء المودول
+# بناء الموديول
 make
 
 # تحميله
-sudo insmod prop_probe.ko
+sudo insmod kprobe_dev_prop.ko
 
-# شوف اللوجات — هتظهر في الثواني الأولى من أي device probe
-sudo dmesg | grep prop_probe
+# تحميل أي driver يعمل probe لجهاز (مثال: USB أو I2C)
+# أو بس اشوف الـ log مباشرة
+sudo dmesg | grep device_property_present
 
-# مثال output عند تحميل driver جديد:
-# prop_probe: dev=0000:00:1f.3 prop="clock-frequency" nval=1
-# prop_probe: dev=i2c-0        prop="reg"              nval=1
-# prop_probe: [count-query]    dev=spi0.0 prop="cs-gpios"
+# مثال على output:
+# [  42.301] kprobe planted at device_property_present (ffffffff81a3bc20)
+# [  42.415] device_property_present: dev="0000:00:1f.3"  prop="snps,reset-gpio"
+# [  42.416] device_property_present: dev="i2c-0"         prop="clock-frequency"
 
-# إزالة المودول
-sudo rmmod prop_probe
+# إزالة الموديول
+sudo rmmod kprobe_dev_prop
 ```
 
-### متطلبات الـ kernel config
-
-```
-CONFIG_KPROBES=y
-CONFIG_KPROBE_EVENTS=y   # اختياري لكن مفيد مع perf/ftrace
-CONFIG_KALLSYMS=y        # عشان symbol_name resolution يشتغل
-```
+**الـ output** بيكشف أي driver بيسأل عن أي property، مفيد لـ debugging مشاكل الـ Device Tree أو ACPI حيث property مش موجودة فالـ driver بيفشل في الـ probe صامتاً.
