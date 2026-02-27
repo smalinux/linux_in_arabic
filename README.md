@@ -12,7 +12,7 @@ $ claude --dangerously-skip-permissions
 ```
 
 
-## `OPEN FIRMWARE` ✅
+## `OPEN FIRMWARE` ⭐✅
 ```
 OPEN FIRMWARE AND FLATTENED DEVICE TREE
 M:	Rob Herring <robh@kernel.org>
@@ -66,7 +66,7 @@ F:	include/dt-bindings/
 
 
 
-## `GPIO SUBSYSTEM` ✅
+## `GPIO SUBSYSTEM` ✅⭐
 ```
 M:	Linus Walleij <linusw@kernel.org>
 M:	Bartosz Golaszewski <brgl@kernel.org>
@@ -161,7 +161,7 @@ F:	include/dt-bindings/i2c/
 - [ ] [i2c-dev.h](include/linux/i2c-dev.h.md)
 - [ ] [i2c-smbus.h](include/linux/i2c-smbus.h.md)
 - [ ] [include/linux/i2c.h](include/linux/i2c.h.md)
-## `SPI SUBSYSTEM` ✅
+## `SPI SUBSYSTEM` ✅⭐
 
 ```
 M:	Mark Brown <broonie@kernel.org>
@@ -265,7 +265,7 @@ F:	include/uapi/linux/usb/
 ```
 
 
-## `PIN CONTROL SUBSYSTEM`
+## `PIN CONTROL SUBSYSTEM` ✅⭐
 
 ```
 M:	Linus Walleij <linusw@kernel.org>
@@ -397,7 +397,7 @@ F:	kernel/configs/nopm.config
 ```
 
 
-## `COMMON CLK FRAMEWORK`
+## `COMMON CLK FRAMEWORK` ✅⭐
 
 ```
 M:	Michael Turquette <mturquette@baylibre.com>
@@ -1030,7 +1030,7 @@ S:	Maintained
 F:	include/linux/devm-helpers.h
 ```
 
-## `DRIVER CORE, KOBJECTS, DEBUGFS AND SYSFS` ⭐
+## `DRIVER CORE, KOBJECTS, DEBUGFS AND SYSFS` ⭐✅
 
 ```
 M:	Greg Kroah-Hartman <gregkh@linuxfoundation.org>
@@ -1069,20 +1069,20 @@ F:	samples/rust/rust_driver_faux.rs
 F:	samples/rust/rust_soc.rs
 ```
 
-Documentation/core-api/kobject.rst
-Documentation/driver-api/driver-model/
-- [ ] include/linux/debugfs.h
-- [ ] include/linux/device.h
-- [ ] include/linux/fwnode.h
-- [ ] include/linux/kobject.h
-- [ ] include/linux/property.h
-- [ ] include/linux/sysfs.h
+- Documentation/core-api/kobject.rst
+- Documentation/driver-api/driver-model/
+- [ ] [debugfs.h](include/linux/debugfs.h.md)
+- [ ] [device.h](include/linux/device.h.md)
+- [ ] [fwnode.h](include/linux/fwnode.h.md)
+- [ ] [kobject.h](include/linux/kobject.h.md)
+- [ ] [property.h](include/linux/property.h.md)
+- [ ] [sysfs.h](include/linux/sysfs.h.md)
 
-- [ ] include/linux/device/bus.h
-- [ ] include/linux/device/class.h
-- [ ] include/linux/device/devres.h
-- [ ] include/linux/device/driver.h
-- [ ] include/linux/device/faux.h
+- [ ] [bus.h](include/linux/device/bus.h.md)
+- [ ] [class.h](include/linux/device/class.h.md)
+- [ ] [devres.h](include/linux/device/devres.h.md)
+- [ ] [driver.h](include/linux/device/driver.h.md)
+- [ ] [faux.h](include/linux/device/faux.h.md)
 
 ## `ETHERNET PHY LIBRARY`
 
