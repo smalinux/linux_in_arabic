@@ -1179,7 +1179,18 @@ X:	security/selinux/
 K:	\bsecurity_[a-z_0-9]\+\b
 ```
 
-## `XARRAY`
+- [ ] [lsm_audit.h](include/linux/lsm_audit.h.md)
+- [ ] [lsm_hook_defs.h](include/linux/lsm_hook_defs.h.md)
+- [ ] [lsm_hooks.h](include/linux/lsm_hooks.h.md)
+- [ ] [security.h](include/linux/security.h.md)
+- [ ] [lsm.h](include/uapi/linux/lsm.h.md)
+
+- [ ] [apparmor.h](include/linux/lsm/apparmor.h.md)
+- [ ] [bpf.h](include/linux/lsm/bpf.h.md)
+- [ ] [selinux.h](include/linux/lsm/selinux.h.md)
+- [ ] [smack.h](include/linux/lsm/smack.h.md)
+
+## `XARRAY` ✅
 
 ```
 M:	Matthew Wilcox <willy@infradead.org>
@@ -1196,7 +1207,10 @@ F:	lib/xarray.c
 F:	tools/testing/radix-tree
 ```
 
-
+- [ ] [idr.rst](Documentation/core-api/idr.rst.md)
+- [ ] [xarray.rst](Documentation/core-api/xarray.rst.md)
+- [ ] [idr.h](include/linux/idr.h.md)
+- [ ] [xarray.h](include/linux/xarray.h.md)
 
 # TODO
 - [ ] https://docs.kernel.org/core-api/kernel-api.html
