@@ -982,6 +982,68 @@ F:	kernel/trace/blktrace.c
 F:	lib/sbitmap.c
 ```
 
+- [ ] include/linux/bio.h
+- [ ] include/linux/blk-cgroup.h
+- [ ] include/linux/blk-crypto.h
+- [ ] include/linux/blk-crypto-profile.h
+- [ ] include/linux/blkdev.h
+- [ ] include/linux/blk-integrity.h
+- [ ] include/linux/blk-mq-dma.h
+- [ ] include/linux/blk-mq.h
+- [ ] include/linux/blkpg.h
+- [ ] include/linux/blk-pm.h
+- [ ] include/linux/blktrace_api.h
+- [ ] include/linux/blk_types.h
+
+- [ ] Documentation/block/bfq-iosched.rst
+- [ ] Documentation/block/biovecs.rst
+- [ ] Documentation/block/blk-mq.rst
+- [ ] Documentation/block/cmdline-partition.rst
+- [ ] Documentation/block/data-integrity.rst
+- [ ] Documentation/block/deadline-iosched.rst
+- [ ] Documentation/block/index.rst
+- [ ] Documentation/block/inline-encryption.rst
+- [ ] Documentation/block/ioprio.rst
+- [ ] Documentation/block/kyber-iosched.rst
+- [ ] Documentation/block/null_blk.rst
+- [ ] Documentation/block/pr.rst
+- [ ] Documentation/block/stat.rst
+- [ ] Documentation/block/switching-sched.rst
+- [ ] Documentation/block/ublk.rst
+- [ ] Documentation/block/writeback_cache_control.rst
+
+- Documentation/ABI/stable/sysfs-block
+- [ ] include/linux/bio.h
+- [ ] include/linux/blk-cgroup.h
+- [ ] include/linux/blk-crypto.h
+- [ ] include/linux/blk-crypto-profile.h
+- [ ] include/linux/blkdev.h
+- [ ] include/linux/blk-integrity.h
+- [ ] include/linux/blk-mq-dma.h
+- [ ] include/linux/blk-mq.h
+- [ ] include/linux/blkpg.h
+- [ ] include/linux/blk-pm.h
+- [ ] include/linux/blktrace_api.h
+- [ ] include/linux/blk_types.h
+
+- [ ] Documentation/block/bfq-iosched.rst
+- [ ] Documentation/block/biovecs.rst
+- [ ] Documentation/block/blk-mq.rst
+- [ ] Documentation/block/cmdline-partition.rst
+- [ ] Documentation/block/data-integrity.rst
+- [ ] Documentation/block/deadline-iosched.rst
+- [ ] Documentation/block/index.rst
+- [ ] Documentation/block/inline-encryption.rst
+- [ ] Documentation/block/ioprio.rst
+- [ ] Documentation/block/kyber-iosched.rst
+- [ ] Documentation/block/null_blk.rst
+- [ ] Documentation/block/pr.rst
+- [ ] Documentation/block/stat.rst
+- [ ] Documentation/block/switching-sched.rst
+- [ ] Documentation/block/ublk.rst
+- [ ] Documentation/block/writeback_cache_control.rst
+
+
 ## `CPU FREQUENCY SCALING FRAMEWORK`
 
 ```
@@ -1004,6 +1066,16 @@ F:	rust/kernel/cpufreq.rs
 F:	tools/testing/selftests/cpufreq/
 ```
 
+- [ ] include/linux/cpufreq.h
+- [ ] include/linux/sched/cpufreq.h
+- [ ] Documentation/admin-guide/pm/cpufreq.rst
+- [ ] Documentation/admin-guide/pm/intel_pstate.rst
+- [ ] Documentation/cpu-freq/core.rst
+- [ ] Documentation/cpu-freq/cpu-drivers.rst
+- [ ] Documentation/cpu-freq/cpufreq-stats.rst
+- [ ] Documentation/cpu-freq/index.rst
+- [ ] Documentation/devicetree/bindings/cpufreq/
+
 ## `CPU HOTPLUG`
 
 ```
@@ -1021,6 +1093,10 @@ F:	rust/helpers/cpu.c
 F:	rust/kernel/cpu.rs
 ```
 
+- [ ] include/linux/cpu.h
+- [ ] include/linux/cpuhotplug.h
+- [ ] include/linux/smpboot.h
+
 ## `DEVICE RESOURCE MANAGEMENT HELPERS`
 
 ```
@@ -1029,6 +1105,8 @@ R:	Matti Vaittinen <mazziesaccount@gmail.com>
 S:	Maintained
 F:	include/linux/devm-helpers.h
 ```
+
+- [ ] include/linux/devm-helpers.h
 
 ## `DRIVER CORE, KOBJECTS, DEBUGFS AND SYSFS` ⭐✅
 
@@ -1123,6 +1201,19 @@ F:	include/uapi/linux/mdio.h
 F:	include/uapi/linux/mii.h
 F:	net/core/of_net.c
 ```
+ ✅ main includes only
+ 
+- [ ] include/linux/mdio.h
+- [ ] include/linux/linkmode.h
+- [ ] include/linux/mdio/mdio-regmap.h
+- [ ] include/linux/mii.h
+- [ ] include/linux/of_net.h
+- [ ] include/linux/phy.h
+- [ ] include/linux/phy_fixed.h
+- [ ] include/linux/phy_link_topology.h
+- [ ] include/linux/phylib_stubs.h
+- [ ] include/linux/platform_data/mdio-bcm-unimac.h
+- [ ] include/linux/platform_data/mdio-gpio.h
 
 ## `LOCKING PRIMITIVES`
 
@@ -1153,8 +1244,17 @@ F:	rust/kernel/sync/lock/
 F:	rust/kernel/sync/locked_by.rs
 X:	kernel/locking/locktorture.c
 ```
+ ✅ main includes only
 
-## `SECURITY SUBSYSTEM`
+- [ ] include/linux/local_lock.h
+- [ ] include/linux/lockdep.h
+- [ ] include/linux/mutex.h
+- [ ] include/linux/rwlock.h
+- [ ] include/linux/rwsem.h
+- [ ] include/linux/seqlock.h
+- [ ] include/linux/spinlock.h
+
+## `SECURITY SUBSYSTEM` ✅
 
 ```
 M:	Paul Moore <paul@paul-moore.com>
@@ -1178,7 +1278,8 @@ F:	rust/kernel/security.rs
 X:	security/selinux/
 K:	\bsecurity_[a-z_0-9]\+\b
 ```
-
+ ✅includes only
+ 
 - [ ] [lsm_audit.h](include/linux/lsm_audit.h.md)
 - [ ] [lsm_hook_defs.h](include/linux/lsm_hook_defs.h.md)
 - [ ] [lsm_hooks.h](include/linux/lsm_hooks.h.md)
