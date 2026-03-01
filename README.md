@@ -215,13 +215,36 @@ F:	kernel/irq/
 F:	lib/group_cpus.c
 ```
 
-
+- [ ] include/linux/group_cpus.h
+- [ ] include/linux/irq.h
+- [ ] include/linux/irqhandler.h
+- [ ] include/linux/irqnr.h
+- [ ] include/linux/irqreturn.h
 
 ## `PCI SUBSYSTEM`
 
 ```
+M:	Bjorn Helgaas <bhelgaas@google.com>
+L:	linux-pci@vger.kernel.org
+S:	Supported
+Q:	https://patchwork.kernel.org/project/linux-pci/list/
+B:	https://bugzilla.kernel.org
+C:	irc://irc.oftc.net/linux-pci
+T:	git git://git.kernel.org/pub/scm/linux/kernel/git/pci/pci.git
+F:	Documentation/ABI/testing/sysfs-devices-pci-host-bridge
+F:	Documentation/PCI/
+F:	Documentation/devicetree/bindings/pci/
+F:	arch/x86/kernel/early-quirks.c
+F:	arch/x86/kernel/quirks.c
+F:	arch/x86/pci/
+F:	drivers/acpi/pci*
+F:	drivers/pci/
+F:	include/asm-generic/pci*
+F:	include/linux/of_pci.h
+F:	include/linux/pci*
+F:	include/uapi/linux/pci*
 ```
-
+#skip
 
 ## `USB SUBSYSTEM`
 
@@ -241,29 +264,63 @@ F:	include/uapi/linux/usb/
 ```
 
 
-## `BLOCK LAYER`
-
-```
-```
-
-
 ## `SCSI SUBSYSTEM`
 
 ```
+M:	"James E.J. Bottomley" <James.Bottomley@HansenPartnership.com>
+M:	"Martin K. Petersen" <martin.petersen@oracle.com>
+L:	linux-scsi@vger.kernel.org
+S:	Maintained
+Q:	https://patchwork.kernel.org/project/linux-scsi/list/
+T:	git git://git.kernel.org/pub/scm/linux/kernel/git/jejb/scsi.git
+T:	git git://git.kernel.org/pub/scm/linux/kernel/git/mkp/scsi.git
+F:	Documentation/devicetree/bindings/scsi/
+F:	drivers/scsi/
+F:	drivers/ufs/
+F:	include/scsi/
+F:	include/uapi/scsi/
+F:	include/ufs/
 ```
-
+#skip 
 
 ## `IOMMU SUBSYSTEM`
 ```
+M:	Joerg Roedel <joro@8bytes.org>
+M:	Will Deacon <will@kernel.org>
+R:	Robin Murphy <robin.murphy@arm.com>
+L:	iommu@lists.linux.dev
+S:	Maintained
+T:	git git://git.kernel.org/pub/scm/linux/kernel/git/iommu/linux.git
+F:	Documentation/devicetree/bindings/iommu/
+F:	drivers/iommu/
+F:	include/linux/iommu.h
+F:	include/linux/iova.h
+F:	include/linux/of_iommu.h
 ```
 
-
+- [ ] include/linux/iommu.h
+- [ ] include/linux/iova.h
+- [ ] include/linux/of_iommu.h
 
 ## `CRYPTO API`
 
 ```
+M:	Herbert Xu <herbert@gondor.apana.org.au>
+M:	"David S. Miller" <davem@davemloft.net>
+L:	linux-crypto@vger.kernel.org
+S:	Maintained
+T:	git git://git.kernel.org/pub/scm/linux/kernel/git/herbert/cryptodev-2.6.git
+T:	git git://git.kernel.org/pub/scm/linux/kernel/git/herbert/crypto-2.6.git
+F:	Documentation/crypto/
+F:	Documentation/devicetree/bindings/crypto/
+F:	arch/*/crypto/
+F:	crypto/
+F:	drivers/crypto/
+F:	include/crypto/
+F:	include/linux/crypto*
 ```
 
+#skip 
 
 ## `PIN CONTROL SUBSYSTEM` ✅⭐
 
@@ -1066,15 +1123,14 @@ F:	rust/kernel/cpufreq.rs
 F:	tools/testing/selftests/cpufreq/
 ```
 
-- [ ] include/linux/cpufreq.h
-- [ ] include/linux/sched/cpufreq.h
-- [ ] Documentation/admin-guide/pm/cpufreq.rst
-- [ ] Documentation/admin-guide/pm/intel_pstate.rst
-- [ ] Documentation/cpu-freq/core.rst
-- [ ] Documentation/cpu-freq/cpu-drivers.rst
-- [ ] Documentation/cpu-freq/cpufreq-stats.rst
+- [ ] [cpufreq.h](include/linux/cpufreq.h.md)
+- [ ] [cpufreq.h](include/linux/sched/cpufreq.h.md)
+- [ ] [cpufreq.rst](Documentation/admin-guide/pm/cpufreq.rst.md)
+- [ ] [intel_pstate.rst](Documentation/admin-guide/pm/intel_pstate.rst.md)
+- [ ] [core.rst](Documentation/cpu-freq/core.rst.md)
+- [ ] [cpu-drivers.rst](Documentation/cpu-freq/cpu-drivers.rst.md)
+- [ ] [cpufreq-stats.rst](Documentation/cpu-freq/cpufreq-stats.rst.md)
 - [ ] Documentation/cpu-freq/index.rst
-- [ ] Documentation/devicetree/bindings/cpufreq/
 
 ## `CPU HOTPLUG`
 
@@ -1093,9 +1149,9 @@ F:	rust/helpers/cpu.c
 F:	rust/kernel/cpu.rs
 ```
 
-- [ ] include/linux/cpu.h
-- [ ] include/linux/cpuhotplug.h
-- [ ] include/linux/smpboot.h
+- [ ] [pinmux.h](include/linux/pinctrl/pinmux.h.md)
+- [ ] [cpuhotplug.h](external/linux/include/linux/cpuhotplug.h.md)
+- [ ] [smpboot.h](include/linux/smpboot.h.md)
 
 ## `DEVICE RESOURCE MANAGEMENT HELPERS`
 
@@ -1106,7 +1162,7 @@ S:	Maintained
 F:	include/linux/devm-helpers.h
 ```
 
-- [ ] include/linux/devm-helpers.h
+- [ ] [devm-helpers.h](include/linux/devm-helpers.h.md)
 
 ## `DRIVER CORE, KOBJECTS, DEBUGFS AND SYSFS` ⭐✅
 
@@ -1203,17 +1259,17 @@ F:	net/core/of_net.c
 ```
  ✅ main includes only
  
-- [ ] include/linux/mdio.h
-- [ ] include/linux/linkmode.h
-- [ ] include/linux/mdio/mdio-regmap.h
-- [ ] include/linux/mii.h
-- [ ] include/linux/of_net.h
-- [ ] include/linux/phy.h
-- [ ] include/linux/phy_fixed.h
-- [ ] include/linux/phy_link_topology.h
-- [ ] include/linux/phylib_stubs.h
-- [ ] include/linux/platform_data/mdio-bcm-unimac.h
-- [ ] include/linux/platform_data/mdio-gpio.h
+- [ ] [mdio.h](include/linux/mdio.h.md)
+- [ ] [linkmode.h](include/linux/linkmode.h.md)
+- [ ] [mdio-regmap.h](include/linux/mdio/mdio-regmap.h.md)
+- [ ] [mii.h](include/linux/mii.h.md)
+- [ ] [of_net.h](include/linux/of_net.h.md)
+- [ ] [phy.h](include/linux/phy.h.md)
+- [ ] [phy_fixed.h](include/linux/phy_fixed.h.md)
+- [ ] [phy_link_topology.h](include/linux/phy_link_topology.h.md)
+- [ ] [phylib_stubs.h](include/linux/phylib_stubs.h.md)
+- [ ] [mdio-bcm-unimac.h](include/linux/platform_data/mdio-bcm-unimac.h.md)
+- [ ] [mdio-gpio.h](include/linux/platform_data/mdio-gpio.h.md)
 
 ## `LOCKING PRIMITIVES`
 
