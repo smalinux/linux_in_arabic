@@ -694,7 +694,7 @@ F:	include/linux/reset.h
 F:	include/linux/reset/
 K:	\b(?:devm_|of_)?reset_control(?:ler_[a-z]+|_[a-z_]+)?\b
 ```
-- [ ] Documentation/driver-api/reset.rst
+- [ ] [reset.rst](Documentation/driver-api/reset.rst.md)
 - [ ] [reset.rst](Documentation/driver-api/reset.rst.md)
 
 - [ ] [reset-controller.h](include/linux/reset-controller.h.md)
@@ -1246,13 +1246,13 @@ X:	kernel/locking/locktorture.c
 ```
  ✅ main includes only
 
-- [ ] include/linux/local_lock.h
-- [ ] include/linux/lockdep.h
-- [ ] include/linux/mutex.h
-- [ ] include/linux/rwlock.h
-- [ ] include/linux/rwsem.h
-- [ ] include/linux/seqlock.h
-- [ ] include/linux/spinlock.h
+- [ ] [local_lock.h](include/linux/local_lock.h.md)
+- [ ] [lockdep.h](include/linux/lockdep.h.md)
+- [ ] [mutex.h](include/linux/mutex.h.md)
+- [ ] [rwlock.h](include/linux/rwlock.h.md)
+- [ ] [rwsem.h](include/linux/rwsem.h.md)
+- [ ] [seqlock.h](include/linux/seqlock.h.md)
+- [ ] [spinlock.h](include/linux/spinlock.h.md)
 
 ## `SECURITY SUBSYSTEM` ✅
 
