@@ -263,7 +263,83 @@ F:	include/linux/usb/
 F:	include/uapi/linux/usb/
 ```
 
+- [ ] include/linux/usb.h
 
+- [ ] include/linux/usb/audio.h
+- [ ] include/linux/usb/audio-v2.h
+- [ ] include/linux/usb/audio-v3.h
+- [ ] include/linux/usb/c67x00.h
+- [ ] include/linux/usb/ccid.h
+- [ ] include/linux/usb/cdc.h
+- [ ] include/linux/usb/cdc_ncm.h
+- [ ] include/linux/usb/cdc-wdm.h
+- [ ] include/linux/usb/ch9.h
+- [ ] include/linux/usb/chipidea.h
+- [ ] include/linux/usb/composite.h
+- [ ] include/linux/usb/ehci-dbgp.h
+- [ ] include/linux/usb/ehci_def.h
+- [ ] include/linux/usb/ehci_pdriver.h
+- [ ] include/linux/usb/ezusb.h
+- [ ] include/linux/usb/functionfs.h
+- [ ] include/linux/usb/func_utils.h
+- [ ] include/linux/usb/gadget_configfs.h
+- [ ] include/linux/usb/gadget.h
+- [ ] include/linux/usb/g_hid.h
+- [ ] include/linux/usb/hcd.h
+- [ ] include/linux/usb/input.h
+- [ ] include/linux/usb/iowarrior.h
+- [ ] include/linux/usb/irda.h
+- [ ] include/linux/usb/isp116x.h
+- [ ] include/linux/usb/isp1301.h
+- [ ] include/linux/usb/isp1362.h
+- [ ] include/linux/usb/ljca.h
+- [ ] include/linux/usb/m66592.h
+- [ ] include/linux/usb/mctp-usb.h
+- [ ] include/linux/usb/midi-v2.h
+- [ ] include/linux/usb/musb.h
+- [ ] include/linux/usb/musb-ux500.h
+- [ ] include/linux/usb/net2280.h
+- [ ] include/linux/usb/of.h
+- [ ] include/linux/usb/ohci_pdriver.h
+- [ ] include/linux/usb/onboard_dev.h
+- [ ] include/linux/usb/otg-fsm.h
+- [ ] include/linux/usb/otg.h
+- [ ] include/linux/usb/pd_ado.h
+- [ ] include/linux/usb/pd_bdo.h
+- [ ] include/linux/usb/pd_ext_sdb.h
+- [ ] include/linux/usb/pd.h
+- [ ] include/linux/usb/pd_vdo.h
+- [ ] include/linux/usb/phy_companion.h
+- [ ] include/linux/usb/phy.h
+- [ ] include/linux/usb/quirks.h
+- [ ] include/linux/usb/r8152.h
+- [ ] include/linux/usb/r8a66597.h
+- [ ] include/linux/usb/renesas_usbhs.h
+- [ ] include/linux/usb/rndis_host.h
+- [ ] include/linux/usb/role.h
+- [ ] include/linux/usb/rzv2m_usb3drd.h
+- [ ] include/linux/usb/serial.h
+- [ ] include/linux/usb/sl811.h
+- [ ] include/linux/usb/storage.h
+- [ ] include/linux/usb/tcpci.h
+- [ ] include/linux/usb/tcpm.h
+- [ ] include/linux/usb/tegra_usb_phy.h
+- [ ] include/linux/usb/typec_altmode.h
+- [ ] include/linux/usb/typec_dp.h
+- [ ] include/linux/usb/typec.h
+- [ ] include/linux/usb/typec_mux.h
+- [ ] include/linux/usb/typec_retimer.h
+- [ ] include/linux/usb/typec_tbt.h
+- [ ] include/linux/usb/uas.h
+- [ ] include/linux/usb/ulpi.h
+- [ ] include/linux/usb/usb338x.h
+- [ ] include/linux/usb/usbio.h
+- [ ] include/linux/usb/usbnet.h
+- [ ] include/linux/usb/usb_phy_generic.h
+- [ ] include/linux/usb/uvc.h
+- [ ] include/linux/usb/webusb.h
+- [ ] include/linux/usb/xhci-dbgp.h
+- [ ] include/linux/usb/xhci-sideband.h
 ## `SCSI SUBSYSTEM`
 
 ```
@@ -408,6 +484,38 @@ F:	mm/vmstat.c
 N:	include/linux/page[-_]*
 ```
 
+#skip 
+- [ ] include/linux/gfp.h
+- [ ] include/linux/gfp_types.h
+- [ ] include/linux/highmem.h
+- [ ] include/linux/leafops.h
+- [ ] include/linux/memory.h
+- [ ] include/linux/mm.h
+- [ ] include/linux/mm_api.h
+- [ ] include/linux/mm_inline.h
+- [ ] include/linux/mm_types.h
+- [ ] include/linux/mm_types_task.h
+- [ ] include/linux/mmzone.h
+- [ ] include/linux/mmdebug.h
+- [ ] include/linux/mmu_notifier.h
+- [ ] include/linux/pagewalk.h
+- [ ] include/linux/pgalloc.h
+- [ ] include/linux/pgtable.h
+- [ ] include/linux/ptdump.h
+- [ ] include/linux/vmpressure.h
+- [ ] include/linux/vmstat.h
+
+- [ ] include/linux/page_counter.h
+- [ ] include/linux/page_ext.h
+- [ ] include/linux/page-flags.h
+- [ ] include/linux/page-flags-layout.h
+- [ ] include/linux/page_frag_cache.h
+- [ ] include/linux/page_idle.h
+- [ ] include/linux/page-isolation.h
+- [ ] include/linux/page_owner.h
+- [ ] include/linux/page_ref.h
+- [ ] include/linux/page_reporting.h
+- [ ] include/linux/page_table_check.h
 
 ## `INPUT (KEYBOARD, MOUSE, JOYSTICK, TOUCHSCREEN) DRIVERS`
 
@@ -435,6 +543,19 @@ F:	include/uapi/linux/serio.h
 F:	include/uapi/linux/uinput.h
 ```
 
+- Documentation/input/
+- [ ] include/linux/gameport.h
+- [ ] include/linux/i8042.h
+- [ ] include/linux/input.h
+- [ ] include/linux/input/
+- [ ] include/linux/libps2.h
+- [ ] include/linux/serio.h
+- [ ] include/uapi/linux/gameport.h
+- [ ] include/uapi/linux/input-event-codes.h
+- [ ] include/uapi/linux/input.h
+- [ ] include/uapi/linux/serio.h
+- [ ] include/uapi/linux/uinput.h
+
 
 ## `POWER MANAGEMENT CORE`
 
@@ -453,6 +574,17 @@ F:	include/linux/powercap.h
 F:	kernel/configs/nopm.config
 ```
 
+- [ ] include/linux/intel_rapl.h
+- [ ] include/linux/pm.h
+- [ ] include/linux/powercap.h
+
+- [ ] include/linux/pm_clock.h
+- [ ] include/linux/pm_domain.h
+- [ ] include/linux/pm_opp.h
+- [ ] include/linux/pm_qos.h
+- [ ] include/linux/pm_runtime.h
+- [ ] include/linux/pm_wakeirq.h
+- [ ] include/linux/pm_wakeup.h
 
 ## `COMMON CLK FRAMEWORK` ✅⭐
 
@@ -529,7 +661,7 @@ F:	include/linux/regulator/
 F:	include/uapi/regulator/
 K:	regulator_get_optional
 ```
-
+#skip 
 
 ## `TTY LAYER AND SERIAL DRIVERS`
 
@@ -555,6 +687,21 @@ F:	include/uapi/linux/serial_core.h
 F:	include/uapi/linux/tty.h
 ```
 
+- [ ] include/linux/selection.h
+- [ ] include/linux/serial.h
+- [ ] include/linux/serial_core.h
+- [ ] include/linux/sysrq.h
+- [ ] include/linux/vt.h
+
+- [ ] include/linux/tty_buffer.h
+- [ ] include/linux/tty_driver.h
+- [ ] include/linux/tty_flip.h
+- [ ] include/linux/tty.h
+- [ ] include/linux/tty_ldisc.h
+- [ ] include/linux/tty_port.h
+
+- [ ] include/linux/vt_buffer.h
+- [ ] include/linux/vt_kern.h
 
 ## `SOUND`
 
@@ -573,18 +720,48 @@ F:	sound/
 F:	tools/testing/selftests/alsa
 ```
 
+#skip 
 
 ## `MEDIA CONTROLLER FRAMEWORK`
 
 ```
+M:	Sakari Ailus <sakari.ailus@linux.intel.com>
+M:	Laurent Pinchart <laurent.pinchart@ideasonboard.com>
+L:	linux-media@vger.kernel.org
+S:	Supported
+W:	https://www.linuxtv.org
+T:	git git://linuxtv.org/media.git
+F:	drivers/media/mc/
+F:	include/media/media-*.h
+F:	include/uapi/linux/media.h
 ```
 
+- [ ] include/media/media-dev-allocator.h
+- [ ] include/media/media-device.h
+- [ ] include/media/media-devnode.h
+- [ ] include/media/media-entity.h
+- [ ] include/media/media-request.h
 
 ## `DMA GENERIC OFFLOAD ENGINE SUBSYSTEM`
 
 ```
+M:	Vinod Koul <vkoul@kernel.org>
+L:	dmaengine@vger.kernel.org
+S:	Maintained
+Q:	https://patchwork.kernel.org/project/linux-dmaengine/list/
+T:	git git://git.kernel.org/pub/scm/linux/kernel/git/vkoul/dmaengine.git
+F:	Documentation/devicetree/bindings/dma/
+F:	Documentation/driver-api/dmaengine/
+F:	drivers/dma/
+F:	include/dt-bindings/dma/
+F:	include/linux/dma/
+F:	include/linux/dmaengine.h
+F:	include/linux/of_dma.h
 ```
 
+#skip 
+- [ ] include/linux/dmaengine.h
+- [ ] include/linux/of_dma.h
 
 ## `MULTIMEDIA CARD (MMC), SECURE DIGITAL (SD) AND SDIO SUBSYSTEM`
 
@@ -624,6 +801,7 @@ F:	drivers/mtd/spi-nor/
 F:	include/linux/mtd/spi-nor.h
 ```
 
+- [ ] include/linux/mtd/spi-nor.h
 
 ## `REMOTE PROCESSOR (REMOTEPROC) SUBSYSTEM`
 
@@ -640,7 +818,8 @@ F:	drivers/remoteproc/
 F:	include/linux/remoteproc.h
 F:	include/linux/remoteproc/
 ```
-
+#skip 
+- [ ] include/linux/remoteproc.h
 
 ## `REMOTE PROCESSOR MESSAGING (RPMSG) SUBSYSTEM`
 
@@ -659,7 +838,8 @@ F:	include/uapi/linux/rpmsg.h
 F:	samples/rpmsg/
 ```
 
-
+- [ ] include/linux/rpmsg.h
+- [ ] Documentation/staging/rpmsg.rst
 
 ## `CPU FREQUENCY SCALING FRAMEWORK`
 
@@ -683,6 +863,16 @@ F:	rust/kernel/cpufreq.rs
 F:	tools/testing/selftests/cpufreq/
 ```
 
+- [ ] Documentation/admin-guide/pm/cpufreq.rst
+- [ ] Documentation/admin-guide/pm/intel_pstate.rst
+
+- [ ] Documentation/cpu-freq/core.rst
+- [ ] Documentation/cpu-freq/cpu-drivers.rst
+- [ ] Documentation/cpu-freq/cpufreq-stats.rst
+- [ ] Documentation/cpu-freq/index.rst
+
+- [ ] include/linux/cpufreq.h
+- [ ] include/linux/sched/cpufreq.h
 
 ## `THERMAL`
 
@@ -716,6 +906,21 @@ W:	http://linux-meson.com/
 F:	Documentation/devicetree/bindings/thermal/amlogic,thermal.yaml
 F:	drivers/thermal/amlogic_thermal.c
 ```
+- [ ] Documentation/ABI/testing/sysfs-class-thermal
+
+- [ ] Documentation/admin-guide/thermal/index.rst
+- [ ] Documentation/admin-guide/thermal/intel_powerclamp.rst
+- [ ] Documentation/admin-guide/thermal/intel_thermal_throttle.rst
+
+- [ ] Documentation/driver-api/thermal/cpu-cooling-api.rst
+- [ ] Documentation/driver-api/thermal/cpu-idle-cooling.rst
+- [ ] Documentation/driver-api/thermal/index.rst
+- [ ] Documentation/driver-api/thermal/power_allocator.rst
+- [ ] Documentation/driver-api/thermal/sysfs-api.rst
+
+- [ ] include/linux/cpu_cooling.h
+- [ ] include/linux/thermal.h
+- [ ] include/uapi/linux/thermal.h
 
 
 ## `REAL TIME CLOCK (RTC) SUBSYSTEM`
@@ -735,6 +940,9 @@ F:	include/uapi/linux/rtc.h
 F:	tools/testing/selftests/rtc/
 ```
 
+- [ ] Documentation/admin-guide/rtc.rst
+- [ ] include/linux/rtc.h
+- [ ] include/linux/rtc/rtc-omap.h
 
 ## `RESET CONTROLLER FRAMEWORK`
 
@@ -778,6 +986,7 @@ F:	include/dt-bindings/phy/
 F:	include/linux/phy/
 ```
 
+#skip 
 
 ## `HARDWARE SPINLOCK CORE`
 
@@ -793,6 +1002,8 @@ F:	drivers/hwspinlock/
 F:	include/linux/hwspinlock.h
 ```
 
+- [ ] Documentation/locking/hwspinlock.rst
+- [ ] include/linux/hwspinlock.h
 
 ## `MAILBOX API`
 
@@ -808,6 +1019,8 @@ F:	include/linux/mailbox_client.h
 F:	include/linux/mailbox_controller.h
 ```
 
+- [ ] include/linux/mailbox_client.h
+- [ ] include/linux/mailbox_controller.h
 
 ## `TEE SUBSYSTEM`
 
@@ -826,12 +1039,38 @@ F:	include/linux/tee_drv.h
 F:	include/uapi/linux/tee.h
 ```
 
+- [ ] Documentation/driver-api/tee.rst
+- [ ] Documentation/userspace-api/tee.rst
+- [ ] include/linux/tee_core.h
+- [ ] include/linux/tee_drv.h
+- [ ] include/uapi/linux/tee.h
 
 ## `CAN NETWORK LAYER`
 
 ```
+M:	Oliver Hartkopp <socketcan@hartkopp.net>
+M:	Marc Kleine-Budde <mkl@pengutronix.de>
+L:	linux-can@vger.kernel.org
+S:	Maintained
+W:	https://github.com/linux-can
+T:	git git://git.kernel.org/pub/scm/linux/kernel/git/mkl/linux-can.git
+T:	git git://git.kernel.org/pub/scm/linux/kernel/git/mkl/linux-can-next.git
+F:	Documentation/networking/can.rst
+F:	Documentation/networking/iso15765-2.rst
+F:	include/linux/can/can-ml.h
+F:	include/linux/can/core.h
+F:	include/linux/can/skb.h
+F:	include/net/netns/can.h
+F:	include/uapi/linux/can.h
+F:	include/uapi/linux/can/bcm.h
+F:	include/uapi/linux/can/gw.h
+F:	include/uapi/linux/can/isotp.h
+F:	include/uapi/linux/can/raw.h
+F:	net/can/
+F:	net/sched/em_canid.c
+F:	tools/testing/selftests/net/can/
 ```
-
+#skip
 
 ## `WATCHDOG DEVICE DRIVERS`
 
@@ -849,7 +1088,17 @@ F:	include/linux/watchdog.h
 F:	include/trace/events/watchdog.h
 F:	include/uapi/linux/watchdog.h
 ```
-
+- [ ] Documentation/watchdog/convert_drivers_to_kernel_api.rst
+- [ ] Documentation/watchdog/hpwdt.rst
+- [ ] Documentation/watchdog/index.rst
+- [ ] Documentation/watchdog/mlx-wdt.rst
+- [ ] Documentation/watchdog/pcwd-watchdog.rst
+- [ ] Documentation/watchdog/watchdog-api.rst
+- [ ] Documentation/watchdog/watchdog-kernel-api.rst
+- [ ] Documentation/watchdog/watchdog-parameters.rst
+- [ ] Documentation/watchdog/watchdog-pm.rst
+- [ ] Documentation/watchdog/wdt.rst
+- [ ] include/linux/watchdog.h
 
 ## `INTERCONNECT API`
 
@@ -867,6 +1116,10 @@ F:	include/linux/interconnect-provider.h
 F:	include/linux/interconnect.h
 ```
 
+- [ ] Documentation/driver-api/interconnect.rst
+- [ ] include/linux/interconnect-clk.h
+- [ ] include/linux/interconnect-provider.h
+- [ ] include/linux/interconnect.h
 
 ## `PWM SUBSYSTEM`
 
@@ -899,29 +1152,55 @@ R:	Michal Wilczynski <m.wilczynski@samsung.com>
 F:	drivers/pwm/*.rs
 ```
 
-
+- [ ] Documentation/driver-api/pwm.rst
+- [ ] include/linux/pwm.h
 
 ## `FPGA MANAGER FRAMEWORK`
 
 ```
-```
-
-
-## `IEEE 802.15.4 SUBSYSTEM`
-
-```
+M:	Moritz Fischer <mdf@kernel.org>
+M:	Xu Yilun <yilun.xu@intel.com>
+R:	Tom Rix <trix@redhat.com>
+L:	linux-fpga@vger.kernel.org
+S:	Maintained
+Q:	http://patchwork.kernel.org/project/linux-fpga/list/
+T:	git git://git.kernel.org/pub/scm/linux/kernel/git/fpga/linux-fpga.git
+F:	Documentation/devicetree/bindings/fpga/
+F:	Documentation/driver-api/fpga/
+F:	Documentation/fpga/
+F:	drivers/fpga/
+F:	include/linux/fpga/
 ```
 
 
 ## `NVMEM FRAMEWORK`
 
 ```
+M:	Srinivas Kandagatla <srini@kernel.org>
+S:	Maintained
+T:	git git://git.kernel.org/pub/scm/linux/kernel/git/srini/nvmem.git
+F:	Documentation/ABI/stable/sysfs-bus-nvmem
+F:	Documentation/devicetree/bindings/nvmem/
+F:	drivers/nvmem/
+F:	include/dt-bindings/nvmem/
+F:	include/linux/nvmem-consumer.h
+F:	include/linux/nvmem-provider.h
 ```
 
 
 ## `NAND FLASH SUBSYSTEM`
 
 ```
+M:	Miquel Raynal <miquel.raynal@bootlin.com>
+R:	Richard Weinberger <richard@nod.at>
+L:	linux-mtd@lists.infradead.org
+S:	Maintained
+W:	http://www.linux-mtd.infradead.org/
+Q:	http://patchwork.ozlabs.org/project/linux-mtd/list/
+C:	irc://irc.oftc.net/mtd
+T:	git git://git.kernel.org/pub/scm/linux/kernel/git/mtd/linux.git nand/next
+F:	drivers/mtd/nand/
+F:	include/linux/mtd/*nand*.h
 ```
 
 
@@ -979,6 +1258,7 @@ F:	tools/include/vdso/bits.h
 F:	tools/lib/bitmap.c
 F:	tools/lib/find_bit.c
 ```
+
 
 ## `ATOMIC INFRASTRUCTURE`
 
