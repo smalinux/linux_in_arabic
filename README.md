@@ -960,16 +960,19 @@ F:	include/linux/reset/
 K:	\b(?:devm_|of_)?reset_control(?:ler_[a-z]+|_[a-z_]+)?\b
 ```
 - [ ] [reset.rst](Documentation/driver-api/reset.rst.md)
-- [ ] [reset.rst](Documentation/driver-api/reset.rst.md)
-
 - [ ] [reset-controller.h](include/linux/reset-controller.h.md)
 - [ ] [reset.h](include/linux/reset.h.md)
 - [ ] [reset-simple.h](include/linux/reset/reset-simple.h.md)
 - [ ] [sunxi.h](include/linux/reset/sunxi.h.md)
-
 - [ ] [core.c](drivers/reset/core.c.md)
-
 - [ ] [reset-gpio.c](drivers/reset/reset-gpio.c.md)
+
+- [ ] [reset-meson-audio-arb.c](drivers/reset/amlogic/reset-meson-audio-arb.c.md)
+- [ ] [reset-meson-aux.c](drivers/reset/amlogic/reset-meson-aux.c.md)
+- [ ] [reset-meson.c](drivers/reset/amlogic/reset-meson.c.md)
+- [ ] [reset-meson-common.c](drivers/reset/amlogic/reset-meson-common.c.md)
+- [ ] [reset-meson.h](drivers/reset/amlogic/reset-meson.h.md)
+
 
 ## `GENERIC PHY FRAMEWORK`
 
