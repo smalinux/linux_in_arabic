@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "README.md",
+                "file": "commits/ffae8475b90c045ca508675794c08a0c8c12d202.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "README"
+              "title": "ffae8475b90c045ca508675794c08a0c8c12d202"
             }
           }
         ]
@@ -74,8 +74,7 @@
               "title": "Bookmarks"
             }
           }
-        ],
-        "currentTab": 1
+        ]
       }
     ],
     "direction": "horizontal",
@@ -196,6 +195,10 @@
   },
   "active": "87d8bfb909d07b5c",
   "lastOpenFiles": [
+    "commits/7dc7eeb8c0875c4bb7607509d9270ad3fd726b6b.md",
+    "commits/ffae8475b90c045ca508675794c08a0c8c12d202.md",
+    "README.md",
+    "commits",
     "drivers/reset/amlogic/reset-meson.h.md",
     "drivers/reset/amlogic/reset-meson-common.c.md",
     "drivers/reset/amlogic/reset-meson.c.md",
@@ -224,14 +227,10 @@
     "include/linux/mdio.h.md",
     "include/linux/mii.h.md",
     "include/linux/platform_data/mdio-gpio.h.md",
-    "include/linux/phy_fixed.h.md",
-    "include/linux/mdio/mdio-regmap.h.md",
     "include/linux/mdio",
-    "include/linux/phylib_stubs.h.md",
     "include/linux/platform_data",
     "include/linux/lsm",
     "Documentation/core-api",
-    "include/linux/device",
     "assets/Pasted image 20260223223812.png",
     "Pasted image 20260223223716.png",
     "Pasted image 20260223223642.png",

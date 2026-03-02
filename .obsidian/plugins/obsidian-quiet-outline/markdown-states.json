@@ -511,5 +511,49 @@
       "item-3-3",
       "item-2-18"
     ]
+  },
+  "commits/7dc7eeb8c0875c4bb7607509d9270ad3fd726b6b.md": {
+    "scroll": 0,
+    "cursor": {
+      "from": {
+        "line": 0,
+        "ch": 0
+      },
+      "to": {
+        "line": 0,
+        "ch": 0
+      }
+    },
+    "expandedKeys": [
+      "item-1-0",
+      "item-2-2",
+      "item-2-6"
+    ]
+  },
+  "commits/ffae8475b90c045ca508675794c08a0c8c12d202.md": {
+    "scroll": 0,
+    "cursor": {
+      "from": {
+        "line": 0,
+        "ch": 0
+      },
+      "to": {
+        "line": 0,
+        "ch": 0
+      }
+    },
+    "expandedKeys": [
+      "item-2-0",
+      "item-2-5",
+      "item-3-8",
+      "item-3-15",
+      "item-2-14",
+      "item-3-21",
+      "item-4-23",
+      "item-4-26",
+      "item-3-34",
+      "item-3-39",
+      "item-2-43"
+    ]
   }
 }
