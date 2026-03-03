@@ -182,7 +182,7 @@ F:	tools/spi/
 - [ ] [butterfly.rst](Documentation/spi/butterfly.rst.md)
 - [ ] [spidev.rst](Documentation/spi/spidev.rst.md)
 - [ ] [spi-summary.rst](Documentation/spi/spi-summary.rst.md)
-
+- [ ] 
 - [ ] [ad7877.h](include/linux/spi/ad7877.h.md)
 - [ ] [eeprom.h](include/linux/spi/eeprom.h.md)
 - [ ] [flash.h](include/linux/spi/flash.h.md)
@@ -192,7 +192,7 @@ F:	tools/spi/
 - [ ] [spi-mem.h](include/linux/spi/spi-mem.h.md)
 - [ ] [spi.h](include/uapi/linux/spi/spi.h.md)
 - [ ] [spidev.h](include/uapi/linux/spi/spidev.h.md)
-
+- [ ] 
 - [ ] [spi.c](drivers/spi/spi.c.md)
 - [ ] [spi-mem.c](drivers/spi/spi-mem.c.md)
 - [ ] [spi-mux.c](drivers/spi/spi-mux.c.md)
@@ -413,6 +413,7 @@ F:	include/linux/pinctrl/
 ```
 
 - [ ] [pin-control.rst](Documentation/driver-api/pin-control.rst.md)
+- [ ] 
 - [ ] [devinfo.h](include/linux/pintrl/devinfo.h.md)
 - [ ] [machine.h](include/linux/pintrl/machine.h.md)
 - [ ] [pinconf-generic.h](include/linux/pinctrl/pinconf-generic.h.md)
@@ -420,24 +421,25 @@ F:	include/linux/pinctrl/
 - [ ] [pinctrl.h](include/linux/pintrl/pinctrl.h.md)
 - [ ] [pinctrl-state.h](include/linux/pinctrl/pinctrl-state.h.md)
 - [ ] [pinmux.h](include/linux/pinctrl/pinmux.h.md)
-- [ ] [pin-control.rst](Documentation/driver-api/pin-control.rst.md)
+- [ ] 
 - [ ] [core.h](drivers/pinctrl/core.h.md) -- [core.c](drivers/pinctrl/core.c.md)
 - [ ] [pinctrl-utils.c](drivers/pinctrl/pinctrl-utils.c.md)
 - [ ] [pinmux.h](drivers/pinctrl/pinmux.h.md) -- [pinmux.c](drivers/pinctrl/pinmux.c.md)
 - [ ] [pinconf.c](drivers/pinctrl/pinconf.c.md)
 - [ ] [pinconf-generic.c](drivers/pinctrl/pinconf-generic.c.md)
 - [ ] [devicetree.c](drivers/pinctrl/devicetree.c.md)
-- [ ] drivers/pinctrl/meson/pinctrl-amlogic-a4.c
-- [ ] drivers/pinctrl/meson/pinctrl-amlogic-c3.c
-- [ ] drivers/pinctrl/meson/pinctrl-amlogic-t7.c
-- [ ] drivers/pinctrl/meson/pinctrl-meson8b.c
-- [ ] drivers/pinctrl/meson/pinctrl-meson8.c
-- [ ] drivers/pinctrl/meson/pinctrl-meson8-pmx.c drivers/pinctrl/meson/pinctrl-meson8-pmx.h
-- [ ] drivers/pinctrl/meson/pinctrl-meson-a1.c
-- [ ] drivers/pinctrl/meson/pinctrl-meson-axg.c
-- [ ] drivers/pinctrl/meson/pinctrl-meson-axg-pmx.c drivers/pinctrl/meson/pinctrl-meson-axg-pmx.h
-- [ ] drivers/pinctrl/meson/pinctrl-meson.c
-- [ ] drivers/pinctrl/meson/pinctrl-meson.h
+- [ ] 
+- [ ] [pinctrl-amlogic-a4.c](drivers/pinctrl/meson/pinctrl-amlogic-a4.c.md)
+- [ ] [pinctrl-amlogic-c3.c](drivers/pinctrl/meson/pinctrl-amlogic-c3.c.md)
+- [ ] [pinctrl-amlogic-t7.c](drivers/pinctrl/meson/pinctrl-amlogic-t7.c.md)
+- [ ] [pinctrl-meson8b.c](drivers/pinctrl/meson/pinctrl-meson8b.c.md)
+- [ ] [pinctrl-meson8.c](drivers/pinctrl/meson/pinctrl-meson8.c.md)
+- [ ] [pinctrl-meson8-pmx.c](drivers/pinctrl/meson/pinctrl-meson8-pmx.c.md)
+- [ ] [pinctrl-meson-a1.c](drivers/pinctrl/meson/pinctrl-meson-a1.c.md)
+- [ ] [pinctrl-meson-axg.c](drivers/pinctrl/meson/pinctrl-meson-axg.c.md)
+- [ ] [pinctrl-meson-axg-pmx.c](drivers/pinctrl/meson/pinctrl-meson-axg-pmx.c.md)
+- [ ] [pinctrl-meson.c](drivers/pinctrl/meson/pinctrl-meson.c.md)
+- [ ] [pinctrl-meson.h](drivers/pinctrl/meson/pinctrl-meson.h.md)
 
 ## `MEMORY MANAGEMENT - CORE`
 
@@ -1670,3 +1672,4 @@ F:	tools/testing/radix-tree
 - [ ] whole mailing lists
 - [ ] kernelnewbies
 - [ ] elinux.org
+____
