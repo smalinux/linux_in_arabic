@@ -587,7 +587,7 @@ F:	kernel/configs/nopm.config
 - [ ] include/linux/intel_rapl.h
 - [ ] include/linux/pm.h
 - [ ] include/linux/powercap.h
-
+- [ ] 
 - [ ] include/linux/pm_clock.h
 - [ ] include/linux/pm_domain.h
 - [ ] include/linux/pm_opp.h
@@ -1673,3 +1673,12 @@ F:	tools/testing/radix-tree
 - [ ] kernelnewbies
 - [ ] elinux.org
 ____
+
+# Random
+### PHY
+- [ ] drivers/net/ethernet/stmicro/stmmac/dwmac-sun8i.c
+- [ ] drivers/net/ethernet/stmicro/stmmac/dwmac-sunxi.c
+- [ ] drivers/net/ethernet/allwinner/sun4i-emac.c
+
+#### RESET
+- [ ] drivers/reset/reset-sunxi.c
