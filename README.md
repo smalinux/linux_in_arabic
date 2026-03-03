@@ -413,7 +413,6 @@ F:	include/linux/pinctrl/
 ```
 
 - [ ] [pin-control.rst](Documentation/driver-api/pin-control.rst.md)
-
 - [ ] [devinfo.h](include/linux/pintrl/devinfo.h.md)
 - [ ] [machine.h](include/linux/pintrl/machine.h.md)
 - [ ] [pinconf-generic.h](include/linux/pinctrl/pinconf-generic.h.md)
@@ -422,14 +421,23 @@ F:	include/linux/pinctrl/
 - [ ] [pinctrl-state.h](include/linux/pinctrl/pinctrl-state.h.md)
 - [ ] [pinmux.h](include/linux/pinctrl/pinmux.h.md)
 - [ ] [pin-control.rst](Documentation/driver-api/pin-control.rst.md)
-
 - [ ] [core.h](drivers/pinctrl/core.h.md) -- [core.c](drivers/pinctrl/core.c.md)
 - [ ] [pinctrl-utils.c](drivers/pinctrl/pinctrl-utils.c.md)
 - [ ] [pinmux.h](drivers/pinctrl/pinmux.h.md) -- [pinmux.c](drivers/pinctrl/pinmux.c.md)
 - [ ] [pinconf.c](drivers/pinctrl/pinconf.c.md)
 - [ ] [pinconf-generic.c](drivers/pinctrl/pinconf-generic.c.md)
 - [ ] [devicetree.c](drivers/pinctrl/devicetree.c.md)
-
+- [ ] drivers/pinctrl/meson/pinctrl-amlogic-a4.c
+- [ ] drivers/pinctrl/meson/pinctrl-amlogic-c3.c
+- [ ] drivers/pinctrl/meson/pinctrl-amlogic-t7.c
+- [ ] drivers/pinctrl/meson/pinctrl-meson8b.c
+- [ ] drivers/pinctrl/meson/pinctrl-meson8.c
+- [ ] drivers/pinctrl/meson/pinctrl-meson8-pmx.c drivers/pinctrl/meson/pinctrl-meson8-pmx.h
+- [ ] drivers/pinctrl/meson/pinctrl-meson-a1.c
+- [ ] drivers/pinctrl/meson/pinctrl-meson-axg.c
+- [ ] drivers/pinctrl/meson/pinctrl-meson-axg-pmx.c drivers/pinctrl/meson/pinctrl-meson-axg-pmx.h
+- [ ] drivers/pinctrl/meson/pinctrl-meson.c
+- [ ] drivers/pinctrl/meson/pinctrl-meson.h
 
 ## `MEMORY MANAGEMENT - CORE`
 

@@ -150,20 +150,18 @@
     "expandedKeys": []
   },
   "README.md": {
-    "scroll": 731.374255952381,
+    "scroll": 407.0238095238095,
     "cursor": {
       "from": {
-        "line": 955,
-        "ch": 29
+        "line": 429,
+        "ch": 48
       },
       "to": {
-        "line": 955,
-        "ch": 29
+        "line": 429,
+        "ch": 48
       }
     },
-    "expandedKeys": [
-      "item-2-14"
-    ]
+    "expandedKeys": []
   },
   "Untitled.md": {
     "scroll": 0,
@@ -554,6 +552,22 @@
       "item-3-34",
       "item-3-39",
       "item-2-43"
+    ]
+  },
+  "Documentation/driver-api/pin-control.rst.md": {
+    "scroll": 0,
+    "cursor": {
+      "from": {
+        "line": 0,
+        "ch": 0
+      },
+      "to": {
+        "line": 0,
+        "ch": 0
+      }
+    },
+    "expandedKeys": [
+      "item-2-0"
     ]
   }
 }
