@@ -91,7 +91,7 @@ K:	devm_gpiod_unhinge
 
 - [ ] [gpio.h](include/linux/gpio.h.md)
 - [ ] [of_gpio.h](include/linux/of_gpio.h.md)
-
+- [ ] -
 - [ ] [aspeed.h](include/linux/aspeed.h.md)
 - [ ] [consumer.h](include/linux/consumer.h.md)
 - [ ] [driver.h](include/linux/driver.h.md)
@@ -102,7 +102,7 @@ K:	devm_gpiod_unhinge
 - [ ] [gpio-reg.h](include/linux/gpio-reg.h.md)
 - [ ] [property.h](include/linux/property.h.md)
 - [ ] [regmap.h](include/linux/regmap.h.md)
-
+- [ ] -
 - [ ] [gpiolib.c](drivers/gpio/gpiolib.c.md)
 - [ ] [gpiolib-cdev.h](drivers/gpio/gpiolib-cdev.h.md)
 - [ ] [gpiolib-cdev.h](drivers/gpio/gpiolib-cdev.h.md)
@@ -113,6 +113,10 @@ K:	devm_gpiod_unhinge
 - [ ] [gpio-generic.c](drivers/gpio/gpio-generic.c.md)
 - [ ] [gpio-mmio.c](drivers/gpio/gpio-mmio.c.md)
 - [ ] [gpiolib.h](drivers/gpio/gpiolib.h.md)
+- [ ] -
+- [ ] gpio aggregator: 
+- [ ] https://bootlin.com/blog/gpio-aggregator-a-virtual-gpio-chip/
+- [ ] 
 
 
 ## `I2C SUBSYSTEM`
@@ -584,17 +588,17 @@ F:	include/linux/powercap.h
 F:	kernel/configs/nopm.config
 ```
 
-- [ ] include/linux/intel_rapl.h
-- [ ] include/linux/pm.h
-- [ ] include/linux/powercap.h
+- [ ] [intel_rapl.h](include/linux/intel_rapl.h.md)
+- [ ] [pm.h](include/linux/pm.h.md)
+- [ ] [powercap.h](include/linux/powercap.h.md)
 - [ ] 
-- [ ] include/linux/pm_clock.h
-- [ ] include/linux/pm_domain.h
-- [ ] include/linux/pm_opp.h
-- [ ] include/linux/pm_qos.h
-- [ ] include/linux/pm_runtime.h
-- [ ] include/linux/pm_wakeirq.h
-- [ ] include/linux/pm_wakeup.h
+- [ ] [pm_clock.h](include/linux/pm_clock.h.md)
+- [ ] [pm_domain.h](include/linux/pm_domain.h.md)
+- [ ] [pm_opp.h](external/linux/include/linux/pm_opp.h.md)
+- [ ] [pm_qos.h](external/linux/include/linux/pm_qos.h.md)
+- [ ] [pm_runtime.h](include/linux/pm_runtime.h.md)
+- [ ] [pm_wakeirq.h](include/linux/pm_wakeirq.h.md)
+- [ ] [pm_wakeup.h](include/linux/pm_wakeup.h.md)
 
 ## `COMMON CLK FRAMEWORK` ✅⭐
 
