@@ -114,9 +114,23 @@ K:	devm_gpiod_unhinge
 - [ ] [gpio-mmio.c](drivers/gpio/gpio-mmio.c.md)
 - [ ] [gpiolib.h](drivers/gpio/gpiolib.h.md)
 - [ ] -
-- [ ] gpio aggregator: 
-- [ ] https://bootlin.com/blog/gpio-aggregator-a-virtual-gpio-chip/
-- [ ] 
+- [ ] gpio aggregator: [gpio-aggregator.c](drivers/gpio/gpio-aggregator.c.md) --- [gpio-aggregator.rst](Documentation/admin-guide/gpio/gpio-aggregator.rst.md)
+	- [ ] https://bootlin.com/blog/gpio-aggregator-a-virtual-gpio-chip/
+- [ ] GPIO hog
+	- [ ] https://stackoverflow.com/questions/45911995/what-is-gpio-hog-in-device-tree
+	- [ ] https://github.com/devicetree-org/dt-schema/blob/main/dtschema/schemas/gpio/gpio-hog.yaml
+	- [ ] -
+- [ ] [gpio-exar.txt](Documentation/devicetree/bindings/gpio/gpio-exar.txt.md)
+- [ ] [gpio-grgpio.txt](Documentation/devicetree/bindings/gpio/gpio-grgpio.txt.md)
+- [ ] [gpio-thunderx.txt](Documentation/devicetree/bindings/gpio/gpio-thunderx.txt.md)
+- [ ] [gpio.txt](Documentation/devicetree/bindings/gpio/gpio.txt.md)
+- [ ] [gpio-adnp.txt](Documentation/devicetree/bindings/gpio/gpio-adnp.txt.md)
+- [ ] [board.rst](Documentation/driver-api/gpio/board.rst.md)
+- [ ] [machine.h](include/linux/gpio/machine.h.md)
+- [ ] [checks.c](scripts/dtc/checks.c.md)
+- [ ] [property.c](drivers/of/property.c.md)
+
+
 
 
 ## `I2C SUBSYSTEM`
