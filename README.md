@@ -1680,6 +1680,35 @@ F:	tools/testing/radix-tree
 - [ ] [idr.h](include/linux/idr.h.md)
 - [ ] [xarray.h](include/linux/xarray.h.md)
 
+## `REGISTER MAP ABSTRACTION`
+```
+M:	Mark Brown <broonie@kernel.org>
+L:	linux-kernel@vger.kernel.org
+S:	Supported
+T:	git git://git.kernel.org/pub/scm/linux/kernel/git/broonie/regmap.git
+F:	Documentation/devicetree/bindings/regmap/
+F:	drivers/base/regmap/
+F:	include/linux/regmap.h
+```
+
+- [ ] [regmap.h](include/linux/regmap.h.md)
+
+
+## `WORKQUEUE`
+```
+M:	Tejun Heo <tj@kernel.org>
+R:	Lai Jiangshan <jiangshanlai@gmail.com>
+S:	Maintained
+T:	git git://git.kernel.org/pub/scm/linux/kernel/git/tj/wq.git
+F:	Documentation/core-api/workqueue.rst
+F:	include/linux/workqueue.h
+F:	kernel/workqueue.c
+F:	kernel/workqueue_internal.h
+```
+
+- [ ] [workqueue.rst](Documentation/core-api/workqueue.rst.md)
+- [ ] [workqueue.h](include/linux/workqueue.h.md)
+
 # TODO
 - [ ] https://docs.kernel.org/core-api/kernel-api.html
 - [ ] Linux notifications subsystem: include/linux/notifier.h

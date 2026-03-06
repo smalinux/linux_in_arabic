@@ -195,6 +195,8 @@
   },
   "active": "e0e1e770d577effd",
   "lastOpenFiles": [
+    "include/linux/workqueue.h.md",
+    "Documentation/core-api/workqueue.rst.md",
     "scripts/dtc/checks.c.md",
     "scripts/dtc",
     "scripts",
@@ -229,8 +231,6 @@
     "drivers/net/ethernet/allwinner/sun4i-emac.c.md",
     "drivers/net/ethernet/allwinner",
     "drivers/net/ethernet/stmicro/stmmac/dwmac-sun8i.c.md",
-    "drivers/net/ethernet/stmicro/stmmac/dwmac-sunxi.c.md",
-    "drivers/pinctrl/meson/pinctrl-amlogic-t7.c.md",
     "assets/Pasted image 20260223223812.png",
     "Pasted image 20260223223716.png",
     "Pasted image 20260223223642.png",
