@@ -1,330 +1,300 @@
 ## Phase 1: الصورة الكبيرة ببساطة
 
-### المشكلة اللي بيحلها الـ fwnode
+### الـ Subsystem
 
-تخيل عندك جهاز كمبيوتر. الـ kernel لازم يعرف: "فين الـ I2C controller؟ وعنده كام interrupt؟ وبيشتغل بأي clock frequency؟" — يعني لازم يعرف كل التفاصيل التقنية لكل قطعة hardware قبل ما يشغلها.
-
-المشكلة: في Linux بيتعامل مع نوعين مختلفين من الأنظمة:
-
-- **أنظمة مبنية على Device Tree (DT)**: زي الـ ARM boards والـ embedded systems — بتوصف الـ hardware في ملف نصي بصيغة DT.
-- **أنظمة مبنية على ACPI**: زي أي لابتوب أو PC — الـ BIOS/UEFI بيوفر الـ ACPI tables اللي بتوصف الـ hardware.
-
-المشكلة الكبيرة: الـ driver بتاع مثلاً chip I2C معين المفروض يشتغل على ARM وعلى x86 بدون ما يهتم هو نفسه بالفرق ده. مش معقول كل driver يكتب كود مرتين — مرة يقرأ من DT ومرة من ACPI.
-
-**الحل: الـ fwnode (firmware node)** — طبقة تجريد موحدة فوق الاتنين.
+**الـ `fwnode.h`** ينتمي لـ subsystem اسمه **SOFTWARE NODES AND DEVICE PROPERTIES** — وهو جزء من **Driver Core** في Linux kernel. بتلاقيه مذكور في MAINTAINERS تحت عنوانين: **DRIVER CORE, KOBJECTS, DEBUGFS AND SYSFS** و **SOFTWARE NODES AND DEVICE PROPERTIES**.
 
 ---
 
-### القصة بالكامل
+### القصة من الأول
 
-#### بدون fwnode (القديم):
+تخيل إنك بتشتري laptop جديد. جوّاه عشرات الـ hardware components: Bluetooth chip, Wi-Fi card, camera, sensors. كل component ده محتاج driver. الـ driver محتاج يعرف معلومات عن الـ hardware: إيه الـ interrupts بتاعته؟ بيتكلم على أي bus? هل بيدعم DMA? إيه الـ GPIO pins المربوطة بيه؟
 
-```
-Driver I2C
-    ├── #ifdef CONFIG_OF  → يقرأ من Device Tree
-    └── #ifdef CONFIG_ACPI → يقرأ من ACPI
-```
+الـ Linux بيشتغل على ملايين الأجهزة المختلفة. في عالم الـ embedded و ARM، البيانات دي بتيجي من **Device Tree** — ملف نصي بيوصف الـ hardware. في عالم الـ x86 و UEFI، البيانات دي بتيجي من **ACPI** — جداول بيكتبها الـ BIOS/firmware. في حالات تانية (testing، hotplug، platforms غريبة)، البيانات دي ممكن تيجي من **Software Nodes** — بيانات بتتعمل في memory جوّا الكود نفسه.
 
-كل driver فيه شرط وكود مكرر. الصيانة جحيم.
-
-#### بعد fwnode (الحديث):
-
-```
-Driver I2C
-    └── fwnode_property_read_u32("clock-frequency", &freq)
-              ↓
-        fwnode_handle  ← pointer موحد
-              ↓
-        ┌────────────┐
-        │  OF (DT)   │  أو  │  ACPI  │  أو  │  Software Node  │
-        └────────────┘       └────────┘       └─────────────────┘
-```
-
-الـ driver بيكلم الـ `fwnode_handle` فقط، وهو بيحول للـ backend الصح تلقائياً عبر الـ **vtable** (جدول دوال افتراضية).
+المشكلة الكبيرة: كل source من دول بيتكلم بلغة مختلفة. الـ driver اللي بيقرأ temperature sensor محتاج يعرف: هل البيانات جاية من Device Tree ولا ACPI ولا Software Node? لو كان كل driver لازم يتعامل مع الفروق دي بنفسه، هيبقى في كود مكرر ومعقد في كل مكان.
 
 ---
 
-### الـ fwnode.h بالتحديد — إيه اللي فيه؟
+### الحل: الـ `fwnode_handle` — الـ Universal Translator
 
-الـ `fwnode.h` هو الـ **header الأساسي** اللي بيعرّف:
+**الـ `fwnode.h`** بيعرّف **abstraction layer** — طبقة وسطى موحّدة. أي مصدر بيانات firmware (DT, ACPI, swnode) بيحوّل نفسه لـ `fwnode_handle`. الـ driver بعدين بيتكلم مع `fwnode_handle` بس، من غير ما يحتاج يعرف هو جاي من فين.
 
-#### 1. الـ `struct fwnode_handle` — القلب
+```
+┌─────────────┐   ┌──────────────┐   ┌──────────────────┐
+│ Device Tree │   │     ACPI     │   │  Software Nodes  │
+│  (OF nodes) │   │  (DSDT/SSDT) │   │  (in-memory)     │
+└──────┬──────┘   └──────┬───────┘   └────────┬─────────┘
+       │                 │                     │
+       ▼                 ▼                     ▼
+┌──────────────────────────────────────────────────────┐
+│              fwnode_handle  (الواجهة الموحّدة)        │
+│         struct fwnode_handle + fwnode_operations     │
+└──────────────────────────────────────────────────────┘
+                          │
+                          ▼
+               ┌──────────────────┐
+               │   Device Driver  │
+               │  (لا يهمه المصدر) │
+               └──────────────────┘
+```
+
+---
+
+### إيه اللي في الملف بالظبط؟
+
+#### 1. **`struct fwnode_handle`** — الـ Handle نفسه
+
+ده الـ object الأساسي. بمثابة "بطاقة تعريف" لأي firmware node:
 
 ```c
 struct fwnode_handle {
-    struct fwnode_handle *secondary; /* fallback لو الـ primary فشل */
-    const struct fwnode_operations *ops; /* الـ vtable */
+    struct fwnode_handle *secondary; /* fallback لو الـ primary مش لاقي المعلومة */
+    const struct fwnode_operations *ops; /* الـ vtable - مين بيعمل إيه */
     struct device *dev;              /* الـ device المرتبط بيه */
-    struct list_head suppliers;      /* من بيوفرله resources */
-    struct list_head consumers;      /* مين بيستهلك resources منه */
+    struct list_head suppliers;      /* مين بيوفرّله resources */
+    struct list_head consumers;      /* مين بياخد منه resources */
     u8 flags;
 };
 ```
 
-ده الـ **handle** — زي pointer بس موحد. كل node في الـ firmware (DT node أو ACPI device) ليه `fwnode_handle` خاص بيه.
+الفكرة الذكية هنا: الـ `secondary` — لو device عنده بيانات في ACPI بس بعض البيانات ناقصة، ممكن يعمل chain مع swnode كـ fallback.
 
-#### 2. الـ `struct fwnode_operations` — الـ vtable
+#### 2. **`struct fwnode_operations`** — الـ Virtual Table
+
+ده الـ vtable بتاع الـ fwnode. كل implementation (OF, ACPI, swnode) بتعبّي الـ function pointers دي:
 
 ```c
 struct fwnode_operations {
-    struct fwnode_handle *(*get)(struct fwnode_handle *fwnode);
-    void (*put)(struct fwnode_handle *fwnode);
-    bool (*property_present)(const struct fwnode_handle *, const char *);
-    int  (*property_read_int_array)(...);
-    /* graph traversal, child iteration, references ... */
+    struct fwnode_handle *(*get)(...);           /* reference counting */
+    void (*put)(...);
+    bool (*device_is_available)(...);            /* هل الـ device موجود ومتاح؟ */
+    bool (*property_present)(...);               /* هل الـ property موجودة؟ */
+    bool (*property_read_bool)(...);             /* اقرأ قيمة boolean */
+    int (*property_read_int_array)(...);         /* اقرأ array من integers */
+    int (*property_read_string_array)(...);      /* اقرأ array من strings */
+    struct fwnode_handle *(*get_parent)(...);    /* الـ parent node */
+    struct fwnode_handle *(*get_next_child_node)(...); /* iterate على الأبناء */
+    /* ... graph endpoints, IRQs, MMIO, links ... */
+    int (*add_links)(...);                       /* ابني dependency links */
 };
 ```
 
-ده جدول function pointers — زي الـ virtual functions في C++. كل backend (OF / ACPI / swnode) بيملي الجدول ده بالتنفيذ الخاص بيه.
-
-#### 3. الـ `struct fwnode_link` — الـ dependency graph
+#### 3. **`struct fwnode_link`** — الـ Dependency Graph
 
 ```c
 struct fwnode_link {
-    struct fwnode_handle *supplier;  /* اللي بيوفر resource */
-    struct fwnode_handle *consumer;  /* اللي بيستهلك */
+    struct fwnode_handle *supplier;  /* اللي بيوفّر (مثلاً: clock, regulator) */
+    struct fwnode_handle *consumer;  /* اللي بياخد */
     u8 flags;
 };
 ```
 
-الـ kernel بيبني graph من العلاقات دي عشان يعرف يشغّل الـ devices بالترتيب الصح — الـ supplier الأول، بعدين الـ consumer.
+ده بيخلّي الكيرنل يعرف "الـ device A مش هيشتغل قبل الـ device B". مهم جداً لـ **probe ordering** — إيه اللي لازم يتحمّل قبل إيه.
 
-#### 4. الـ `struct fwnode_endpoint` — توصيل الكاميرات والـ media
+#### 4. **`struct fwnode_endpoint`** — الـ Media Graph
 
 ```c
 struct fwnode_endpoint {
-    unsigned int port;  /* رقم الـ port */
+    unsigned int port;  /* رقم البورت (مثلاً: camera port 0) */
     unsigned int id;    /* رقم الـ endpoint */
     const struct fwnode_handle *local_fwnode;
 };
 ```
 
-ده بيوصف الـ graph اللي الـ media subsystem بيستخدمه لتوصيل الكاميرا بالـ ISP مثلاً.
+ده بيوصف ازاي الـ hardware components مربوطة ببعض في graph — مهم لـ camera pipelines و media subsystem.
 
-#### 5. الـ Macros للاستدعاء الآمن
+#### 5. **الـ Macros** — الـ Safe Dispatch
 
 ```c
-/* بيتأكد إن الـ fwnode مش NULL وإن الـ op موجودة */
+/* لو الـ fwnode مش عارف يعمل العملية، يرجع error مناسب */
 #define fwnode_call_int_op(fwnode, op, ...)  \
     (fwnode_has_op(fwnode, op) ?             \
-     (fwnode)->ops->op(fwnode, ##__VA_ARGS__) : -ENXIO)
+     (fwnode)->ops->op(fwnode, ...) : -ENXIO)
 ```
 
-بدل ما كل حد يعمل null check يدوي.
+الـ macros دي بتعمل safe dispatch — لو الـ backend مش implement الـ operation، مش هيحصل crash.
 
 ---
 
-### تخيل العملية بمثال حقيقي
-
-**مثال**: driver بتاع sensor temperature على I2C يقرأ الـ `clock-frequency`.
-
-```
-1. الـ Device Tree (ARM):
-   i2c@ff160000 {
-       clock-frequency = <400000>;
-       temp-sensor@48 { ... };
-   };
-
-2. ACPI (x86):
-   Device (TMP) {
-       Method (_CRS) { ... }
-       Name (_DSD, Package {
-           "clock-frequency", 400000
-       })
-   }
-
-3. الـ Driver (نفس الكود على الاتنين):
-   fwnode_property_read_u32(fwnode, "clock-frequency", &freq);
-         ↓
-   fwnode_call_int_op(fwnode, property_read_int_array, ...)
-         ↓
-   لو OF backend → of_property_read_u32()
-   لو ACPI backend → acpi_dev_get_property()
-   لو swnode backend → software_node_get_reference_args()
-```
-
----
-
-### الـ fwnode flags — حالات الـ node
+### الـ Flags: حالة الـ Node
 
 | Flag | المعنى |
-|------|---------|
-| `FWNODE_FLAG_LINKS_ADDED` | اتعمل parse للـ dependency links بتاعته |
-| `FWNODE_FLAG_NOT_DEVICE` | مش مرتبط بـ struct device (node وصفي فقط) |
-| `FWNODE_FLAG_INITIALIZED` | الـ hardware اتهيأ |
-| `FWNODE_FLAG_NEEDS_CHILD_BOUND_ON_ADD` | محتاج أولاده يتشغلوا الأول |
-| `FWNODE_FLAG_BEST_EFFORT` | يحاول يتشغل حتى لو في suppliers مفيهاش driver |
-| `FWNODE_FLAG_VISITED` | اتعمله visit أثناء الـ cycle detection |
+|---|---|
+| `FWNODE_FLAG_LINKS_ADDED` | الـ node اتفحص وتم بناء الـ dependency links بتاعته |
+| `FWNODE_FLAG_NOT_DEVICE` | الـ node ده مش هيتحوّل لـ `struct device` |
+| `FWNODE_FLAG_INITIALIZED` | الـ hardware اتعمّل initialize |
+| `FWNODE_FLAG_NEEDS_CHILD_BOUND_ON_ADD` | محتاج الأبناء يتبندوا الأول قبل ما هو يقدر يشتغل |
+| `FWNODE_FLAG_BEST_EFFORT` | يحاول يـ probe حتى لو في suppliers ناقصين |
 
 ---
 
-### الـ secondary fwnode — ال fallback الذكي
+### قصة حقيقية: Camera على ARM Device
 
-الـ `secondary` في `fwnode_handle` بيخلي الـ kernel يربط اتنين مع بعض:
+تخيل Raspberry Pi عندها camera module مربوط. الـ Device Tree بيقول:
 
 ```
-DT fwnode → secondary → ACPI fwnode
+camera: camera@0 {
+    compatible = "sony,imx219";
+    port {
+        cam_endpoint: endpoint {
+            remote-endpoint = <&csi_endpoint>;
+        };
+    };
+};
 ```
 
-مثلاً لابتوب بيستخدم DT للـ clock لكن ACPI للـ interrupt — الـ kernel يقدر يدور في الاتنين بشفافية تامة.
+1. الـ OF subsystem بيقرأ الـ DT ويعمل `fwnode_handle` لـ `camera@0`.
+2. الـ camera driver بيستخدم `fwnode_property_read_string(fwnode, "compatible", ...)` — مش بيفرق معاه إنه DT ولا ACPI.
+3. الـ `graph_get_next_endpoint` بيمشي على الـ ports والـ endpoints.
+4. الـ `fwnode_link` بيعمل dependency بين الـ camera والـ CSI controller — الـ CSI controller لازم يتـ probe الأول.
+
+نفس الكود هيشتغل على Windows laptop بـ ACPI بدون أي تغيير في الـ driver!
 
 ---
 
-### الـ Subsystems المرتبطة
+### الملفات المكوّنة للـ Subsystem
 
-الـ `fwnode.h` ينتمي لـ **3 subsystems** في نفس الوقت حسب MAINTAINERS:
+#### الـ Core Headers
 
-| Subsystem | الملفات الأساسية |
-|-----------|-----------------|
-| **ACPI** | `drivers/acpi/`, `include/acpi/`, `include/linux/acpi.h` |
-| **Driver Core** | `drivers/base/`, `include/linux/device.h`, `include/linux/property.h` |
-| **Software Nodes & Device Properties** | `drivers/base/property.c`, `drivers/base/swnode.c`, `include/linux/property.h` |
+| الملف | الوظيفة |
+|---|---|
+| `include/linux/fwnode.h` | **الملف ده** — الـ low-level types والـ operations vtable |
+| `include/linux/property.h` | الـ high-level API للـ drivers (ما يستخدمه الـ driver فعلاً) |
 
----
+#### الـ Core Implementations
 
-### الملفات اللي لازم تعرفها
+| الملف | الوظيفة |
+|---|---|
+| `drivers/base/property.c` | الـ unified property API implementation |
+| `drivers/base/swnode.c` | الـ Software Nodes backend (in-memory firmware nodes) |
 
-#### الـ Core (القلب):
+#### الـ Backend Implementations
 
-| الملف | الدور |
-|-------|-------|
-| `include/linux/fwnode.h` | الـ types والـ vtable الأساسية (الملف ده) |
-| `include/linux/property.h` | الـ API العالي المستوى للـ drivers |
-| `drivers/base/property.c` | تنفيذ الـ unified property API |
-| `drivers/base/swnode.c` | الـ Software Node backend |
+| الملف | الوظيفة |
+|---|---|
+| `drivers/of/property.c` | Device Tree (OF) backend — بيـ implement الـ fwnode_operations لـ DT |
+| `drivers/acpi/property.c` | ACPI backend — بيـ implement الـ fwnode_operations لـ ACPI |
 
-#### الـ Backends:
+#### الـ Related Subsystems
 
-| الملف | الـ Backend |
-|-------|------------|
-| `drivers/of/property.c` | Device Tree backend |
-| `drivers/acpi/property.c` | ACPI backend |
-| `drivers/acpi/device_pm.c` | ACPI power management عبر fwnode |
-
-#### الـ Headers المصاحبة:
-
-| الملف | الدور |
-|-------|-------|
-| `include/linux/of.h` | Device Tree API |
-| `include/linux/acpi.h` | ACPI API |
-| `include/linux/bits.h` | BIT() macro للـ flags |
-
----
-
-### الخلاصة
-
-الـ `fwnode.h` هو **عقد التجريد** اللي بيفصل الـ drivers عن طريقة وصف الـ hardware. بدونه كل driver كان هيكتب كوده مرتين — مرة لـ DT ومرة لـ ACPI. بيه، الـ driver بيكلم واجهة واحدة، والـ kernel يختار الـ backend الصح تلقائياً.
+| الملف | الوظيفة |
+|---|---|
+| `drivers/media/v4l2-core/v4l2-fwnode.c` | الـ V4L2 camera graph parsing باستخدام fwnode |
+| `include/media/v4l2-fwnode.h` | الـ V4L2 fwnode API |
+| `drivers/net/mdio/fwnode_mdio.c` | الـ MDIO (network PHY) fwnode support |
+| `include/linux/acpi.h` | الـ ACPI definitions المرتبطة |
 ## Phase 2: شرح الـ fwnode (Firmware Node) Framework
 
 ### المشكلة — ليه الـ fwnode موجود أصلاً؟
 
-الـ Linux kernel بيشتغل على hardware بتُعرَّف بطرق مختلفة جداً:
+في الـ embedded Linux، الـ kernel لازم يعرف الـ hardware الموجود على الـ board — مين موجود، إيه خصائصه، وإزاي مرتبط بالأجزاء التانية. المشكلة إن في طرق مختلفة تماماً لوصف الـ hardware دا:
 
-- على ARM Embedded: الـ hardware متعرفش عن نفسه — محتاج **Device Tree** (DT) يوصف كل device وconnections بتاعته.
-- على x86 PC: الـ BIOS/UEFI بيوفر **ACPI** tables بتحتوي على نفس المعلومات دي.
-- في Testing أو Virtual Environments: في **software_node** — بتعرف الـ hardware في الـ C code نفسه.
+| الطريقة | بيتستخدم فين |
+|---------|-------------|
+| **Device Tree (OF)** | ARM، RISC-V، embedded boards |
+| **ACPI** | x86، ARM servers |
+| **Software Nodes (swnode)** | بدون firmware، بالكود مباشرةً |
 
-المشكلة الكبيرة: كل source دي لها format مختلف تماماً، والـ kernel drivers كانوا لازم يعرفوا هما بيشتغلوا على DT ولا ACPI ولا غيره، وبعدين يكتبوا code مختلف لكل حالة.
-
-النتيجة: code duplication ضخم، وأي driver محتاج يدعم أكتر من platform لازم يكون فيه `#ifdef CONFIG_OF` و `#ifdef CONFIG_ACPI` في كل حتة.
-
----
-
-### الحل — الـ fwnode abstraction layer
-
-الـ kernel حل المشكلة دي بـ **abstraction layer** اسمه **fwnode (Firmware Node)**:
-
-بدل ما كل driver يتكلم مع DT أو ACPI مباشرة، كل driver بيتكلم مع `fwnode_handle` — وده pointer abstract بيخفي وراه التفاصيل كلها.
-
-```
-Driver Code                fwnode API              Firmware Source
-───────────               ──────────              ───────────────
-device_property_read_u32() ──────────────────────► OF (Device Tree)
-                                                 ► ACPI
-                                                 ► software_node
-```
-
-الـ driver مش محتاج يعرف إيه الـ source — الـ fwnode هو اللي بيعرف.
+كل واحدة من دول ليها structures مختلفة، APIs مختلفة، وطريقة تنظيم مختلفة. من غير abstraction layer موحد، كل driver هيتعامل مع الـ 3 طرق دول منفصلاً — كود متكرر، وـ driver مش portable.
 
 ---
 
-### الـ Real-World Analogy — الترجمان الفوري
+### الحل — الـ fwnode Abstraction Layer
 
-تخيل إنك في مؤتمر دولي وعندك:
-- متحدث بيتكلم عربي (Device Tree)
-- متحدث بيتكلم إنجليزي (ACPI)
-- متحدث بيتكلم فرنساوي (software_node)
+الـ kernel حل المشكلة دي بإنه عمل **abstraction layer** واحد اسمه `fwnode` (firmware node). الفكرة هي:
 
-بدل ما كل واحد في الجمهور يتعلم اللغات الثلاثة، في **ترجمان فوري** (الـ fwnode framework) بيستمع لأي لغة وبيترجمها لنفس الـ interface.
+- كل node في الـ firmware description (سواء DT node أو ACPI device أو software node) بيتمثل بـ `struct fwnode_handle`.
+- كل نوع firmware بيوفر **operations table** (vtable) تفيذ الـ operations دي بطريقته الخاصة.
+- الـ driver بيتكلم مع الـ `fwnode_handle` فقط — مش عارف إيه الـ backend.
 
-الجمهور (الـ driver) بيسأل سؤال واحد: "إيه الـ interrupt number؟"
-الترجمان بيروح للمتحدث المناسب ويجيب الإجابة.
+النتيجة: driver واحد يشتغل على ARM مع Device Tree، وعلى server مع ACPI، من غير ما يتغير سطر واحد.
 
-التمثيل الكامل:
+---
+
+### الـ Real-World Analogy — أعمق من السطح
+
+تخيل إنك بتكتب تطبيق يقرأ ملفات — بس في أنواع مختلفة: PDF، Word، وPlain Text. بدل ما تكتب كود منفصل لكل نوع، بتعمل `interface Document` فيه:
+- `read_page(n)`
+- `get_title()`
+- `get_properties()`
+
+وكل نوع ملف بيعمل implementation خاصة بيه.
+
+**الآن نربط الـ analogy بالـ kernel بالتفصيل:**
 
 | الـ Analogy | الـ Kernel Concept |
-|---|---|
-| الترجمان نفسه | `struct fwnode_handle` |
-| طريقة تواصل الترجمان مع كل متحدث | `struct fwnode_operations` (vtable) |
-| السؤال اللي بيسأله الجمهور | `device_property_read_*()` API |
-| المتحدث العربي | OF/DT backend (`of_fwnode_ops`) |
-| المتحدث الإنجليزي | ACPI backend (`acpi_fwnode_ops`) |
-| المتحدث الفرنساوي | `software_node_ops` |
-| جمهور المؤتمر | الـ drivers اللي بتستخدم الـ API |
-| الحوار اللي في الـ microphone | الـ properties (مثلاً `clock-frequency`) |
-| مترجم احتياطي تاني | الـ `secondary` fwnode (fallback chain) |
+|-------------|-------------------|
+| الـ `Document` interface | `struct fwnode_handle` + `struct fwnode_operations` |
+| ملف PDF | Device Tree node (`struct device_node` + OF backend) |
+| ملف Word | ACPI device object (`struct acpi_device` + ACPI backend) |
+| ملف Plain Text | Software Node (`struct software_node`) |
+| الـ `read_page(n)` method | `property_read_int_array` operation |
+| الكود اللي بيقرأ الملف | Driver بيستخدم `fwnode_property_read_u32()` |
+| الـ document library | `drivers/base/property.c` |
+| الـ plugin system | `fwnode_ops` registration |
+
+لما الـ driver بيطلب `fwnode_property_read_u32(fwnode, "reg", &val)` — مش بيعرف إذا كان بيقرأ من DT أو ACPI. الـ vtable بتوجه الطلب للـ backend الصح.
 
 ---
 
 ### الـ Big Picture Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        Kernel Drivers                           │
-│  i2c-driver.c   spi-driver.c   gpio-driver.c   clk-driver.c    │
-└──────────────────────────┬──────────────────────────────────────┘
-                           │  device_property_read_u32()
-                           │  fwnode_get_named_child_node()
-                           │  fwnode_graph_get_next_endpoint()
-                           ▼
-┌─────────────────────────────────────────────────────────────────┐
-│              Property API  (drivers/base/property.c)            │
-│           Generic wrappers تستدعي fwnode_call_*_op()           │
-└──────────────────────────┬──────────────────────────────────────┘
-                           │
-                           ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                  fwnode_handle  +  fwnode_operations             │
-│  ┌──────────────────────────────────────────────────────────┐   │
-│  │ fwnode_handle                                            │   │
-│  │  ├── ops ──────────────────────────────────────────────► │   │
-│  │  ├── secondary ──► (fallback fwnode_handle)              │   │
-│  │  ├── dev ──────────────────────────────────────────────► │   │
-│  │  ├── suppliers (list_head)                               │   │
-│  │  ├── consumers (list_head)                               │   │
-│  │  └── flags (u8)                                          │   │
-│  └──────────────────────────────────────────────────────────┘   │
-└────────────┬──────────────────┬──────────────────┬──────────────┘
-             │                  │                  │
-             ▼                  ▼                  ▼
-┌─────────────────┐  ┌──────────────────┐  ┌─────────────────────┐
-│  OF / DT Layer  │  │   ACPI Layer     │  │  software_node      │
-│  of_fwnode_ops  │  │ acpi_fwnode_ops  │  │  software_node_ops  │
-│                 │  │                  │  │                     │
-│ drivers/of/     │  │ drivers/acpi/    │  │ drivers/base/       │
-│ property.c      │  │ property.c       │  │ swnode.c            │
-└────────┬────────┘  └────────┬─────────┘  └──────────┬──────────┘
-         │                   │                        │
-         ▼                   ▼                        ▼
-  Device Tree Blob      ACPI Tables              C structs in
-  (DTB in memory)       (DSDT/SSDT)              driver code
+┌─────────────────────────────────────────────────────────────┐
+│                     Driver Code                             │
+│  fwnode_property_read_u32(fwnode, "clock-frequency", &v)    │
+└────────────────────────┬────────────────────────────────────┘
+                         │ calls
+                         ▼
+┌─────────────────────────────────────────────────────────────┐
+│             fwnode Abstraction Layer                        │
+│         (drivers/base/property.c)                           │
+│                                                             │
+│   fwnode_call_int_op(fwnode, property_read_int_array, ...)  │
+│         ──► fwnode->ops->property_read_int_array(...)       │
+└────┬──────────────────┬──────────────────┬──────────────────┘
+     │                  │                  │
+     ▼                  ▼                  ▼
+┌─────────┐      ┌─────────────┐    ┌────────────────┐
+│  OF/DT  │      │    ACPI     │    │ Software Node  │
+│ backend │      │   backend   │    │   backend      │
+│         │      │             │    │                │
+│of_fwnode│      │acpi_fwnode  │    │swnode_fwnode   │
+│  _ops   │      │    _ops     │    │    _ops        │
+└────┬────┘      └──────┬──────┘    └───────┬────────┘
+     │                  │                   │
+     ▼                  ▼                   ▼
+┌──────────┐   ┌──────────────┐   ┌──────────────────┐
+│  struct  │   │ struct acpi  │   │ struct software  │
+│device_   │   │  _device     │   │   _node          │
+│  node    │   │              │   │                  │
+│(DT tree) │   │(ACPI tables) │   │ (in-kernel data) │
+└──────────┘   └──────────────┘   └──────────────────┘
 ```
+
+**الـ fwnode مش بيحل محل الـ DT أو ACPI** — هو بس layer فوقيهم بيوحد الـ access.
 
 ---
 
-### الـ Core Abstraction — الـ vtable بتاع الـ fwnode
+### الـ Core Abstractions — الـ Structs المهمة
 
-الـ central idea هي الـ **`struct fwnode_operations`** — ده vtable خالص زي الـ virtual functions في C++، لكن implemented manually في C.
+#### 1. `struct fwnode_handle` — القلب
+
+```c
+struct fwnode_handle {
+    struct fwnode_handle *secondary; /* fallback node لو مش لاقي property */
+    const struct fwnode_operations *ops; /* الـ vtable */
+    struct device *dev;   /* الـ device المرتبط (لو موجود) */
+    struct list_head suppliers; /* fwnode links: المورّدين */
+    struct list_head consumers; /* fwnode links: المستهلكين */
+    u8 flags;             /* FWNODE_FLAG_* */
+};
+```
+
+الـ `secondary` مهم جداً: لو الـ primary fwnode (مثلاً ACPI node) مش عارف يجيب property معينة، الـ kernel بيجرب الـ `secondary` (ممكن يكون software node بيكمّل الـ ACPI data). ده بيخلي الـ fwnode system **composable**.
+
+#### 2. `struct fwnode_operations` — الـ vtable
 
 ```c
 struct fwnode_operations {
@@ -332,823 +302,618 @@ struct fwnode_operations {
     struct fwnode_handle *(*get)(struct fwnode_handle *fwnode);
     void (*put)(struct fwnode_handle *fwnode);
 
-    /* device status */
-    bool (*device_is_available)(const struct fwnode_handle *fwnode);
-    const void *(*device_get_match_data)(const struct fwnode_handle *fwnode,
-                                         const struct device *dev);
-    bool (*device_dma_supported)(const struct fwnode_handle *fwnode);
-    enum dev_dma_attr (*device_get_dma_attr)(const struct fwnode_handle *fwnode);
-
-    /* property access */
-    bool (*property_present)(const struct fwnode_handle *fwnode,
-                             const char *propname);
-    bool (*property_read_bool)(const struct fwnode_handle *fwnode,
-                               const char *propname);
-    int (*property_read_int_array)(...);
-    int (*property_read_string_array)(...);
-
-    /* tree traversal */
-    const char *(*get_name)(const struct fwnode_handle *fwnode);
-    const char *(*get_name_prefix)(const struct fwnode_handle *fwnode);
-    struct fwnode_handle *(*get_parent)(const struct fwnode_handle *fwnode);
-    struct fwnode_handle *(*get_next_child_node)(...);
-    struct fwnode_handle *(*get_named_child_node)(...);
-    int (*get_reference_args)(...);
-
-    /* graph (media pipeline) */
-    struct fwnode_handle *(*graph_get_next_endpoint)(...);
-    struct fwnode_handle *(*graph_get_remote_endpoint)(...);
-    struct fwnode_handle *(*graph_get_port_parent)(...);
-    int (*graph_parse_endpoint)(...);
-
-    /* hardware access */
-    void __iomem *(*iomap)(struct fwnode_handle *fwnode, int index);
-    int (*irq_get)(const struct fwnode_handle *fwnode, unsigned int index);
-
-    /* devlink */
-    int (*add_links)(struct fwnode_handle *fwnode);
-};
-```
-
-كل backend (OF, ACPI, swnode) بيعمل instance من الـ struct ده وبيملي الـ function pointers اللي بيعرفها.
-
----
-
-### الـ fwnode_handle بالتفصيل
-
-```c
-struct fwnode_handle {
-    struct fwnode_handle *secondary;   // fallback لو الـ op مش موجود
-    const struct fwnode_operations *ops; // vtable — مين أنا؟
-    struct device *dev;                // الـ device المرتبط (بعد probe)
-    struct list_head suppliers;        // مين بيوفرلي resources
-    struct list_head consumers;        // مين بياخد مني resources
-    u8 flags;                          // FWNODE_FLAG_*
-};
-```
-
-#### الـ `secondary` Field — الـ Fallback Chain
-
-ده من أهم الـ features: لو الـ DT node عنده بعض الـ properties والـ ACPI node عنده properties تانية، ممكن تربطهم في chain:
-
-```
-fwnode_handle (OF) ──secondary──► fwnode_handle (ACPI) ──secondary──► NULL
-```
-
-لما يُستدعى operation مش موجود في الأول، الـ framework تقدر تنزل للـ secondary تلقائياً. ده بيسمح بـ hybrid configurations.
-
-#### الـ `suppliers` و `consumers` Lists — الـ fw_devlink System
-
-الـ firmware بيعرف dependencies بين الـ devices، مثلاً: الـ I2C controller محتاج الـ clock يشتغل الأول قبل ما هو يشتغل.
-
-الـ `fwnode_link` بيمثل العلاقة دي:
-
-```c
-struct fwnode_link {
-    struct fwnode_handle *supplier;  // مين بيوفر
-    struct list_head s_hook;         // hook في قائمة الـ suppliers
-    struct fwnode_handle *consumer;  // مين بياخد
-    struct list_head c_hook;         // hook في قائمة الـ consumers
-    u8 flags;                        // FWLINK_FLAG_CYCLE | FWLINK_FLAG_IGNORE
-};
-```
-
-الـ diagram بتاع الـ lists:
-
-```
-fwnode_handle (clk)                    fwnode_handle (i2c)
-├── consumers list_head ◄──────────────── s_hook (في fwnode_link)
-│                                         c_hook (في fwnode_link)
-│                                          └───────────────────► suppliers list_head
-└── ...
-```
-
-الـ kernel driver core بيستخدم الـ links دي عشان يضمن إن الـ probe order صح — الـ supplier يتـ probe قبل الـ consumer.
-
----
-
-### الـ Flags بالتفصيل
-
-```c
-#define FWNODE_FLAG_LINKS_ADDED          BIT(0)  // تم parse الـ DT/ACPI وإضافة الـ links
-#define FWNODE_FLAG_NOT_DEVICE           BIT(1)  // هذا الـ node مش هيبقى device (مثلاً pin group)
-#define FWNODE_FLAG_INITIALIZED          BIT(2)  // الـ hardware اتـ initialize
-#define FWNODE_FLAG_NEEDS_CHILD_BOUND_ON_ADD BIT(3) // لازم الـ children يتـ probe الأول
-#define FWNODE_FLAG_BEST_EFFORT          BIT(4)  // probe حتى لو في suppliers ناقصين
-#define FWNODE_FLAG_VISITED              BIT(5)  // اتـ visit أثناء cycle detection
-```
-
----
-
-### الـ Graph Endpoint API — لـ Media Pipelines
-
-في الـ embedded systems، خصوصاً في الـ camera pipelines، في ports وendpoints بتربط الـ devices ببعض:
-
-```
-Camera Sensor ──port0──endpoint──► ──endpoint──port0── CSI-2 Controller
-                                  (fwnode_link)
-```
-
-الـ `struct fwnode_endpoint` بيعبر عن طرف الوصلة دي:
-
-```c
-struct fwnode_endpoint {
-    unsigned int port;           // رقم الـ port على الـ device
-    unsigned int id;             // رقم الـ endpoint على الـ port
-    const struct fwnode_handle *local_fwnode; // مين أنا
-};
-```
-
-الـ software_node بيستخدم naming conventions محددة للـ ports والـ endpoints:
-
-```c
-#define SWNODE_GRAPH_PORT_NAME_FMT      "port@%u"       // e.g., "port@0"
-#define SWNODE_GRAPH_ENDPOINT_NAME_FMT  "endpoint@%u"   // e.g., "endpoint@0"
-```
-
----
-
-### الـ Reference Args — الـ phandle مع Arguments
-
-في الـ Device Tree، ممكن node تشير لـ node تانية وتبعت معاها arguments، مثلاً:
-
-```dts
-clocks = <&clk_node 2 3>;  // reference لـ clk_node مع args: 2, 3
-```
-
-الـ `struct fwnode_reference_args` بيحمل الـ reference دي:
-
-```c
-struct fwnode_reference_args {
-    struct fwnode_handle *fwnode;           // الـ node المُشار إليها
-    unsigned int nargs;                     // عدد الـ args
-    u64 args[NR_FWNODE_REFERENCE_ARGS];    // max 16 argument
-};
-```
-
----
-
-### الـ Dispatch Macros — قلب الـ Framework
-
-الـ framework بيستخدم 4 macros أساسية عشان يعمل dispatch للـ operations:
-
-```c
-// بيتحقق إن الـ fwnode صالح وعنده الـ operation
-#define fwnode_has_op(fwnode, op) \
-    (!IS_ERR_OR_NULL(fwnode) && (fwnode)->ops && (fwnode)->ops->op)
-
-// للـ ops اللي بترجع int — بترجع -EINVAL لو fwnode NULL، -ENXIO لو op مش موجود
-#define fwnode_call_int_op(fwnode, op, ...) \
-    (fwnode_has_op(fwnode, op) ? \
-     (fwnode)->ops->op(fwnode, ##__VA_ARGS__) : \
-     (IS_ERR_OR_NULL(fwnode) ? -EINVAL : -ENXIO))
-
-// للـ ops اللي بترجع bool
-#define fwnode_call_bool_op(fwnode, op, ...) \
-    (fwnode_has_op(fwnode, op) ? \
-     (fwnode)->ops->op(fwnode, ##__VA_ARGS__) : false)
-
-// للـ ops اللي بترجع pointer
-#define fwnode_call_ptr_op(fwnode, op, ...) \
-    (fwnode_has_op(fwnode, op) ? \
-     (fwnode)->ops->op(fwnode, ##__VA_ARGS__) : NULL)
-
-// للـ ops اللي مش بترجع حاجة
-#define fwnode_call_void_op(fwnode, op, ...) \
-    do { \
-        if (fwnode_has_op(fwnode, op)) \
-            (fwnode)->ops->op(fwnode, ##__VA_ARGS__); \
-    } while (false)
-```
-
-الـ macros دي بتضمن إن:
-1. الـ fwnode مش NULL ومش error pointer (عن طريق `IS_ERR_OR_NULL`).
-2. الـ ops pointer موجود.
-3. الـ operation المحدد موجود في الـ vtable.
-4. لو أي حاجة ناقصة، بترجع default value مناسب.
-
----
-
-### كيفية إنشاء fwnode جديد (من وجهة نظر Backend Developer)
-
-```c
-// 1. عرّف الـ vtable
-static const struct fwnode_operations my_fwnode_ops = {
-    .get                   = my_get,
-    .put                   = my_put,
-    .property_present      = my_property_present,
-    .property_read_int_array = my_property_read_int_array,
-    // ... باقي الـ ops
-};
-
-// 2. الـ struct الخاص بيك بيحتوي على fwnode_handle
-struct my_node {
-    struct fwnode_handle fwnode;  // لازم يكون embedded, مش pointer
-    // ... بقية الـ data
-};
-
-// 3. إنشاء الـ fwnode
-struct my_node *node = kzalloc(sizeof(*node), GFP_KERNEL);
-fwnode_init(&node->fwnode, &my_fwnode_ops);
-```
-
-الـ `fwnode_init()` بتعمل:
-```c
-static inline void fwnode_init(struct fwnode_handle *fwnode,
-                               const struct fwnode_operations *ops)
-{
-    fwnode->ops = ops;
-    INIT_LIST_HEAD(&fwnode->consumers);  // قائمة فاضية
-    INIT_LIST_HEAD(&fwnode->suppliers);  // قائمة فاضية
-}
-```
-
----
-
-### الـ DMA Attributes
-
-الـ enum ده بيعبر عن قدرة الـ device على الـ DMA:
-
-```c
-enum dev_dma_attr {
-    DEV_DMA_NOT_SUPPORTED,  // الـ device مش بيعمل DMA أصلاً
-    DEV_DMA_NON_COHERENT,   // DMA بدون cache coherency (محتاج explicit flush/invalidate)
-    DEV_DMA_COHERENT,       // DMA مع hardware cache coherency
-};
-```
-
-الـ ACPI بيقول للـ kernel الـ attribute ده عن طريق الـ `_CCA` method في الـ ACPI tables. الـ DT بيعمله عن طريق الـ `dma-coherent` property.
-
----
-
-### الـ fwnode Framework بيملك إيه وبيفوّض إيه؟
-
-| الـ fwnode Framework يملك | بيفوّض للـ Backend |
-|---|---|
-| الـ `fwnode_handle` struct definition | كيفية تخزين الـ properties |
-| الـ dispatch macros | كيفية قراءة الـ properties من الـ DT أو ACPI |
-| الـ fwnode_link management | كيفية تعريف الـ dependencies |
-| الـ graph endpoint structs | كيفية parse الـ endpoint info |
-| الـ `fwnode_operations` interface | كل الـ implementation |
-| الـ lifecycle (init, get, put) | متى تُحذف الـ resources |
-| الـ flag definitions | معنى الـ flags في الـ context بتاعه |
-
----
-
-### الـ fw_devlink — الـ Probe Ordering System
-
-**الـ fw_devlink** هو subsystem مرتبط بشكل وثيق بالـ fwnode. المهمة بتاعته: ضمان إن الـ driver بتاع الـ supplier يتـ probe قبل الـ consumer.
-
-مثال: `i2c@40003000` محتاج `clk@40000000`:
-
-```
-fwnode(clk) ◄──────── fwnode_link ──────────► fwnode(i2c)
-    │           supplier          consumer         │
-    │                                              │
-    ▼                                              ▼
-device(clk)  [probe أولاً]             device(i2c)  [probe بعدين]
-```
-
-الـ kernel بيبني الـ graph ده من الـ firmware description (DT أو ACPI) بعدين بيستخدمه عشان يرتب الـ probe.
-
-الـ `fw_devlink_is_strict()` بتحدد لو الـ kernel لازم يـ defer probe الـ consumer لحد ما الـ supplier يتـ probe — أو يـ probe على طول (best effort).
-## Phase 3: التفاصيل العميقة — الـ Structs والعلاقات
-
----
-
-### 0. الـ Flags والـ Enums — Cheatsheet
-
-#### الـ `FWNODE_FLAG_*` — flags الخاصة بـ `fwnode_handle.flags`
-
-| Flag | Bit | المعنى |
-|------|-----|--------|
-| `FWNODE_FLAG_LINKS_ADDED` | `BIT(0)` | الـ fwnode اتعمله parse وأُضيفت links الـ suppliers بتاعته |
-| `FWNODE_FLAG_NOT_DEVICE` | `BIT(1)` | الـ fwnode مش هيتحول لـ `struct device` أبداً (مثال: nodes وصفية فقط) |
-| `FWNODE_FLAG_INITIALIZED` | `BIT(2)` | الـ hardware المقابل للـ fwnode اتعمله initialize |
-| `FWNODE_FLAG_NEEDS_CHILD_BOUND_ON_ADD` | `BIT(3)` | الـ driver محتاج الـ child devices تكون bound قبل ما يقدر يعمل probe |
-| `FWNODE_FLAG_BEST_EFFORT` | `BIT(4)` | يعمل probe بدري حتى لو في suppliers ناقصة — يتجاهل suppliers من غير drivers |
-| `FWNODE_FLAG_VISITED` | `BIT(5)` | اتزار خلال cycle detection في الـ devlink graph |
-
-#### الـ `FWLINK_FLAG_*` — flags الخاصة بـ `fwnode_link.flags`
-
-| Flag | Bit | المعنى |
-|------|-----|--------|
-| `FWLINK_FLAG_CYCLE` | `BIT(0)` | الـ link ده جزء من cycle — متعملش defer للـ probe |
-| `FWLINK_FLAG_IGNORE` | `BIT(1)` | تجاهل الـ link ده خالص حتى في cycle detection |
-
-#### الـ `enum dev_dma_attr`
-
-| Value | المعنى |
-|-------|--------|
-| `DEV_DMA_NOT_SUPPORTED` | الـ device مش بيدعم DMA خالص |
-| `DEV_DMA_NON_COHERENT` | بيدعم DMA بس cache غير متزامن — محتاج sync manual |
-| `DEV_DMA_COHERENT` | بيدعم DMA مع cache coherency كامل |
-
-#### الـ Macros المهمة
-
-| Macro | الغرض |
-|-------|--------|
-| `NR_FWNODE_REFERENCE_ARGS` | الحد الأقصى لعدد الـ args في reference — قيمته 16 |
-| `SWNODE_GRAPH_PORT_NAME_FMT` | format اسم الـ port في software nodes: `"port@%u"` |
-| `SWNODE_GRAPH_ENDPOINT_NAME_FMT` | format اسم الـ endpoint: `"endpoint@%u"` |
-| `fwnode_has_op(fwnode, op)` | يتحقق إن الـ fwnode مش NULL وإن الـ op موجودة في الـ ops table |
-| `fwnode_call_int_op(...)` | يستدعي op وترجع int، أو `-EINVAL`/`-ENXIO` لو مفيش op |
-| `fwnode_call_bool_op(...)` | يستدعي op وترجع bool، أو `false` لو مفيش op |
-| `fwnode_call_ptr_op(...)` | يستدعي op وترجع pointer، أو `NULL` لو مفيش op |
-| `fwnode_call_void_op(...)` | يستدعي op من غير ما يهتم بالـ return value |
-
----
-
-### 1. الـ Structs المهمة
-
----
-
-#### `struct fwnode_handle`
-
-**الغرض:** ده الـ "handle" العام اللي بيمثل أي firmware node — سواء كان من ACPI أو Device Tree أو software node. ده الـ base object اللي كل الـ firmware backends بتوسعه.
-
-```c
-struct fwnode_handle {
-    struct fwnode_handle *secondary;   /* fallback node لو الأولاني مش كافي */
-    const struct fwnode_operations *ops; /* vtable — بتتحكم في كل العمليات */
-
-    /* بيستخدمه device links فقط */
-    struct device *dev;                /* الـ device المرتبط بالـ node ده */
-    struct list_head suppliers;        /* قائمة الـ fwnode_link اللي الـ node ده consumer فيها */
-    struct list_head consumers;        /* قائمة الـ fwnode_link اللي الـ node ده supplier فيها */
-    u8 flags;                          /* FWNODE_FLAG_* */
-};
-```
-
-| Field | النوع | الشرح |
-|-------|-------|--------|
-| `secondary` | `struct fwnode_handle *` | لو الـ primary node مش قادر يجاوب على سؤال، الـ kernel بيروح للـ secondary — مثال: ACPI + swnode معاً |
-| `ops` | `const struct fwnode_operations *` | الـ vtable — كل backend بيحط الـ function pointers بتاعته هنا |
-| `dev` | `struct device *` | ربط مع الـ device object لما الـ node يتحول لـ device — `NULL` غير كده |
-| `suppliers` | `struct list_head` | رأس قائمة الـ `fwnode_link` nodes اللي الـ fwnode ده بياخد منها (consumer) |
-| `consumers` | `struct list_head` | رأس قائمة الـ `fwnode_link` nodes اللي بتاخد من الـ fwnode ده (supplier) |
-| `flags` | `u8` | بتات حالة الـ node — الـ `FWNODE_FLAG_*` |
-
-**الارتباط بالـ structs التانية:** بيشير لـ `fwnode_operations` وبيشير له `fwnode_link` من طرفين.
-
----
-
-#### `struct fwnode_operations`
-
-**الغرض:** الـ **vtable** — جدول الـ function pointers اللي كل firmware backend (ACPI, DT, swnode) بيملاه بالـ implementations الخاصة بيه. ده اللي بيخلي الـ kernel يشتغل مع أي firmware بنفس الـ API.
-
-```c
-struct fwnode_operations {
-    /* Reference counting */
-    struct fwnode_handle *(*get)(struct fwnode_handle *fwnode);
-    void (*put)(struct fwnode_handle *fwnode);
-
-    /* Device availability & metadata */
+    /* device availability & matching */
     bool (*device_is_available)(const struct fwnode_handle *fwnode);
     const void *(*device_get_match_data)(...);
     bool (*device_dma_supported)(...);
     enum dev_dma_attr (*device_get_dma_attr)(...);
 
-    /* Property access */
+    /* property access */
     bool (*property_present)(...);
     bool (*property_read_bool)(...);
     int (*property_read_int_array)(...);
     int (*property_read_string_array)(...);
 
-    /* Node navigation */
+    /* tree navigation */
     const char *(*get_name)(...);
     const char *(*get_name_prefix)(...);
     struct fwnode_handle *(*get_parent)(...);
     struct fwnode_handle *(*get_next_child_node)(...);
     struct fwnode_handle *(*get_named_child_node)(...);
 
-    /* References */
+    /* cross-references */
     int (*get_reference_args)(...);
 
-    /* Graph (ports & endpoints) */
+    /* graph (V4L2, media) */
     struct fwnode_handle *(*graph_get_next_endpoint)(...);
     struct fwnode_handle *(*graph_get_remote_endpoint)(...);
     struct fwnode_handle *(*graph_get_port_parent)(...);
     int (*graph_parse_endpoint)(...);
 
-    /* Hardware access */
-    void __iomem *(*iomap)(struct fwnode_handle *fwnode, int index);
+    /* hardware access */
+    void __iomem *(*iomap)(...);
     int (*irq_get)(...);
 
-    /* Dependency management */
+    /* dependency tracking */
     int (*add_links)(struct fwnode_handle *fwnode);
 };
 ```
 
-| Function Pointer | الغرض المختصر |
-|------------------|---------------|
-| `get` / `put` | reference counting — حماية الـ node من الحذف |
-| `device_is_available` | هل الـ node متاح في الـ firmware؟ (مش `disabled`) |
-| `device_get_match_data` | بيجيب الـ driver match data من الـ firmware table |
-| `device_dma_supported` | هل الـ device يدعم DMA؟ |
-| `device_get_dma_attr` | نوع الـ DMA coherency |
-| `property_present` | هل property موجودة؟ |
-| `property_read_bool` | اقرأ property boolean |
-| `property_read_int_array` | اقرأ array من integers |
-| `property_read_string_array` | اقرأ array من strings |
-| `get_name` / `get_name_prefix` | اسم الـ node للـ logging والـ debug |
-| `get_parent` | الـ parent node في شجرة الـ firmware |
-| `get_next_child_node` | iteration على الـ children |
-| `get_named_child_node` | جيب child باسم معين |
-| `get_reference_args` | حل reference property وجيب الـ args معاها |
-| `graph_get_next_endpoint` | iteration على الـ endpoints في الـ graph |
-| `graph_get_remote_endpoint` | الطرف الآخر من connection |
-| `graph_get_port_parent` | الـ device اللي فيه الـ port |
-| `graph_parse_endpoint` | اقرأ port id وendpoint id |
-| `iomap` | عمل map لـ MMIO region |
-| `irq_get` | جيب رقم الـ IRQ |
-| `add_links` | أنشئ dependency links لـ suppliers |
+الـ vtable مقسمة لـ 6 مجموعات وظيفية — مش مجرد قائمة functions عشوائية.
 
----
-
-#### `struct fwnode_link`
-
-**الغرض:** بيمثل **علاقة dependency** بين fwnode تاني — supplier وconsumer. الـ kernel بيستخدمه عشان يضمن إن الـ supplier يعمل probe قبل الـ consumer.
+#### 3. `struct fwnode_link` — الـ Dependency Graph
 
 ```c
 struct fwnode_link {
-    struct fwnode_handle *supplier;  /* الـ node اللي بيوفر الـ resource */
-    struct list_head s_hook;         /* hook في قائمة consumers الخاصة بالـ supplier */
-    struct fwnode_handle *consumer;  /* الـ node اللي محتاج الـ resource */
-    struct list_head c_hook;         /* hook في قائمة suppliers الخاصة بالـ consumer */
-    u8 flags;                        /* FWLINK_FLAG_* */
+    struct fwnode_handle *supplier;  /* الـ node اللي بيوفر resource */
+    struct list_head s_hook;         /* hook في قايمة الـ supplier */
+    struct fwnode_handle *consumer;  /* الـ node اللي بيستهلك */
+    struct list_head c_hook;         /* hook في قايمة الـ consumer */
+    u8 flags;                        /* FWLINK_FLAG_CYCLE | IGNORE */
 };
 ```
 
-| Field | الشرح |
-|-------|--------|
-| `supplier` | مؤشر للـ fwnode اللي بيوفر resource — مثلاً: clock أو regulator |
-| `s_hook` | entry في `supplier->consumers` list |
-| `consumer` | مؤشر للـ fwnode اللي محتاج الـ resource |
-| `c_hook` | entry في `consumer->suppliers` list |
-| `flags` | `FWLINK_FLAG_CYCLE` أو `FWLINK_FLAG_IGNORE` |
+الـ `fwnode_link` بيمثل علاقة dependency بين اتنين nodes — على سبيل المثال: الـ I2C controller هو supplier للـ sensor اللي عليه. الـ kernel بيستخدم العلاقات دي في **device probe ordering** — مش هيشغّل الـ consumer قبل ما الـ supplier يبقى جاهز.
 
----
+```
+fwnode_handle (I2C controller)
+    suppliers list: []
+    consumers list: ──► fwnode_link ──► fwnode_handle (Sensor)
+                                            suppliers list: ──► fwnode_link (back)
+```
 
-#### `struct fwnode_endpoint`
-
-**الغرض:** بيمثل **نقطة اتصال** في graph الـ firmware — زي connector في دائرة كاميرا أو display pipeline. كل endpoint عنده port id وendpoint id.
+#### 4. `struct fwnode_endpoint` — الـ Graph Topology
 
 ```c
 struct fwnode_endpoint {
-    unsigned int port;                       /* رقم الـ port في الـ device */
-    unsigned int id;                         /* رقم الـ endpoint داخل الـ port */
-    const struct fwnode_handle *local_fwnode; /* الـ node المحلي */
+    unsigned int port;           /* رقم الـ port */
+    unsigned int id;             /* رقم الـ endpoint في الـ port */
+    const struct fwnode_handle *local_fwnode;
 };
 ```
 
-مثال واقعي: كاميرا (port 0, endpoint 0) متوصلة بـ ISP (port 1, endpoint 0).
+الـ **fwnode graph** — مفهوم مختلف عن الـ fwnode tree — بيصف الروابط الفيزيائية بين components. بيتستخدم في:
+- الـ **V4L2 / Media subsystem**: كاميرا ◄──► ISP ◄──► Display
+- الـ **MIPI CSI/DSI** connections
+- الـ **Audio routing**
+
+كل device ليه ports، وكل port فيه endpoints، وكل endpoint بيتوصل بـ endpoint ريموت في device تاني.
+
+```
+Camera Node                    ISP Node
+  port@0                         port@0
+    endpoint@0 ──────────────► endpoint@0
+```
 
 ---
 
-#### `struct fwnode_reference_args`
+### الـ Dispatch Macros — إزاي الـ Call بيتوزع
 
-**الغرض:** لما property في الـ firmware بتشير لـ node تانية وبتعدي معاها arguments — زي `clocks = <&clk0 1 0>` في Device Tree، الـ node هنا هي `clk0` والـ args هي `[1, 0]`.
+الـ fwnode مش بيدي function calls مباشرة — بيستخدم macros بتتحقق الأول:
+
+```c
+/* لو الـ op موجود ومش NULL — ينفذ، غير كده يرجع error code */
+#define fwnode_call_int_op(fwnode, op, ...)         \
+    (fwnode_has_op(fwnode, op) ?                    \
+     (fwnode)->ops->op(fwnode, ## __VA_ARGS__) :    \
+     (IS_ERR_OR_NULL(fwnode) ? -EINVAL : -ENXIO))
+
+/* لو الـ op موجود — ينفذ، غير كده يرجع NULL */
+#define fwnode_call_ptr_op(fwnode, op, ...)         \
+    (fwnode_has_op(fwnode, op) ?                    \
+     (fwnode)->ops->op(fwnode, ## __VA_ARGS__) : NULL)
+```
+
+الـ `fwnode_has_op` بيتحقق من 3 حاجات في خطوة واحدة:
+1. الـ `fwnode` مش NULL ومش error pointer
+2. الـ `fwnode->ops` موجود
+3. الـ op المحدد نفسه مش NULL
+
+ده بيحمي من NULL dereference في حالة backend مش عامل implement لكل الـ ops.
+
+---
+
+### الـ fwnode Flags — حالة الـ Node
+
+```c
+#define FWNODE_FLAG_LINKS_ADDED         BIT(0) /* تم parse الـ links بتاعته */
+#define FWNODE_FLAG_NOT_DEVICE          BIT(1) /* مش هيتحول لـ struct device */
+#define FWNODE_FLAG_INITIALIZED         BIT(2) /* الـ hardware اتـ initialized */
+#define FWNODE_FLAG_NEEDS_CHILD_BOUND_ON_ADD BIT(3) /* lazm الـ children يتـ probe أول */
+#define FWNODE_FLAG_BEST_EFFORT         BIT(4) /* يكمل حتى لو suppliers ناقصة */
+#define FWNODE_FLAG_VISITED             BIT(5) /* اتزار في cycle detection */
+```
+
+**الـ `FWNODE_FLAG_NOT_DEVICE`** مهم: مش كل fwnode بيتحول لـ device — بعضهم nodes وصفية زي `pinctrl` groups أو `clocks`.
+
+**الـ `FWNODE_FLAG_NEEDS_CHILD_BOUND_ON_ADD`** بيتستخدم في devices زي الـ MFD (Multi-Function Device) اللي محتاجة الـ child devices يتبانوا الأول عشان تشتغل.
+
+---
+
+### العلاقة بين الـ Structs
+
+```
+                    ┌──────────────────────────┐
+                    │    fwnode_handle         │
+                    │  ┌──────────────────┐    │
+                    │  │ ops ─────────────┼────┼──► fwnode_operations (vtable)
+                    │  │ secondary ───────┼────┼──► fwnode_handle (fallback)
+                    │  │ dev ─────────────┼────┼──► struct device
+                    │  │ suppliers (list) │    │
+                    │  │ consumers (list) │    │
+                    │  │ flags            │    │
+                    │  └──────────────────┘    │
+                    └──────────────────────────┘
+                              │ embedded in
+              ┌───────────────┼───────────────┐
+              ▼               ▼               ▼
+    ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
+    │device_node   │  │acpi_device   │  │software_node │
+    │  .fwnode     │  │  .fwnode     │  │  .fwnode     │
+    │  (OF/DT)     │  │  (ACPI)      │  │  (swnode)    │
+    └──────────────┘  └──────────────┘  └──────────────┘
+```
+
+الـ `fwnode_handle` مش struct مستقل في الغالب — بيتعمله **embed** جوه الـ backend-specific struct. يعني `struct device_node` اللي هو الـ DT node فيه `struct fwnode_handle fwnode` جواه، والـ kernel بيعمل `container_of` يرجع للـ parent struct.
+
+---
+
+### إيه اللي الـ fwnode Framework بيمتلكه؟
+
+| الـ fwnode يمتلك | الـ fwnode يفوّض |
+|-----------------|-----------------|
+| الـ unified API للـ properties | قراءة الـ DT/ACPI data الفعلية |
+| الـ dependency tracking (fwnode_link) | تحديد الـ probe order للـ drivers |
+| الـ graph topology (ports/endpoints) | الـ media pipeline routing (V4L2) |
+| الـ lifecycle (get/put) | الـ reference counting implementation |
+| الـ dispatch macros | الـ NULL/error checking logic |
+| الـ secondary chaining | الـ fallback property lookup |
+
+---
+
+### ملاحظة على الـ Related Subsystems
+
+- **الـ OF (Open Firmware) subsystem**: `include/linux/of.h` — بيوفر الـ DT backend للـ fwnode.
+- **الـ ACPI subsystem**: `include/linux/acpi.h` — بيوفر الـ ACPI backend.
+- **الـ device links subsystem**: مختلف عن الـ fwnode links — الـ fwnode links بيكونوا في مرحلة الـ firmware parsing قبل ما تتعمل `struct device`، وبعدين بيتحولوا لـ device links.
+- **الـ property API**: `include/linux/property.h` — هو الـ public API اللي drivers بيستخدموه فوق الـ fwnode layer.
+## Phase 3: التفاصيل العميقة — الـ Structs والعلاقات
+
+---
+
+### الـ Flags والـ Enums — Cheatsheet
+
+#### `FWNODE_FLAG_*` — flags الـ `fwnode_handle`
+
+| Flag | Bit | المعنى |
+|------|-----|--------|
+| `FWNODE_FLAG_LINKS_ADDED` | 0 | الـ fwnode اتفرز مسبقاً عشان يضيف fwnode links |
+| `FWNODE_FLAG_NOT_DEVICE` | 1 | الـ fwnode مش هيتحول لـ `struct device` أبداً |
+| `FWNODE_FLAG_INITIALIZED` | 2 | الـ hardware المقابل للـ fwnode اتعمل له initialize |
+| `FWNODE_FLAG_NEEDS_CHILD_BOUND_ON_ADD` | 3 | الـ driver محتاج الـ child devices تكون bound قبل ما هو يـ probe |
+| `FWNODE_FLAG_BEST_EFFORT` | 4 | يـ probe بدري حتى لو في suppliers ناقصين — بس يرتب بس مع اللي عندهم drivers |
+| `FWNODE_FLAG_VISITED` | 5 | اتزار أثناء cycle detection |
+
+#### `FWLINK_FLAG_*` — flags الـ `fwnode_link`
+
+| Flag | Bit | المعنى |
+|------|-----|--------|
+| `FWLINK_FLAG_CYCLE` | 0 | الـ link ده جزء من cycle — متعملش defer للـ probe |
+| `FWLINK_FLAG_IGNORE` | 1 | تجاهل الـ link ده خالص حتى في cycle detection |
+
+#### `enum dev_dma_attr`
+
+| Value | المعنى |
+|-------|--------|
+| `DEV_DMA_NOT_SUPPORTED` | الجهاز مش بيدعم DMA |
+| `DEV_DMA_NON_COHERENT` | الجهاز يعمل DMA لكن بدون cache coherency |
+| `DEV_DMA_COHERENT` | الجهاز يعمل DMA مع cache coherency كاملة |
+
+#### Macros مهمة
+
+| Macro | الغرض |
+|-------|--------|
+| `NR_FWNODE_REFERENCE_ARGS` | الحد الأقصى للـ integer args في `fwnode_reference_args` = 16 |
+| `SWNODE_GRAPH_PORT_NAME_FMT` | format اسم الـ port في software nodes = `"port@%u"` |
+| `SWNODE_GRAPH_ENDPOINT_NAME_FMT` | format اسم الـ endpoint = `"endpoint@%u"` |
+| `fwnode_has_op(fwnode, op)` | يتحقق إن الـ fwnode صحيح وعنده الـ op دي |
+| `fwnode_call_int_op(...)` | يستدعي op وترجع int، أو `-EINVAL`/`-ENXIO` لو مفيش |
+| `fwnode_call_bool_op(...)` | يستدعي op وترجع bool، أو `false` لو مفيش |
+| `fwnode_call_ptr_op(...)` | يستدعي op وترجع pointer، أو `NULL` لو مفيش |
+| `fwnode_call_void_op(...)` | يستدعي op بدون return value |
+
+---
+
+### الـ Structs المهمة
+
+---
+
+#### 1. `struct fwnode_handle`
+
+**الغرض:** ده الـ base object لأي firmware node — سواء كان ACPI node، DT node، أو software node. كل الـ firmware topology بتبدأ منه.
+
+```c
+struct fwnode_handle {
+    struct fwnode_handle *secondary;       // fallback fwnode لو الأول مجاوبش
+    const struct fwnode_operations *ops;   // vtable: كل العمليات المتاحة
+    struct device *dev;                    // الـ device المرتبط (for devlinks only)
+    struct list_head suppliers;            // list من fwnode_link اللي بتوفر resources
+    struct list_head consumers;            // list من fwnode_link اللي بتستهلك resources
+    u8 flags;                              // FWNODE_FLAG_* bitmask
+};
+```
+
+| Field | النوع | الدور |
+|-------|-------|-------|
+| `secondary` | `*fwnode_handle` | لو الـ ops الأولانية فشلت، يحاول مع الـ secondary (مثلاً ACPI + DT معاً) |
+| `ops` | `*fwnode_operations` | الـ vtable — كل الـ backends بتحدد الـ ops بتاعتهم هنا |
+| `dev` | `*device` | بيتحدد بس لما الـ fwnode يتربط بـ `struct device` |
+| `suppliers` | `list_head` | رأس list للـ `fwnode_link` اللي فيها الـ fwnode ده consumer |
+| `consumers` | `list_head` | رأس list للـ `fwnode_link` اللي فيها الـ fwnode ده supplier |
+| `flags` | `u8` | bitmask من `FWNODE_FLAG_*` |
+
+---
+
+#### 2. `struct fwnode_operations`
+
+**الغرض:** الـ vtable اللي كل firmware backend (ACPI، OF/DT، swnode) بيملّيه. بيوفر abstraction layer موحد للتعامل مع أي نوع firmware node.
+
+| Function Pointer | الدور |
+|-----------------|-------|
+| `get` / `put` | reference counting |
+| `device_is_available` | هل الـ device متاح في firmware؟ |
+| `device_get_match_data` | جيب الـ driver match data |
+| `device_dma_supported` | هل بيدعم DMA؟ |
+| `device_get_dma_attr` | جيب نوع الـ DMA coherency |
+| `property_present` | هل الـ property موجودة؟ |
+| `property_read_bool` | اقرأ boolean property |
+| `property_read_int_array` | اقرأ array من integers |
+| `property_read_string_array` | اقرأ array من strings |
+| `get_name` | اسم الـ node |
+| `get_name_prefix` | prefix للطباعة |
+| `get_parent` | الـ parent node |
+| `get_next_child_node` | iteration على الـ children |
+| `get_named_child_node` | child باسم معين |
+| `get_reference_args` | اقرأ reference property مع args |
+| `graph_get_next_endpoint` | iteration على الـ endpoints في graph |
+| `graph_get_remote_endpoint` | الـ endpoint الـ remote المقابل |
+| `graph_get_port_parent` | الـ parent للـ port node |
+| `graph_parse_endpoint` | parse port/endpoint IDs |
+| `iomap` | map MMIO region |
+| `irq_get` | جيب رقم الـ IRQ |
+| `add_links` | ابني fwnode links لكل الـ suppliers |
+
+---
+
+#### 3. `struct fwnode_link`
+
+**الغرض:** يمثل **dependency link** بين firmware node supplier وآخر consumer. بيُستخدم في الـ device probe ordering.
+
+```c
+struct fwnode_link {
+    struct fwnode_handle *supplier;  // الـ node اللي بيوفر resource
+    struct list_head s_hook;         // hook في قائمة consumers الخاصة بالـ supplier
+    struct fwnode_handle *consumer;  // الـ node اللي بيستهلك
+    struct list_head c_hook;         // hook في قائمة suppliers الخاصة بالـ consumer
+    u8 flags;                        // FWLINK_FLAG_* bitmask
+};
+```
+
+| Field | الدور |
+|-------|-------|
+| `supplier` | pointer للـ `fwnode_handle` المُوفِّر |
+| `s_hook` | بيربط الـ link في `supplier->consumers` list |
+| `consumer` | pointer للـ `fwnode_handle` المستهلك |
+| `c_hook` | بيربط الـ link في `consumer->suppliers` list |
+| `flags` | CYCLE أو IGNORE |
+
+---
+
+#### 4. `struct fwnode_endpoint`
+
+**الغرض:** بيمثل **graph endpoint** في firmware graph — يُستخدم في تمثيل connections بين hardware blocks (زي camera sensor ↔ ISP).
+
+```c
+struct fwnode_endpoint {
+    unsigned int port;                      // رقم الـ port
+    unsigned int id;                        // رقم الـ endpoint جوه الـ port
+    const struct fwnode_handle *local_fwnode; // الـ fwnode الخاص بالـ endpoint ده
+};
+```
+
+---
+
+#### 5. `struct fwnode_reference_args`
+
+**الغرض:** لما property بتشير لـ fwnode تانية وبتحمل arguments معها (زي GPIO specifiers في DT).
 
 ```c
 struct fwnode_reference_args {
-    struct fwnode_handle *fwnode;          /* الـ node المُشار إليه */
-    unsigned int nargs;                    /* عدد الـ args الفعلية */
-    u64 args[NR_FWNODE_REFERENCE_ARGS];   /* الـ args — حد أقصى 16 */
+    struct fwnode_handle *fwnode;       // الـ node المُشار إليه
+    unsigned int nargs;                 // عدد الـ args الصحيحة
+    u64 args[NR_FWNODE_REFERENCE_ARGS]; // القيم (max 16)
 };
 ```
 
 ---
 
-### 2. مخطط العلاقات بين الـ Structs
+### رسم العلاقات بين الـ Structs
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                  fwnode_handle                      │
-│                                                     │
-│  secondary ──────────────────────────────────────►  fwnode_handle
-│                                                     │  (fallback)
-│  ops ────────────────────────────────────────────►  fwnode_operations
-│                                                     │  (vtable: get/put/
-│  dev ────────────────────────────────────────────►  struct device       │   property_*/graph_*)
-│                                                     │
-│  suppliers ◄──── list_head ◄──── fwnode_link.c_hook │
-│                                      │              │
-│  consumers ◄──── list_head ◄──── fwnode_link.s_hook │
-│                                                     │
-└─────────────────────────────────────────────────────┘
-                         ▲               ▲
-                         │               │
-              fwnode_link.consumer    fwnode_link.supplier
-                         │               │
-              ┌──────────┴───────────────┴──────────┐
-              │           fwnode_link                │
-              │  supplier ─────────────────────────► fwnode_handle (supplier)
-              │  consumer ─────────────────────────► fwnode_handle (consumer)
-              │  s_hook  (في قائمة supplier->consumers)            │
-              │  c_hook  (في قائمة consumer->suppliers)            │
-              │  flags                                              │
-              └─────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                      fwnode_handle (A)                          │
+│  ops ──────────────────────────────────► fwnode_operations      │
+│  secondary ──────────────────────────► fwnode_handle (B)        │
+│  dev ────────────────────────────────► struct device            │
+│  consumers ──┐                                                   │
+│  suppliers ──┤                                                   │
+└──────────────┼──────────────────────────────────────────────────┘
+               │
+               │  (via list_head hooks)
+               ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                        fwnode_link                               │
+│  supplier ──────────────────────────► fwnode_handle (supplier)  │
+│  s_hook   ── in supplier->consumers list                        │
+│  consumer ──────────────────────────► fwnode_handle (consumer)  │
+│  c_hook   ── in consumer->suppliers list                        │
+│  flags    (CYCLE / IGNORE)                                       │
+└──────────────────────────────────────────────────────────────────┘
 
-fwnode_reference_args:
-              ┌──────────────────────────────────────┐
-              │       fwnode_reference_args           │
-              │  fwnode ───────────────────────────► fwnode_handle
-              │  nargs  = 2                           │
-              │  args   = [1, 0, ...]                 │
-              └──────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                    fwnode_reference_args                         │
+│  fwnode ────────────────────────────► fwnode_handle (target)    │
+│  nargs                                                           │
+│  args[0..15]  (u64 values)                                       │
+└─────────────────────────────────────────────────────────────────┘
 
-fwnode_endpoint:
-              ┌──────────────────────────────────────┐
-              │         fwnode_endpoint               │
-              │  port         = 0                     │
-              │  id           = 0                     │
-              │  local_fwnode ─────────────────────► fwnode_handle
-              └──────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                      fwnode_endpoint                             │
+│  local_fwnode ──────────────────────► fwnode_handle (endpoint)  │
+│  port  (u32)                                                     │
+│  id    (u32)                                                     │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### الـ Secondary Chain
+
+الـ `secondary` field بيسمح بـ chaining — مثلاً device عنده ACPI node وDT node:
+
+```
+fwnode_handle (ACPI)
+  └── secondary ──► fwnode_handle (DT)
+                      └── secondary ──► NULL
+```
+
+لو ops الأولانية مجابتش نتيجة (مثلاً property مش موجودة في ACPI)، الـ kernel بيجرب الـ secondary تلقائياً.
+
+---
+
+### رسم الـ Supplier/Consumer Graph
+
+```
+        fwnode_handle [clock-controller]
+        ┌─────────────────────────┐
+        │  consumers list head    │◄──── s_hook (fwnode_link A)
+        └─────────────────────────┘
+                                             │
+                                    fwnode_link A
+                                    ┌─────────────────┐
+                                    │ supplier → clk  │
+                                    │ consumer → uart │
+                                    └─────────────────┘
+                                             │
+        fwnode_handle [uart]                 │
+        ┌─────────────────────────┐          │
+        │  suppliers list head    │◄──── c_hook (fwnode_link A)
+        └─────────────────────────┘
 ```
 
 ---
 
-#### مخطط الـ Supplier/Consumer Graph بالتفصيل
+### Lifecycle Diagram
+
+#### دورة حياة الـ `fwnode_handle`
 
 ```
-  fwnode_handle (clock supplier)          fwnode_handle (uart consumer)
-  ┌──────────────────────────┐            ┌──────────────────────────┐
-  │  consumers               │            │  suppliers               │
-  │  [list_head] ◄──────────────────────► [list_head]               │
-  │                          │  fwnode_link                         │
-  │                          │  ┌────────────────────────────────┐  │
-  │                          │  │ supplier ──► clock fwnode_handle│  │
-  │                          │  │ s_hook   ── في clock->consumers │  │
-  │                          │  │ consumer ──► uart fwnode_handle │  │
-  │                          │  │ c_hook   ── في uart->suppliers  │  │
-  │                          │  └────────────────────────────────┘  │
-  └──────────────────────────┘            └──────────────────────────┘
-```
+1. ALLOCATION
+   ──────────
+   Backend allocates container struct (e.g., acpi_device, device_node)
+   which embeds fwnode_handle
 
----
+2. INITIALIZATION
+   ───────────────
+   fwnode_init(fwnode, &my_ops)
+     → fwnode->ops = &my_ops
+     → INIT_LIST_HEAD(&fwnode->consumers)
+     → INIT_LIST_HEAD(&fwnode->suppliers)
 
-### 3. مخطط الـ Lifecycle
+3. REGISTRATION / LINK BUILDING
+   ──────────────────────────────
+   ops->add_links(fwnode)
+     → fwnode_link_add(consumer, supplier, flags)
+       → allocates fwnode_link
+       → list_add(&link->s_hook, &supplier->consumers)
+       → list_add(&link->c_hook, &consumer->suppliers)
+     → fwnode->flags |= FWNODE_FLAG_LINKS_ADDED
 
-#### lifecycle الـ `fwnode_handle`
+4. DEVICE CREATION
+   ─────────────────
+   device_add() associates struct device with fwnode
+     → fwnode->dev = dev
+   fwnode_dev_initialized(fwnode, true)
+     → fwnode->flags |= FWNODE_FLAG_INITIALIZED
 
-```
-  ┌─────────────────────────────────────────────────────────────────────────┐
-  │                         CREATION                                        │
-  │                                                                         │
-  │  Backend allocates fwnode (e.g. acpi_device, of_node, swnode)          │
-  │           │                                                             │
-  │           ▼                                                             │
-  │  fwnode_init(fwnode, &backend_ops)                                      │
-  │    → ops = &backend_ops                                                 │
-  │    → INIT_LIST_HEAD(&fwnode->consumers)                                 │
-  │    → INIT_LIST_HEAD(&fwnode->suppliers)                                 │
-  │           │                                                             │
-  │           ▼                                                             │
-  │                         REGISTRATION                                    │
-  │                                                                         │
-  │  device_add() → device->fwnode = fwnode                                │
-  │               → fwnode->dev = device                                   │
-  │           │                                                             │
-  │           ▼                                                             │
-  │                      LINK CREATION                                      │
-  │                                                                         │
-  │  fwnode->ops->add_links(fwnode)                                         │
-  │    → يحدد كل الـ suppliers من الـ firmware                              │
-  │    → fwnode_link_add(consumer, supplier, flags)                         │
-  │    → FWNODE_FLAG_LINKS_ADDED يتعمل set                                  │
-  │           │                                                             │
-  │           ▼                                                             │
-  │                         PROBE ORDER                                     │
-  │                                                                         │
-  │  fw_devlink يتحقق إن كل suppliers عملوا probe أول                       │
-  │    → لو في cycle: FWLINK_FLAG_CYCLE يتعمل set → متعملش defer           │
-  │           │                                                             │
-  │           ▼                                                             │
-  │                       HARDWARE INIT                                     │
-  │                                                                         │
-  │  driver->probe() ينجح                                                   │
-  │    → fwnode_dev_initialized(fwnode, true)                               │
-  │    → FWNODE_FLAG_INITIALIZED يتعمل set                                  │
-  │           │                                                             │
-  │           ▼                                                             │
-  │                         TEARDOWN                                        │
-  │                                                                         │
-  │  device_del() أو driver unload                                          │
-  │    → fwnode_dev_initialized(fwnode, false)                              │
-  │    → fwnode_links_purge(fwnode) — يمسح كل الـ links                    │
-  │    → fw_devlink_purge_absent_suppliers(fwnode)                          │
-  │    → fwnode->ops->put(fwnode)                                           │
-  └─────────────────────────────────────────────────────────────────────────┘
+5. USAGE (property reads, graph traversal)
+   ─────────────────────────────────────────
+   fwnode_call_int_op(fwnode, property_read_int_array, ...)
+     → checks fwnode_has_op()
+     → calls fwnode->ops->property_read_int_array(fwnode, ...)
+
+6. TEARDOWN
+   ─────────
+   fwnode_links_purge(fwnode)
+     → removes all fwnode_link entries from suppliers/consumers lists
+     → frees fwnode_link objects
+   fw_devlink_purge_absent_suppliers(fwnode)
+     → يزيل links لـ suppliers مش موجودين في firmware
+   fwnode_dev_initialized(fwnode, false)
+     → fwnode->flags &= ~FWNODE_FLAG_INITIALIZED
+   Backend frees container struct → fwnode_handle يتحرر معاه
 ```
 
 ---
 
-#### lifecycle الـ `fwnode_link`
+### Call Flow Diagrams
+
+#### قراءة property
 
 ```
-  fwnode_link_add(consumer, supplier, flags)
-         │
-         ▼
-  alloc fwnode_link
-  link->supplier = supplier
-  link->consumer = consumer
-  link->flags = flags
-         │
-         ├── list_add(&link->s_hook, &supplier->consumers)
-         └── list_add(&link->c_hook, &consumer->suppliers)
-         │
-         ▼
-   [fw_devlink checks this link during probe ordering]
-         │
-         ▼
-  fwnode_links_purge(fwnode)
-         │
-         ├── iterates supplier->consumers → removes + kfrees links
-         └── iterates consumer->suppliers → removes + kfrees links
-```
-
----
-
-### 4. مخططات الـ Call Flow
-
-#### قراءة property من driver
-
-```
-driver calls: fwnode_property_read_u32(fwnode, "clock-frequency", &val)
+driver calls: fwnode_property_read_u32(fwnode, "reg", &val)
   │
-  ▼
-property.h wrapper
-  → fwnode_call_int_op(fwnode, property_read_int_array, ...)
-      │
-      ├── fwnode_has_op(fwnode, property_read_int_array)?
-      │     → !IS_ERR_OR_NULL(fwnode) && fwnode->ops && fwnode->ops->property_read_int_array
-      │
-      ├── YES → fwnode->ops->property_read_int_array(fwnode, "clock-frequency", 4, &val, 1)
-      │           │
-      │           ├── [Device Tree backend] → of_property_read_u32_array()
-      │           │     → reads from DTB in memory
-      │           │
-      │           └── [ACPI backend] → acpi_dev_get_property()
-      │                 → reads from ACPI namespace
-      │
-      └── NO (ops==NULL) → return -ENXIO
-                           (IS_ERR_OR_NULL) → return -EINVAL
+  └─► fwnode_call_int_op(fwnode, property_read_int_array, "reg", sizeof(u32), &val, 1)
+        │
+        ├─ fwnode_has_op(fwnode, property_read_int_array)?
+        │    ├── YES → fwnode->ops->property_read_int_array(fwnode, "reg", 4, &val, 1)
+        │    │           │
+        │    │           ├── [OF backend]  → reads DT property bytes
+        │    │           ├── [ACPI backend] → reads _DSD property
+        │    │           └── [swnode backend] → reads software_node_property
+        │    │
+        │    └── NO → return -ENXIO (ops missing)
+        │         or → return -EINVAL (fwnode is NULL/ERR)
 ```
 
 #### graph endpoint traversal
 
 ```
-driver calls: fwnode_graph_get_next_endpoint(fwnode, NULL)
+driver wants to iterate endpoints:
+
+fwnode_graph_get_next_endpoint(fwnode, NULL)
   │
-  ▼
-fwnode_call_ptr_op(fwnode, graph_get_next_endpoint, NULL)
+  └─► fwnode_call_ptr_op(fwnode, graph_get_next_endpoint, NULL)
+        │
+        └─► ops->graph_get_next_endpoint(fwnode, prev=NULL)
+              │
+              └─► returns endpoint fwnode_handle (port@0/endpoint@0)
+
+fwnode_graph_get_remote_endpoint(ep_fwnode)
   │
-  ▼
-fwnode->ops->graph_get_next_endpoint(fwnode, NULL)
-  │
-  ├── [DT] → of_graph_get_next_endpoint()
-  │     → يدور على child nodes باسم "port@*" ثم "endpoint@*"
-  │
-  └── returns fwnode_handle للـ endpoint
-         │
-         ▼
-  fwnode_graph_parse_endpoint(endpoint_fwnode, &ep_struct)
-    → fwnode->ops->graph_parse_endpoint(fwnode, &ep_struct)
-    → ep_struct.port = رقم الـ port
-    → ep_struct.id   = رقم الـ endpoint
-         │
-         ▼
-  fwnode_graph_get_remote_endpoint(endpoint_fwnode)
-    → fwnode->ops->graph_get_remote_endpoint(fwnode)
-    → يرجع فيه الطرف الآخر من الكابل
+  └─► ops->graph_get_remote_endpoint(ep_fwnode)
+        │
+        └─► returns fwnode of connected remote endpoint
 ```
 
-#### dependency probe ordering
+#### بناء الـ devlinks
 
 ```
-fw_devlink_create_devlink() [في drivers/base/]
-  │
-  ▼
-fwnode->ops->add_links(fwnode)
-  │
-  ├── يمشي على كل references في الـ firmware node
-  │     مثال: "clocks", "power-domains", "regulators"
-  │
-  ▼
-fwnode_link_add(consumer_fwnode, supplier_fwnode, 0)
-  │
-  ├── يخلق fwnode_link object
-  └── يضيفه في lists الطرفين
-         │
-         ▼
-  really_probe() في drivers/base/dd.c
-    → بيتحقق: هل كل fwnode_link في consumer->suppliers
-              الـ supplier بتاعها عمل probe وفيها FWNODE_FLAG_INITIALIZED؟
-    → لو لأ → defer probe
-    → لو آه → كمل
+fw_devlink mechanism:
+
+for each fwnode in firmware tree:
+  ops->add_links(fwnode)
+    │
+    ├─► parse properties that reference other fwnodes
+    │     (e.g., "clocks", "power-domains", "interconnects")
+    │
+    └─► fwnode_link_add(this_fwnode, supplier_fwnode, 0)
+          │
+          ├─► alloc fwnode_link
+          ├─► link->supplier = supplier_fwnode
+          ├─► link->consumer = this_fwnode
+          ├─► list_add(&link->s_hook, &supplier_fwnode->consumers)
+          └─► list_add(&link->c_hook, &this_fwnode->suppliers)
+
+Later, driver core uses these links to order probe:
+  supplier must probe before consumer
+  (unless FWLINK_FLAG_CYCLE or FWLINK_FLAG_IGNORE)
 ```
 
 ---
 
-### 5. استراتيجية الـ Locking
+### Locking Strategy
 
-الـ `fwnode.h` نفسه **مش بيعرّف locks صريحة** — لكن الـ locking بيحصل في الطبقات اللي فوقيه:
+الـ `fwnode.h` نفسه **مش بيعرّف locks**، لكن الـ locking بيحصل في الطبقات اللي فوقه:
 
-#### جدول الـ Locking
+| Resource | Lock المستخدم | مين يمسكه |
+|----------|--------------|-----------|
+| الـ `fwnode_link` lists (`suppliers`/`consumers`) | `device_links_lock` (في `drivers/base/core.c`) | الـ driver core لما يعدل الـ lists |
+| الـ `fwnode_handle->flags` | مش محتاج lock مستقل — بيتعدل في سياق واحد (probe/init) | الـ backend نفسه |
+| الـ `fwnode_handle->dev` | protected by device model lifecycle (device_lock) | الـ driver core |
+| الـ OF tree (DT backend) | `of_mutex` أو RCU read lock | OF subsystem |
+| الـ ACPI namespace | ACPI subsystem locks | ACPI core |
 
-| Data | الـ Lock المستخدم | مكانه |
-|------|-------------------|--------|
-| `fwnode_handle.flags` | `device_links_write_lock()` — وهو `device_links_lock` (rwsem) | `drivers/base/core.c` |
-| `fwnode_handle.suppliers` list | `device_links_write_lock()` | `drivers/base/core.c` |
-| `fwnode_handle.consumers` list | `device_links_write_lock()` | `drivers/base/core.c` |
-| `fwnode_link` allocation/free | `device_links_write_lock()` | `drivers/base/core.c` |
-| قراءة properties (ops calls) | بدون lock في الغالب — الـ properties immutable بعد الـ init | — |
-| الـ `fwnode_handle.dev` pointer | `device_lock(dev)` لو محتاج access متزامن | `drivers/base/core.c` |
-
-#### ترتيب الـ Locking (Lock Ordering)
-
+**Lock Ordering المهم:**
 ```
-device_links_write_lock()   [rwsem - outer]
-    └── device_lock(dev)    [mutex - inner]
+device_lock(dev)
+  └─► device_links_lock  (ممنوع تعكس الترتيب ده)
 ```
 
-**قاعدة:** مينفعش تمسك `device_lock` وبعدين تاخد `device_links_write_lock` — ده هيعمل deadlock. الترتيب دايماً: device_links أولاً ثم device_lock.
-
-#### الـ `fwnode_dev_initialized()` و `fwnode_init()` — thread safety
-
-- **`fwnode_init()`**: بيتعمل call مرة واحدة أثناء الـ initialization — قبل ما أي thread تاني يشوف الـ object، فمش محتاج lock.
-- **`fwnode_dev_initialized()`**: بيعدل `flags` — المفروض يتعمل call من سياق الـ device probe/remove اللي محمي بـ `device_lock`.
-- الـ `IS_ERR_OR_NULL` check في `fwnode_dev_initialized()` بيحمي من الـ NULL dereference لو الـ fwnode مش موجود.
-
-#### الـ `secondary` pointer
-
-الـ `fwnode_handle.secondary` بيتعمل set مرة واحدة وبيبقى ثابت — فالقراءة منه مش محتاجة lock. الـ `fwnode_call_*` macros بيتبعوا chain الـ secondary أوتوماتيك من خلال الـ ops.
+**الـ `fwnode_init()` و `fwnode_dev_initialized()`** بيتاخدوا بدون lock لأنهم بيتشغلوا في وقت init/teardown اللي مفيش race فيه.
 ## Phase 4: شرح الـ Functions
 
 ---
 
-### ملخص كل الـ Functions والـ APIs — Cheatsheet
+### ملخص سريع — Cheatsheet
 
 #### الـ Inline Functions
 
-| Function | النوع | الغرض |
+| Function | Category | الوظيفة |
 |---|---|---|
-| `fwnode_init()` | `static inline` | تهيئة `fwnode_handle` بربط الـ ops وتهيئة الـ lists |
-| `fwnode_dev_initialized()` | `static inline` | set/clear الـ `FWNODE_FLAG_INITIALIZED` flag |
+| `fwnode_init()` | Initialization | تهيئة `fwnode_handle` بربط الـ ops وتهيئة الـ lists |
+| `fwnode_dev_initialized()` | State Management | set/clear الـ `FWNODE_FLAG_INITIALIZED` |
 
 #### الـ Exported Functions
 
-| Function | النوع | الغرض |
+| Function | Category | الوظيفة |
 |---|---|---|
-| `fwnode_link_add()` | exported | إنشاء `fwnode_link` بين supplier وconsumer |
-| `fwnode_links_purge()` | exported | حذف كل الـ links المرتبطة بـ fwnode |
-| `fw_devlink_purge_absent_suppliers()` | exported | تنظيف links الـ suppliers الغير موجودة |
-| `fw_devlink_is_strict()` | exported | يرجع true لو الـ fw_devlink mode هو strict |
+| `fwnode_link_add()` | Link Management | إنشاء `fwnode_link` بين consumer و supplier |
+| `fwnode_links_purge()` | Cleanup | حذف كل الـ links المرتبطة بـ fwnode معين |
+| `fw_devlink_purge_absent_suppliers()` | Cleanup | حذف الـ links لـ suppliers غير موجودين |
+| `fw_devlink_is_strict()` | Query | استعلام عن الـ devlink strict mode |
 
-#### الـ Dispatch Macros (vtable call helpers)
+#### الـ vtable Ops (`struct fwnode_operations`)
 
-| Macro | يرجع | الغرض |
+| Op | Return | الوظيفة |
 |---|---|---|
-| `fwnode_has_op(fwnode, op)` | `bool` | check إن الـ op موجود في الـ vtable |
-| `fwnode_call_int_op(fwnode, op, ...)` | `int` | استدعاء op يرجع int |
-| `fwnode_call_bool_op(fwnode, op, ...)` | `bool` | استدعاء op يرجع bool |
-| `fwnode_call_ptr_op(fwnode, op, ...)` | `ptr` | استدعاء op يرجع pointer |
-| `fwnode_call_void_op(fwnode, op, ...)` | `void` | استدعاء op لا يرجع قيمة |
+| `get` | `fwnode_handle *` | زيادة الـ refcount |
+| `put` | `void` | تقليل الـ refcount |
+| `device_is_available` | `bool` | هل الجهاز متاح في الـ firmware? |
+| `device_get_match_data` | `const void *` | بيانات الـ match من الـ firmware |
+| `device_dma_supported` | `bool` | هل الجهاز يدعم DMA? |
+| `device_get_dma_attr` | `enum dev_dma_attr` | نوع الـ DMA coherency |
+| `property_present` | `bool` | هل الـ property موجودة? |
+| `property_read_bool` | `bool` | قراءة property بوليانية |
+| `property_read_int_array` | `int` | قراءة array من integers |
+| `property_read_string_array` | `int` | قراءة array من strings |
+| `get_name` | `const char *` | اسم الـ node |
+| `get_name_prefix` | `const char *` | prefix للـ node (للطباعة) |
+| `get_parent` | `fwnode_handle *` | الـ parent node |
+| `get_next_child_node` | `fwnode_handle *` | التكرار على الـ children |
+| `get_named_child_node` | `fwnode_handle *` | child باسم محدد |
+| `get_reference_args` | `int` | قراءة reference + arguments من property |
+| `graph_get_next_endpoint` | `fwnode_handle *` | التكرار على الـ graph endpoints |
+| `graph_get_remote_endpoint` | `fwnode_handle *` | الـ remote endpoint |
+| `graph_get_port_parent` | `fwnode_handle *` | parent الـ port node |
+| `graph_parse_endpoint` | `int` | parse port/endpoint IDs |
+| `iomap` | `void __iomem *` | map الـ MMIO resource |
+| `irq_get` | `int` | الحصول على رقم الـ IRQ |
+| `add_links` | `int` | إنشاء الـ supplier links |
 
-#### الـ fwnode_operations vtable pointers
+#### الـ Dispatch Macros
 
-| Op | Signature مختصرة | الغرض |
-|---|---|---|
-| `get` | `fwnode_handle *(*)(fwnode_handle *)` | ref-count زيادة |
-| `put` | `void (*)(fwnode_handle *)` | ref-count نقصان |
-| `device_is_available` | `bool (*)(fwnode_handle *)` | هل الـ device متاح في الـ firmware |
-| `device_get_match_data` | `const void *(*)(fwnode_handle *, device *)` | driver match data |
-| `device_dma_supported` | `bool (*)(fwnode_handle *)` | هل الـ device يدعم DMA |
-| `device_get_dma_attr` | `enum dev_dma_attr (*)(fwnode_handle *)` | نوع الـ DMA coherency |
-| `property_present` | `bool (*)(fwnode_handle *, propname)` | هل property موجودة |
-| `property_read_bool` | `bool (*)(fwnode_handle *, propname)` | قراءة boolean property |
-| `property_read_int_array` | `int (*)(fwnode_handle *, propname, elem_size, val, nval)` | قراءة integer array |
-| `property_read_string_array` | `int (*)(fwnode_handle *, propname, val, nval)` | قراءة string array |
-| `get_name` | `const char *(*)(fwnode_handle *)` | اسم الـ node |
-| `get_name_prefix` | `const char *(*)(fwnode_handle *)` | prefix للطباعة |
-| `get_parent` | `fwnode_handle *(*)(fwnode_handle *)` | الـ parent node |
-| `get_next_child_node` | `fwnode_handle *(*)(fwnode_handle *, child)` | iteration على الـ children |
-| `get_named_child_node` | `fwnode_handle *(*)(fwnode_handle *, name)` | child باسم معين |
-| `get_reference_args` | `int (*)(fwnode_handle *, prop, nargs_prop, nargs, index, args)` | resolve phandle reference |
-| `graph_get_next_endpoint` | `fwnode_handle *(*)(fwnode_handle *, prev)` | iteration على الـ endpoints |
-| `graph_get_remote_endpoint` | `fwnode_handle *(*)(fwnode_handle *)` | الـ remote endpoint المقابل |
-| `graph_get_port_parent` | `fwnode_handle *(*)(fwnode_handle *)` | parent الـ port node |
-| `graph_parse_endpoint` | `int (*)(fwnode_handle *, fwnode_endpoint *)` | parse port/id من endpoint |
-| `iomap` | `void __iomem *(*)(fwnode_handle *, index)` | map MMIO resource |
-| `irq_get` | `int (*)(fwnode_handle *, index)` | get Linux IRQ number |
-| `add_links` | `int (*)(fwnode_handle *)` | بناء الـ fwnode links للـ suppliers |
+| Macro | الوظيفة |
+|---|---|
+| `fwnode_has_op(fwnode, op)` | تحقق من وجود الـ op قبل الاستدعاء |
+| `fwnode_call_int_op(fwnode, op, ...)` | استدعاء op بـ return int مع fallback errors |
+| `fwnode_call_bool_op(fwnode, op, ...)` | استدعاء op بـ return bool مع fallback false |
+| `fwnode_call_ptr_op(fwnode, op, ...)` | استدعاء op بـ return pointer مع fallback NULL |
+| `fwnode_call_void_op(fwnode, op, ...)` | استدعاء op بدون return value |
 
 ---
 
-### Group 1: Initialization — تهيئة الـ fwnode
+### Group 1: Initialization & State Management
 
-الـ group ده مسؤول عن تهيئة الـ `fwnode_handle` قبل ما يتسجّل في النظام. كل firmware backend (OF، ACPI، swnode) بيستخدمه لربط الـ ops وتحضير الـ linked lists اللي بتتحكم في الـ device links.
+هذه المجموعة مسؤولة عن تهيئة الـ `fwnode_handle` وضبط حالته. يتم استدعاؤها من الـ firmware backends (OF، ACPI، software_node) عند تسجيل node جديد.
 
 ---
 
@@ -1159,22 +924,20 @@ static inline void fwnode_init(struct fwnode_handle *fwnode,
                                const struct fwnode_operations *ops)
 ```
 
-**بتعمل إيه:**
-بتربط الـ `ops` vtable بالـ `fwnode_handle` وبتهيّئ الـ `suppliers` و`consumers` lists باستخدام `INIT_LIST_HEAD`. من غير الاستدعاء ده، أي محاولة إنشاء device link هتفشل لأن الـ lists مش initialized.
+بتربط الـ `ops` vtable بالـ `fwnode_handle`، وبتهيئ الـ `consumers` و `suppliers` lists كـ empty circular lists باستخدام `INIT_LIST_HEAD`. لازم تتستدعى قبل أي عملية تانية على الـ fwnode.
 
 **Parameters:**
-- `fwnode` — الـ handle اللي هيتهيّأ، بيكون embedded جوه struct أكبر زي `of_node` أو `acpi_device`.
-- `ops` — pointer على الـ `fwnode_operations` vtable الخاصة بالـ firmware backend.
+- `fwnode` — الـ handle الجديد اللي هيتم تهيئته
+- `ops` — الـ vtable اللي بيوفر backend-specific implementations زي `of_fwnode_ops` أو `acpi_fwnode_ops`
 
-**Return:** void
+**Return:** لا يوجد
 
 **Key details:**
-- لا يوجد locking — بيتّستدعى في سياق initialization قبل ما الـ node يبقى visible للنظام.
-- بعد الاستدعاء، الـ `fwnode->dev` بيفضل `NULL` وبيتّعبّى بعدين من `device_add()`.
-- الـ `flags` field بيفضل zero — كل الـ flags ماشية على default غير set.
+- مش بتصفي كل الـ fields؛ الـ caller مسؤول عن ضبط `secondary` و `dev` و `flags` لو محتاج
+- الـ `INIT_LIST_HEAD` بيستخدم `WRITE_ONCE` داخليًا — مناسب للـ concurrent environments لو الـ caller ضامن visibility
+- مفيش locking هنا — الـ caller مسؤول عن أي synchronization قبل ما يعمل expose للـ node
 
-**Who calls it:**
-بيتّستدعى من firmware backends عند تهيئة node جديد — مثلاً `of_node_init()` في OF، أو `acpi_init_device_object()` في ACPI، أو `software_node_register()`.
+**Who calls it:** كل backend بيعمل register fwnode جديد: `of_node_init()`, `acpi_fwnode_init()`, `software_node_init()`
 
 ---
 
@@ -1185,28 +948,139 @@ static inline void fwnode_dev_initialized(struct fwnode_handle *fwnode,
                                           bool initialized)
 ```
 
-**بتعمل إيه:**
-بتعدّل الـ `FWNODE_FLAG_INITIALIZED` flag في الـ `fwnode->flags`. الـ flag ده بيشير إن الـ hardware المقابل للـ node اتّهيأ فعلاً. الـ device core بيستخدمه عشان يعرف امتى يبدأ يبني الـ supplier/consumer ordering.
+بتضبط أو بتمسح الـ `FWNODE_FLAG_INITIALIZED` flag في `fwnode->flags`. الـ flag ده بيعبّر عن إن الـ hardware المرتبط بالـ node اتهيأ فعلًا.
 
 **Parameters:**
-- `fwnode` — الـ handle المستهدف. لو `IS_ERR_OR_NULL` بيرجع فوراً بدون crash.
-- `initialized` — `true` يعمل set للـ flag، `false` يعمل clear.
+- `fwnode` — الـ node المستهدف
+- `initialized` — `true` لضبط الـ flag، `false` لمسحه
 
-**Return:** void
+**Return:** لا يوجد
 
 **Key details:**
-- الـ guard على `IS_ERR_OR_NULL` مهم جداً — بعض الـ paths بتمرر NULL fwnode وده expected.
-- الـ flag ده بيأثر على الـ `fw_devlink` engine: node مش initialized ممكن يسبب defer للـ probe.
-- مفيش locking هنا — المفروض يتّستدعى من سياق synchronous زي `probe()` أو `remove()`.
+- بتعمل guard بـ `IS_ERR_OR_NULL` — لو الـ fwnode NULL أو error pointer، بترجع بصمت
+- الـ flag ده بيستخدمه الـ device link machinery لتحديد ترتيب الـ probe
+- مفيش locking ضمني — الـ caller لازم يضمن thread safety
 
-**Who calls it:**
-`really_probe()` في `drivers/base/dd.c` بيستدعيه بـ `true` بعد `probe()` ينجح، وبـ `false` بعد `remove()`.
+**Who calls it:** الـ device core عند `device_add()` و `device_del()`
 
 ---
 
-### Group 2: Dispatch Macros — الـ vtable Call Layer
+### Group 2: Link Management
 
-الـ group ده بيوفر abstraction layer موحدة فوق الـ `fwnode_operations` vtable. بدلاً من كل caller يعمل check يدوي على الـ pointer، الـ macros دي بتتكلف كل الـ NULL/ERR checking وبترجع قيم افتراضية مناسبة.
+هذه المجموعة تدير الـ `fwnode_link` objects اللي بتمثل علاقات الـ supplier/consumer بين الـ firmware nodes. الـ device link subsystem بيعتمد عليها لترتيب الـ probe.
+
+---
+
+#### `fwnode_link_add`
+
+```c
+int fwnode_link_add(struct fwnode_handle *con, struct fwnode_handle *sup,
+                    u8 flags);
+```
+
+بتنشئ `fwnode_link` جديد بيربط `con` (consumer) بـ `sup` (supplier). الـ link بيتضاف في `sup->consumers` list وفي `con->suppliers` list عبر الـ `s_hook` و `c_hook` fields.
+
+**Parameters:**
+- `con` — الـ consumer fwnode (الجهاز اللي محتاج الـ supplier)
+- `sup` — الـ supplier fwnode (الجهاز اللي بيوفر الـ resource)
+- `flags` — `FWLINK_FLAG_CYCLE` أو `FWLINK_FLAG_IGNORE` أو صفر
+
+**Return:** `0` عند النجاح، error code سالب عند الفشل (مثلًا `-ENOMEM` لو الـ allocation فشل، أو لو الـ link موجود بالفعل)
+
+**Key details:**
+- بتتحقق من إن الـ link مش موجود بالفعل قبل الإنشاء
+- الـ `FWLINK_FLAG_CYCLE` بيمنع الـ probe deferral لو الـ link جزء من cycle
+- الـ `FWLINK_FLAG_IGNORE` بيخلي الـ subsystem يتجاهل الـ link حتى في cycle detection
+- الـ locking يتم داخل الـ implementation (في `drivers/base/core.c`) باستخدام الـ `fwnode_links_lock`
+
+**Who calls it:** الـ `fwnode_ops->add_links()` callback من كل backend، و `fw_devlink` subsystem أثناء الـ probe cycle
+
+**Pseudocode flow:**
+```
+fwnode_link_add(con, sup, flags):
+    lock fwnode_links_lock
+    search con->suppliers for existing link to sup
+    if found → unlock, return 0 (idempotent)
+    alloc fwnode_link
+    link->supplier = sup
+    link->consumer = con
+    link->flags = flags
+    list_add(&link->s_hook, &sup->consumers)
+    list_add(&link->c_hook, &con->suppliers)
+    unlock
+    return 0
+```
+
+---
+
+#### `fwnode_links_purge`
+
+```c
+void fwnode_links_purge(struct fwnode_handle *fwnode);
+```
+
+بتحذف كل الـ `fwnode_link` objects اللي فيها `fwnode` كـ supplier أو consumer. بتمشي على الـ `suppliers` list والـ `consumers` list وبتحرر كل entry.
+
+**Parameters:**
+- `fwnode` — الـ node اللي هيتم تنظيف links بتاعته
+
+**Return:** لا يوجد
+
+**Key details:**
+- بتتعامل مع الـ links من الجانبين: حذف fwnode كـ consumer من suppliers بتوعه، وكـ supplier من consumers بتوعه
+- لازم تتستدعى قبل ما يتحرر الـ fwnode نفسه
+- الـ locking داخلي مثل `fwnode_link_add`
+
+**Who calls it:** `fwnode_remove()` و device unregister paths في الـ device core
+
+---
+
+#### `fw_devlink_purge_absent_suppliers`
+
+```c
+void fw_devlink_purge_absent_suppliers(struct fwnode_handle *fwnode);
+```
+
+بتتفحص الـ suppliers المرتبطين بالـ `fwnode` وبتحذف الـ links لـ suppliers مش موجودين في الـ system (مش registered في الـ fwnode graph). مفيدة لتجنب probe deferral لأجهزة مش هتيجي أبدًا.
+
+**Parameters:**
+- `fwnode` — الـ consumer node اللي هيتم فحص suppliers بتاعته
+
+**Return:** لا يوجد
+
+**Key details:**
+- "absent" هنا تعني: الـ supplier fwnode موجود في الـ firmware description بس مش registered كـ device
+- الـ `fw_devlink` strict mode بيأثر على السلوك ده — في strict mode، غياب الـ supplier بيسبب error
+- بتتعامل مع الـ recursive case: لو الـ absent supplier عنده هو كمان suppliers
+
+**Who calls it:** الـ `driver_probe_device()` وحالات الـ late bind في الـ device core
+
+---
+
+#### `fw_devlink_is_strict`
+
+```c
+bool fw_devlink_is_strict(void);
+```
+
+بترجع `true` لو الـ `fw_devlink` kernel parameter اتضبط على `strict`. في الـ strict mode، أي device عنده supplier مش bound بيتأجل probe بتاعه بدون استثناء.
+
+**Parameters:** لا يوجد
+
+**Return:** `true` = strict mode مفعّل، `false` = الـ default permissive behavior
+
+**Key details:**
+- القيمة بتيجي من الـ kernel command line: `fw_devlink=strict`
+- الـ strict mode مهم لـ production systems اللي عايزة guarantee صح للـ probe ordering
+- بتستخدمها أجزاء تانية من الـ device core عند قرار defer أو لا
+
+**Who calls it:** `fw_devlink_purge_absent_suppliers()` وأي code بيحتاج يقرر سياسة الـ devlink
+
+---
+
+### Group 3: Dispatch Macros
+
+هذه الـ macros هي الـ "glue" بين الـ generic property API والـ backend-specific ops. كلها بتتحقق من وجود الـ op قبل الاستدعاء وبتوفر fallback مناسب.
 
 ---
 
@@ -1217,18 +1091,13 @@ static inline void fwnode_dev_initialized(struct fwnode_handle *fwnode,
     (!IS_ERR_OR_NULL(fwnode) && (fwnode)->ops && (fwnode)->ops->op)
 ```
 
-**بيعمل إيه:**
-بيتحقق إن الـ `fwnode` مش NULL أو error pointer، وإن الـ `ops` vtable موجود، وإن الـ op المحدد مش NULL. الثلاثة conditions لازم تتحقق.
+بيتحقق من ثلاث شروط بالترتيب: الـ fwnode مش NULL/error، الـ ops pointer مش NULL، والـ op المحدد نفسه مش NULL. الـ short-circuit evaluation بيحمي من null deref.
 
-**Parameters:**
-- `fwnode` — الـ handle المستهدف.
-- `op` — اسم الـ field في `fwnode_operations` (بدون `->` أو `()`).
-
-**Return:** `bool` — الـ result من الـ compound condition.
-
-**Key details:**
-- المفروض يتّستخدم كـ guard قبل الـ dispatch، أو بشكل مباشر لو الكود محتاج يعمل early-exit.
-- الـ `IS_ERR_OR_NULL` بيحمي من الـ error pointer patterns اللي شايعة في الـ OF/ACPI code.
+**Usage example:**
+```c
+if (fwnode_has_op(fwnode, get_name))
+    name = fwnode->ops->get_name(fwnode);
+```
 
 ---
 
@@ -1241,30 +1110,7 @@ static inline void fwnode_dev_initialized(struct fwnode_handle *fwnode,
      (IS_ERR_OR_NULL(fwnode) ? -EINVAL : -ENXIO))
 ```
 
-**بيعمل إيه:**
-لو الـ op موجود بيستدعيه ويرجع قيمته. لو الـ `fwnode` نفسه invalid بيرجع `-EINVAL`. لو الـ `fwnode` valid بس الـ op مش مُنفَّذ بيرجع `-ENXIO` — ده تمييز مهم جداً.
-
-**Parameters:**
-- `fwnode` — الـ handle.
-- `op` — اسم الـ operation في الـ vtable.
-- `...` — arguments إضافية بتتمرر للـ op مباشرة (بعد الـ fwnode الأول).
-
-**Return:** `int` — قيمة الـ op، أو `-EINVAL`/`-ENXIO` لو مفيش op.
-
-**Key details:**
-- الفرق بين `-EINVAL` و`-ENXIO`: الأول فشل الـ handle نفسه، التاني الـ backend مش بيدعم الـ operation دي.
-- الـ `## __VA_ARGS__` مع الـ `##` بيحل مشكلة trailing comma لو مفيش arguments إضافية.
-
-**Pseudocode flow:**
-```
-fwnode_call_int_op(fwnode, property_read_int_array, name, 4, buf, n):
-  if fwnode_has_op(fwnode, property_read_int_array):
-    return fwnode->ops->property_read_int_array(fwnode, name, 4, buf, n)
-  elif IS_ERR_OR_NULL(fwnode):
-    return -EINVAL
-  else:
-    return -ENXIO   /* backend doesn't implement this op */
-```
+الـ fallback بيفرق بين حالتين: لو الـ fwnode نفسه invalid بترجع `-EINVAL`، لو valid بس الـ op مش موجود بترجع `-ENXIO` (operation not supported). ده أدق من رجوع `-ENOENT` عشان يعبّر إن الـ node موجود بس الـ backend مش بيدعم العملية دي.
 
 ---
 
@@ -1276,14 +1122,7 @@ fwnode_call_int_op(fwnode, property_read_int_array, name, 4, buf, n):
      (fwnode)->ops->op(fwnode, ## __VA_ARGS__) : false)
 ```
 
-**بيعمل إيه:**
-بيستدعي op يرجع `bool`، ولو مش موجود يرجع `false` كـ safe default.
-
-**Return:** `bool`.
-
-**Key details:**
-- الـ `false` default هنا منطقي — "هل property موجودة؟" الجواب الافتراضي هو "لا".
-- بيتّستخدم مع ops زي `device_is_available`، `device_dma_supported`، `property_present`، `property_read_bool`.
+الـ fallback هنا `false` — معناها "الخاصية دي مش موجودة" وهو السلوك الصح لمعظم حالات الـ boolean properties.
 
 ---
 
@@ -1295,14 +1134,7 @@ fwnode_call_int_op(fwnode, property_read_int_array, name, 4, buf, n):
      (fwnode)->ops->op(fwnode, ## __VA_ARGS__) : NULL)
 ```
 
-**بيعمل إيه:**
-بيستدعي op يرجع pointer، ولو مش موجود يرجع `NULL`.
-
-**Return:** `pointer` أو `NULL`.
-
-**Key details:**
-- الـ NULL return بيتوافق مع convention الـ iteration: `get_next_child_node` بترجع NULL لو مفيش children.
-- بيتّستخدم مع: `get_parent`، `get_next_child_node`، `get_named_child_node`، `graph_get_next_endpoint`، `graph_get_remote_endpoint`، `graph_get_port_parent`.
+الـ fallback `NULL` — الـ caller لازم يتحقق من النتيجة قبل الاستخدام. كتير من الـ iteration APIs زي `get_next_child_node` بتستخدم هذا الـ macro.
 
 ---
 
@@ -1316,455 +1148,238 @@ fwnode_call_int_op(fwnode, property_read_int_array, name, 4, buf, n):
     } while (false)
 ```
 
-**بيعمل إيه:**
-بيستدعي op لا يرجع قيمة (مثل `put`)، مع الـ do-while(false) pattern للـ macro hygiene.
-
-**Return:** void.
-
-**Key details:**
-- الـ `do { } while (false)` ضروري عشان المـ macro يتصرف صح مع `if/else` بدون braces.
-- بيتّستخدم مع: `put`.
+بيستخدم `do { } while(false)` idiom عشان يكون safe في `if/else` blocks بدون أقواس. الـ `get` و `put` ops بتستخدم هذا الـ macro عادةً.
 
 ---
 
-### Group 3: fwnode_operations vtable — شرح كل Op
+### Group 4: الـ `fwnode_operations` vtable
 
-الـ vtable دي هي قلب الـ firmware node abstraction. كل firmware backend (OF، ACPI، swnode) بينفّذ subset منها. الـ ops اللي مش موجودة بترجع قيم افتراضية عبر الـ dispatch macros.
+الـ `struct fwnode_operations` هو قلب الـ fwnode abstraction. كل firmware backend بيوفر implementation خاصة بيه.
 
-#### Lifecycle Ops: `get` و`put`
+---
+
+#### Sub-group 4.1: Reference Counting
 
 ```c
 struct fwnode_handle *(*get)(struct fwnode_handle *fwnode);
 void (*put)(struct fwnode_handle *fwnode);
 ```
 
-**بيعملوا إيه:**
-بيديروا الـ reference counting على الـ fwnode object. `get` بيزود الـ refcount ويرجع نفس الـ pointer. `put` بينقص الـ refcount وممكن يحرر الـ memory.
+الـ **`get`** بيزود الـ refcount للـ node وبيرجع نفس الـ pointer (أو NULL لو فشل). الـ **`put`** بيقلل الـ refcount وممكن يحرر الـ memory لو وصل صفر.
 
-**Key details:**
-- الـ OF implementation: `of_node_get()` / `of_node_put()` — بيتبعوا الـ `kobject` refcount.
-- الـ ACPI implementation: بيزودوا/بينقصوا الـ `acpi_handle` reference.
-- الـ swnode implementation: لا يعمل حاجة (static nodes).
-- لازم كل iterator يعمل `put` على الـ node اللي جابه لو مش هيتابع الـ iteration.
+- في OF: بيستخدم `of_node_get()` / `of_node_put()` اللي بيعملوا wrap على `kobject_get/put`
+- في ACPI: بيستخدم `acpi_get_acpi_dev()` / `acpi_dev_put()`
+- في software_node: counting بسيط
 
 ---
 
-#### Availability Op: `device_is_available`
+#### Sub-group 4.2: Device Availability & Match
 
 ```c
 bool (*device_is_available)(const struct fwnode_handle *fwnode);
-```
-
-**بيعمل إيه:**
-بيتحقق من الـ firmware description إن الـ device ده enabled. في الـ DT بيشوف الـ `status` property: `"okay"` أو absent يعني available. في ACPI بيشوف `_STA` method.
-
-**Return:** `true` لو available، `false` لو disabled أو mismatch.
-
-**Key details:**
-- بيتّستدعى من `of_device_is_available()` و`acpi_device_is_present()`.
-- الـ probe path بيقف لو الـ device مش available.
-
----
-
-#### Match Data Op: `device_get_match_data`
-
-```c
 const void *(*device_get_match_data)(const struct fwnode_handle *fwnode,
                                      const struct device *dev);
-```
-
-**بيعمل إيه:**
-بيرجع الـ driver-specific data المرتبطة بالـ compatible string أو الـ ACPI ID. الـ OF implementation بتبحث في الـ `of_device_id` table وترجع الـ `data` field. بيُستخدم في drivers لقراءة chip-specific configuration من `of_match_table`.
-
-**Parameters:**
-- `fwnode` — الـ device node.
-- `dev` — الـ struct device المقابل، محتاجه عشان يوصل لـ driver's `of_match_table`.
-
-**Return:** `const void *` — pointer للـ match data، أو `NULL` لو مفيش match.
-
----
-
-#### DMA Ops: `device_dma_supported` و`device_get_dma_attr`
-
-```c
 bool (*device_dma_supported)(const struct fwnode_handle *fwnode);
 enum dev_dma_attr (*device_get_dma_attr)(const struct fwnode_handle *fwnode);
 ```
 
-**بيعملوا إيه:**
-الأول بيتحقق إن الـ device capable of DMA. التاني بيرجع نوع الـ coherency:
-
-| قيمة | معنى |
-|---|---|
-| `DEV_DMA_NOT_SUPPORTED` | الـ device مش بيدعم DMA |
-| `DEV_DMA_NON_COHERENT` | DMA بدون hardware coherency — محتاج cache ops |
-| `DEV_DMA_COHERENT` | DMA مع hardware cache coherency |
-
-**Key details:**
-- الـ `of_dma_is_coherent()` بيقرأ الـ `dma-coherent` property من الـ DT.
-- النتيجة بتأثر على الـ `dma_map_ops` اللي بيتّستخدم مع الـ device.
+- **`device_is_available`**: في DT بيتحقق من `status = "okay"` أو غياب الـ status property. في ACPI بيتحقق من `_STA` method.
+- **`device_get_match_data`**: بيرجع الـ `driver_data` من أول entry في `of_match_table` أو `acpi_match_table` يطابق الجهاز.
+- **`device_dma_supported`** و **`device_get_dma_attr`**: بيحددوا هل الجهاز يدعم DMA ونوع الـ coherency (non-coherent / coherent). بيستخدمهم `of_dma_configure()` وما يعادله في ACPI.
 
 ---
 
-#### Property Ops
+#### Sub-group 4.3: Property Access
 
 ```c
 bool (*property_present)(const struct fwnode_handle *fwnode,
                          const char *propname);
-
 bool (*property_read_bool)(const struct fwnode_handle *fwnode,
                            const char *propname);
-
 int (*property_read_int_array)(const struct fwnode_handle *fwnode,
                                const char *propname,
                                unsigned int elem_size, void *val,
                                size_t nval);
-
 int (*property_read_string_array)(const struct fwnode_handle *fwnode_handle,
                                   const char *propname, const char **val,
                                   size_t nval);
 ```
 
-**بيعملوا إيه:**
-- `property_present`: بيتحقق وجود property بالاسم بس — مش بيقرأ قيمتها.
-- `property_read_bool`: بيقرأ property boolean — في الـ DT property موجودة = true، absent = false.
-- `property_read_int_array`: بيقرأ array من integers. `elem_size` بيحدد حجم كل عنصر (1, 2, 4, أو 8 bytes). لو `val == NULL` بيرجع عدد العناصر.
-- `property_read_string_array`: بيقرأ array من strings. لو `val == NULL` بيرجع عدد الـ strings.
+- **`property_present`**: وجود الـ property بغض النظر عن قيمتها.
+- **`property_read_bool`**: قراءة boolean property — في DT ده property موجود بدون قيمة.
+- **`property_read_int_array`**: الـ `elem_size` بيحدد حجم كل عنصر (1, 2, 4, 8 bytes). لو `val == NULL` بترجع عدد العناصر المتاحة. لو `nval == 0` بترجع عدد العناصر أيضًا.
+- **`property_read_string_array`**: نفس نمط الـ `int_array` — `val == NULL` بترجع العدد.
 
-**Parameters (property_read_int_array):**
-- `propname` — اسم الـ property.
-- `elem_size` — حجم كل عنصر بالـ bytes (sizeof(u8/u16/u32/u64)).
-- `val` — buffer للنتيجة، أو `NULL` لاستعلام العدد فقط.
-- `nval` — عدد العناصر المطلوبة.
+**Pattern للقراءة الآمنة:**
+```c
+/* أول: عرّف العدد */
+int count = fwnode_call_int_op(fwnode, property_read_int_array,
+                               "reg", 4, NULL, 0);
+if (count < 0)
+    return count;
 
-**Return:** `0` لو نجح، عدد العناصر لو `val == NULL`، قيمة سالبة للخطأ.
-
-**Key details:**
-- الـ `elem_size` abstraction مهم جداً — بيسمح لنفس الـ op تقرأ `u8` و`u32` و`u64` arrays.
-- في الـ OF implementation، `__of_property_read_u32_index()` وإخواتها بتنفّذ الـ parsing.
-- Thread safety: الـ OF nodes محمية بـ `of_node_lock` — الـ ops دي بتاخد الـ lock داخلياً.
+/* تاني: اقرأ البيانات */
+u32 *buf = kcalloc(count, sizeof(u32), GFP_KERNEL);
+fwnode_call_int_op(fwnode, property_read_int_array,
+                   "reg", 4, buf, count);
+```
 
 ---
 
-#### Naming Ops: `get_name` و`get_name_prefix`
+#### Sub-group 4.4: Node Navigation
 
 ```c
 const char *(*get_name)(const struct fwnode_handle *fwnode);
 const char *(*get_name_prefix)(const struct fwnode_handle *fwnode);
-```
-
-**بيعملوا إيه:**
-`get_name` بيرجع اسم الـ node في الـ firmware tree (مثلاً `"i2c@3c000000"`). `get_name_prefix` بيرجع prefix للـ print (مثلاً `"/"` في الـ OF أو `"\"` في الـ ACPI).
-
-**Return:** `const char *` — string ثابتة، مش محتاج تـ free.
-
-**Key details:**
-- الـ strings دي owned بالـ firmware backend — مش mutable ومش بتتحرر.
-- بيتّستخدموا في `dev_err()` messages وفي sysfs naming.
-
----
-
-#### Tree Traversal Ops: `get_parent`، `get_next_child_node`، `get_named_child_node`
-
-```c
 struct fwnode_handle *(*get_parent)(const struct fwnode_handle *fwnode);
-
-struct fwnode_handle *
-(*get_next_child_node)(const struct fwnode_handle *fwnode,
-                       struct fwnode_handle *child);
-
-struct fwnode_handle *
-(*get_named_child_node)(const struct fwnode_handle *fwnode,
-                        const char *name);
+struct fwnode_handle *(*get_next_child_node)(const struct fwnode_handle *fwnode,
+                                             struct fwnode_handle *child);
+struct fwnode_handle *(*get_named_child_node)(const struct fwnode_handle *fwnode,
+                                              const char *name);
 ```
 
-**بيعملوا إيه:**
-- `get_parent`: بيرجع parent node مع ref bump.
-- `get_next_child_node`: بيعمل iteration على الـ children. لو `child == NULL` بيبدأ من الأول. كل مرة بيبقى الـ caller مسؤول عن الـ `put` على الـ `child` السابق.
-- `get_named_child_node`: بيدور على child باسم محدد مع ref bump.
-
-**Return:** `fwnode_handle *` أو `NULL` في نهاية الـ iteration.
-
-**Key details:**
-- الـ pattern الصح للـ iteration:
-  ```c
-  child = NULL;
-  while ((child = fwnode_call_ptr_op(parent, get_next_child_node, child)))
-      process(child);
-  /* last child already put by next call returning NULL */
-  ```
-- في الـ OF implementation، `of_get_next_available_child()` بتتخطى الـ disabled nodes.
+- **`get_name`**: اسم الـ node — في DT هو الجزء قبل `@` في node name.
+- **`get_name_prefix`**: prefix للطباعة — في DT غالبًا `"/"` أو فارغ، في ACPI غالبًا `"\\"`
+- **`get_parent`**: بيرجع `fwnode_handle` للـ parent مع زيادة الـ refcount — الـ caller مسؤول عن `put`.
+- **`get_next_child_node`**: iterator function — لو `child == NULL` بترجع أول child. الـ implementation بتعمل `put` للـ `child` السابق وبترجع التالي برفع refcount.
+- **`get_named_child_node`**: بتدور على الـ children وبترجع أول واحد اسمه يطابق `name`، مع رفع الـ refcount.
 
 ---
 
-#### Reference Op: `get_reference_args`
+#### Sub-group 4.5: Reference Arguments
 
 ```c
 int (*get_reference_args)(const struct fwnode_handle *fwnode,
-                          const char *prop,
-                          const char *nargs_prop,
-                          unsigned int nargs,
-                          unsigned int index,
+                          const char *prop, const char *nargs_prop,
+                          unsigned int nargs, unsigned int index,
                           struct fwnode_reference_args *args);
 ```
 
-**بتعمل إيه:**
-بتـ resolve reference property زي `clocks`، `interrupts`، `dmas` في الـ DT، أو الـ ACPI equivalent. بترجع الـ fwnode المُشار إليه والـ arguments المصاحبة (زي `clock-cells`، `interrupt-cells`).
+بيقرأ reference property (زي `clocks`, `dmas`, `gpios` في DT) ويملى `struct fwnode_reference_args` بالـ target fwnode والـ integer arguments.
 
 **Parameters:**
-- `prop` — اسم الـ property اللي فيها الـ phandle (مثلاً `"clocks"`).
-- `nargs_prop` — اسم الـ property اللي بتحدد عدد الـ args (مثلاً `"#clock-cells"`). ممكن تبقى `NULL`.
-- `nargs` — عدد الـ args المتوقعة لو `nargs_prop == NULL`.
-- `index` — index الـ reference لو في multiple references في نفس الـ property.
-- `args` — struct للنتيجة.
+- `fwnode` — الـ consumer node
+- `prop` — اسم الـ property زي `"clocks"`
+- `nargs_prop` — اسم الـ property اللي فيها عدد الـ arguments زي `"#clock-cells"`، أو NULL لو fixed
+- `nargs` — عدد الـ arguments لو `nargs_prop == NULL`
+- `index` — index الـ entry المطلوب (الـ property ممكن يكون فيها أكتر من reference)
+- `args` — output structure
 
-**Return:** `0` لو نجح، قيمة سالبة للخطأ.
+**Return:** `0` عند النجاح، `-ENOENT` لو الـ property مش موجودة، `-EINVAL` لو الـ format غلط
 
-**Key details:**
-- `struct fwnode_reference_args` بيحتوي على `fwnode` مع ref bump + array من `u64` args (max `NR_FWNODE_REFERENCE_ARGS = 16`).
-- الـ caller مسؤول عن `fwnode_handle_put(args.fwnode)` بعد الاستخدام.
-- بيتّستدعى من `fwnode_property_get_reference_args()` في `drivers/base/property.c`.
-
-**Pseudocode flow:**
-```
-get_reference_args(fwnode, "clocks", "#clock-cells", 0, 0, &args):
-  1. قراءة property "clocks" من الـ firmware node
-  2. get phandle من index 0
-  3. resolve phandle → target fwnode_handle
-  4. قراءة "#clock-cells" من الـ target node → nargs
-  5. قراءة nargs u32 values من الـ property بعد الـ phandle
-  6. ملء args->fwnode + args->args[] + args->nargs
-  7. return 0
+**الـ `fwnode_reference_args` structure:**
+```c
+struct fwnode_reference_args {
+    struct fwnode_handle *fwnode; /* الـ supplier/target node */
+    unsigned int nargs;           /* عدد الـ args المقروءة */
+    u64 args[NR_FWNODE_REFERENCE_ARGS]; /* max 16 argument */
+};
 ```
 
 ---
 
-#### Graph Ops: `graph_get_next_endpoint`، `graph_get_remote_endpoint`، `graph_get_port_parent`، `graph_parse_endpoint`
+#### Sub-group 4.6: Graph (Port/Endpoint) Operations
+
+هذه الـ ops تدعم الـ OF graph bindings (V4L2، MIPI CSI-2، display pipelines إلخ) حيث الأجهزة مترابطة بـ endpoints.
 
 ```c
-struct fwnode_handle *
-(*graph_get_next_endpoint)(const struct fwnode_handle *fwnode,
-                           struct fwnode_handle *prev);
+struct fwnode_handle *(*graph_get_next_endpoint)(
+    const struct fwnode_handle *fwnode,
+    struct fwnode_handle *prev);
 
-struct fwnode_handle *
-(*graph_get_remote_endpoint)(const struct fwnode_handle *fwnode);
+struct fwnode_handle *(*graph_get_remote_endpoint)(
+    const struct fwnode_handle *fwnode);
 
-struct fwnode_handle *
-(*graph_get_port_parent)(struct fwnode_handle *fwnode);
+struct fwnode_handle *(*graph_get_port_parent)(
+    struct fwnode_handle *fwnode);
 
 int (*graph_parse_endpoint)(const struct fwnode_handle *fwnode,
                             struct fwnode_endpoint *endpoint);
 ```
 
-**بيعملوا إيه:**
-الـ ops دي بتدير الـ **OF graph** (V4L2 media graph / camera pipeline). الـ topology:
-
 ```
-device_node
-  └── port@0
-        └── endpoint@0  ←→  endpoint@1
-                              └── port@1
-                                    └── device_node (remote)
+Device Node
+  └── port@0          ← port node
+        └── endpoint@0  ← local endpoint
+              └── remote-endpoint → endpoint@0 في device تاني
+                                        └── port@0
+                                              └── Device Node (remote)
 ```
 
-- `graph_get_next_endpoint`: iteration على كل الـ endpoints في الـ device (عبر كل الـ ports).
-- `graph_get_remote_endpoint`: من local endpoint يرجع الـ endpoint المقابل على الـ remote device.
-- `graph_get_port_parent`: من port node يرجع الـ device node الأب.
-- `graph_parse_endpoint`: يقرأ `port` و`id` من endpoint node ويملأ `struct fwnode_endpoint`.
-
-**Parameters (graph_parse_endpoint):**
-- `fwnode` — الـ endpoint node.
-- `endpoint` — struct النتيجة: `{ .port, .id, .local_fwnode }`.
-
-**Return:** `0` أو قيمة سالبة للخطأ.
-
-**Key details:**
-- الـ `SWNODE_GRAPH_PORT_NAME_FMT = "port@%u"` و`SWNODE_GRAPH_ENDPOINT_NAME_FMT = "endpoint@%u"` هي الـ naming convention الإلزامية للـ software nodes.
-- الـ OF implementation: `of_graph_get_next_endpoint()` بتمشي عبر الـ ports tree.
-- بيتّستخدموا كتير في الـ V4L2، CSI، MIPI DSI، sound card drivers.
+- **`graph_get_next_endpoint`**: iterator على الـ endpoints — بتدور في كل الـ ports وترجع endpoints بالترتيب. لو `prev == NULL` بترجع أول endpoint.
+- **`graph_get_remote_endpoint`**: من local endpoint بترجع الـ remote endpoint (الطرف التاني من الـ connection).
+- **`graph_get_port_parent`**: من port node بترجع الـ device node (الـ parent اللي فوق الـ port).
+- **`graph_parse_endpoint`**: بتملى `struct fwnode_endpoint` بالـ `port` و `id` من أسماء الـ nodes.
 
 ---
 
-#### Resource Ops: `iomap` و`irq_get`
+#### Sub-group 4.7: Resource Access
 
 ```c
 void __iomem *(*iomap)(struct fwnode_handle *fwnode, int index);
 int (*irq_get)(const struct fwnode_handle *fwnode, unsigned int index);
 ```
 
-**بيعملوا إيه:**
-- `iomap`: بيعمل map لـ MMIO register range بالـ index من الـ firmware description وبيرجع `void __iomem *`. في الـ PCI fwnodes بيستدعي `pci_iomap_range()`.
-- `irq_get`: بيرجع Linux virtual IRQ number من الـ firmware IRQ description بالـ index. في الـ OF بيستدعي `of_irq_get()`.
-
-**Parameters:**
-- `index` — رقم الـ resource (اللي الـ driver طالبه من 0 إلى N-1).
-
-**Return:**
-- `iomap`: `void __iomem *` أو `IOMEM_ERR_PTR(errno)` للخطأ.
-- `irq_get`: Linux IRQ number (양수) أو قيمة سالبة للخطأ.
-
-**Key details:**
-- الـ `iomap` op موجودة أساساً للـ PCI fwnodes — platform devices عادةً بتستخدم `platform_get_resource()` مباشرة.
-- `irq_get` بيتّستخدم من `fwnode_irq_get()` في `drivers/base/property.c`.
+- **`iomap`**: بتعمل map لـ MMIO region بالـ `index` المحدد من الـ firmware resources. بترجع virtual address أو `IOMEM_ERR_PTR` عند الفشل.
+- **`irq_get`**: بترجع الـ Linux IRQ number (virtual IRQ) بعد ترجمته من الـ firmware representation (DT interrupt specifier أو ACPI `_CRS`).
 
 ---
 
-#### Links Op: `add_links`
+#### Sub-group 4.8: Link Creation
 
 ```c
 int (*add_links)(struct fwnode_handle *fwnode);
 ```
 
-**بتعمل إيه:**
-بتقرأ الـ firmware description وبتنشئ `fwnode_link` objects بين الـ consumer (fwnode الحالي) وكل الـ suppliers المذكورين (مثلاً `clocks`، `power-domains`، `iommus`، `pinctrl`). الـ device core بيستخدم الـ links دي لبناء الـ probe ordering.
+بيحلل الـ firmware node ويعمل `fwnode_link_add()` لكل supplier مذكور في الـ properties. ده هو الـ entry point لبناء الـ dependency graph.
 
-**Parameters:**
-- `fwnode` — الـ consumer node اللي هيتحلل suppliers بتاعه.
+**Return:** `0` عند النجاح، `-ENODEV` لو supplier مش موجود ومحتاج defer، error code تاني عند فشل حقيقي.
 
-**Return:** `0` لو نجح، قيمة سالبة للخطأ (مثلاً لو supplier node مش موجود بعد).
-
-**Key details:**
-- بيتّستدعى من `fwnode_link_add()` context أثناء device registration.
-- الـ FWNODE_FLAG_LINKS_ADDED بيتّسيت بعد نجاحه عشان منيتعملش add مرتين.
-- الـ FWNODE_FLAG_BEST_EFFORT بيأثر على السلوك: مش هيـ defer الـ probe لو supplier مش موجود وعنده driver.
-
-**Pseudocode flow:**
-```
-add_links(consumer_fwnode):
-  for each property in {clocks, power-domains, iommus, pinctrl-N, ...}:
-      for each phandle reference in property:
-          supplier = resolve_phandle(ref)
-          if supplier found:
-              fwnode_link_add(consumer_fwnode, supplier, 0)
-          else:
-              record missing supplier
-  set FWNODE_FLAG_LINKS_ADDED
-  return 0 or -ENODEV
-```
+**Who calls it:** الـ `fw_devlink` subsystem أثناء `device_add()` أو `fwnode_link_to_devlink()`.
 
 ---
 
-### Group 4: Link Management — إدارة الـ fwnode_links
+### Group 5: الـ Flags والـ Constants
 
-الـ group ده هو الـ runtime management للـ `fwnode_link` objects اللي بتحدد الـ supplier/consumer relationships بين الـ nodes. الـ `fw_devlink` engine بيبني عليها الـ device links الحقيقية.
+#### `fwnode_handle` Flags
+
+| Flag | Bit | المعنى |
+|---|---|---|
+| `FWNODE_FLAG_LINKS_ADDED` | 0 | الـ fwnode اتحلل بالفعل لإضافة الـ links — تجنب الـ duplicate |
+| `FWNODE_FLAG_NOT_DEVICE` | 1 | هذا الـ node مش هيترجم لـ `struct device` أبدًا (مثلًا port nodes) |
+| `FWNODE_FLAG_INITIALIZED` | 2 | الـ hardware المرتبط اتهيأ |
+| `FWNODE_FLAG_NEEDS_CHILD_BOUND_ON_ADD` | 3 | الـ driver محتاج كل الـ child devices تكون bound قبل ما يتعمل probe |
+| `FWNODE_FLAG_BEST_EFFORT` | 4 | probe مبكر — الـ missing suppliers مش blockers إلا لو عندهم drivers |
+| `FWNODE_FLAG_VISITED` | 5 | اتزار أثناء cycle detection في الـ fw_devlink |
+
+#### `fwnode_link` Flags
+
+| Flag | Bit | المعنى |
+|---|---|---|
+| `FWLINK_FLAG_CYCLE` | 0 | الـ link جزء من dependency cycle — مش هيعمل defer للـ probe |
+| `FWLINK_FLAG_IGNORE` | 1 | تجاهل تام — حتى في cycle detection |
+
+#### `enum dev_dma_attr`
+
+| Value | المعنى |
+|---|---|
+| `DEV_DMA_NOT_SUPPORTED` | الجهاز مش بيدعم DMA خالص |
+| `DEV_DMA_NON_COHERENT` | DMA بدون hardware coherency — محتاج explicit cache ops |
+| `DEV_DMA_COHERENT` | DMA مع hardware coherency كاملة |
 
 ---
 
-#### `fwnode_link_add`
+### Group 6: الـ Graph Node Naming Macros
 
 ```c
-int fwnode_link_add(struct fwnode_handle *con, struct fwnode_handle *sup,
-                    u8 flags);
+#define SWNODE_GRAPH_PORT_NAME_FMT      "port@%u"
+#define SWNODE_GRAPH_ENDPOINT_NAME_FMT  "endpoint@%u"
 ```
 
-**بتعمل إيه:**
-بتنشئ `struct fwnode_link` جديدة وبتربط الـ consumer node بالـ supplier node. الـ link بتتضاف في قائمتين: `sup->consumers` و`con->suppliers`. لو الـ link موجودة بالفعل بتـ update الـ flags وترجع `0`.
-
-**Parameters:**
-- `con` — الـ consumer fwnode (الـ device اللي محتاج الـ supplier).
-- `sup` — الـ supplier fwnode (الـ device اللي بيوفر الـ resource).
-- `flags` — مجموعة من:
-  - `FWLINK_FLAG_CYCLE (BIT(0))`: الـ link جزء من cycle — مش هنـ defer الـ probe بسببه.
-  - `FWLINK_FLAG_IGNORE (BIT(1))`: تجاهل الـ link تماماً حتى في الـ cycle detection.
-
-**Return:** `0` لو نجح (أو موجود)، قيمة سالبة للخطأ (مثلاً `-ENOMEM`).
-
-**Key details:**
-- بيتّستدعى من `add_links` op (أو من `fw_devlink` code مباشرة).
-- الـ locking: محتاج يتّستدعى مع الـ `fwnode_links_lock` مأخوذ — راجع `drivers/base/core.c`.
-- الـ link هتتحول لـ `device_link` حقيقية بعدين لما الـ struct devices تتّسجل.
-
----
-
-#### `fwnode_links_purge`
-
-```c
-void fwnode_links_purge(struct fwnode_handle *fwnode);
-```
-
-**بتعمل إيه:**
-بتحذف كل الـ `fwnode_link` objects اللي فيها الـ fwnode ده سواء كـ supplier أو كـ consumer. بتمشي على الـ `fwnode->suppliers` list وعلى الـ `fwnode->consumers` list وبتحرر كل `fwnode_link` بـ `kfree`.
-
-**Parameters:**
-- `fwnode` — الـ node اللي هتتحذف links بتاعته كلها.
-
-**Return:** void
-
-**Key details:**
-- بيتّستدعى أثناء فصل الـ fwnode عن النظام — مثلاً في `fwnode_handle_put()` لما الـ refcount يوصل صفر.
-- بعد الاستدعاء، الـ `suppliers` و`consumers` lists بتبقى empty lists صح (مش dangling).
-- خطر: لو فيه thread تاني بيتمشى على الـ lists في نفس الوقت، لازم يكون في locking مناسب.
-
----
-
-#### `fw_devlink_purge_absent_suppliers`
-
-```c
-void fw_devlink_purge_absent_suppliers(struct fwnode_handle *fwnode);
-```
-
-**بتعمل إيه:**
-بتمشي على الـ consumers list بتاعة الـ fwnode وبتحذف الـ links اللي الـ supplier بتاعها مش موجود كـ struct device (يعني موجود كـ firmware node بس مش registered كـ device). ده بيمنع الـ infinite probe deferral للـ devices اللي بتتكلم على hardware غير موجود.
-
-**Parameters:**
-- `fwnode` — الـ supplier fwnode.
-
-**Return:** void
-
-**Key details:**
-- بيتّستدعى لما `fw_devlink` يلاقي supplier node موجود في الـ DT/ACPI بس مش بيتحول لـ device.
-- بيشوف الـ `FWNODE_FLAG_NOT_DEVICE` flag كمؤشر إن الـ node مش هيبقى device أبداً.
-- الـ use case: nodes زي `cpus`، `memory`، `reserved-memory` موجودة في الـ DT بس مش devices حقيقية.
-
----
-
-#### `fw_devlink_is_strict`
-
-```c
-bool fw_devlink_is_strict(void);
-```
-
-**بتعمل إيه:**
-بترجع `true` لو الـ `fw_devlink` kernel parameter مضبوط على `"strict"` أو أعلى. في الـ strict mode، كل الـ `fwnode_link` references بتتحول لـ `device_link` إلزامية — يعني الـ consumer مش هيتـ probe إلا بعد الـ supplier.
-
-**Parameters:** لا يوجد.
-
-**Return:** `bool`.
-
-**Key details:**
-- الـ default في معظم kernel configs هو `"permissive"` أو `"off"`.
-- الـ strict mode مفيد للـ embedded systems اللي عايزة probe ordering صارم.
-- بيتّستدعى من `fw_devlink` logic في `drivers/base/core.c` لقرار إنشاء الـ device links.
-- الـ FWNODE_FLAG_BEST_EFFORT بيـ override الـ strict mode للـ nodes اللي محتاجة تـ probe early.
-
----
-
-### ملاحظة ختامية: العلاقة بين الـ Groups
-
-```
-firmware source (DT/ACPI/swnode)
-         │
-         ▼
-  fwnode_handle ←─── fwnode_init()
-         │               └── sets ops vtable
-         │               └── INIT_LIST_HEAD(suppliers/consumers)
-         │
-         ├──[ops vtable]──► property_read_*  (قراءة configuration)
-         │                ► graph_get_*      (media pipeline)
-         │                ► get_reference_args (phandle resolution)
-         │                ► add_links        (build dependency graph)
-         │
-         ▼
-  fwnode_link_add()  ──► fwnode_link{con→sup}
-         │
-         ▼
-  fw_devlink engine  ──► device_link (runtime PM + probe ordering)
-         │
-         └── fwnode_links_purge()  (cleanup on remove)
-```
+الـ `software_node` backend لازم يستخدم نفس naming convention للـ ports والـ endpoints زي الـ OF graph. الـ macros دي بتضمن consistency بين الـ backends. الـ `NR_FWNODE_REFERENCE_ARGS = 16` بيحدد الحد الأقصى لعدد arguments في أي reference property.
 ## Phase 5: دليل الـ Debugging الشامل
 
-الـ `fwnode` subsystem هو الطبقة اللي بتوحد الوصول لـ firmware metadata سواء جاية من **Device Tree (OF)**، **ACPI**، أو **software_node**. المشاكل بتظهر غالباً في probe failures، missing properties، أو broken device links.
+الـ `fwnode` subsystem هو الـ abstraction layer اللي بيوصل بين الـ firmware descriptions (ACPI, Device Tree, software nodes) والـ kernel device model. الـ debugging بتاعه بيتركز على ٣ محاور: صحة الـ fwnode graph، الـ device links/suppliers، وصحة الـ property reading.
 
 ---
 
@@ -1772,536 +1387,538 @@ firmware source (DT/ACPI/swnode)
 
 #### 1. debugfs Entries
 
-الـ debugfs بيكشف معلومات الـ device links والـ fwnode graph:
+الـ fwnode/devlink debugging بيظهر تحت `/sys/kernel/debug/` و `/sys/kernel/debug/devices/`:
 
 ```bash
-# Mount debugfs لو مش mounted
-mount -t debugfs none /sys/kernel/debug
+# عرض كل الـ device links الموجودة في الـ kernel
+ls /sys/kernel/debug/devices/
 
-# شوف كل device links (supplier → consumer)
-ls /sys/kernel/debug/device_component/
-cat /sys/kernel/debug/device_component/<driver_name>
-
-# شوف الـ fw_devlink graph كامل
-cat /sys/kernel/debug/fw_devlink/graph 2>/dev/null
-
-# فحص الـ deferred probes
-cat /sys/kernel/debug/devices_deferred
+# الـ fwnode links بتظهر من خلال devlink interface
+cat /sys/kernel/debug/devices/*/fwnode/
 ```
 
-**تفسير الـ output:**
+الـ entry الأهم للـ fwnode هو:
 
+| Path | المحتوى | طريقة القراءة |
+|------|---------|---------------|
+| `/sys/kernel/debug/devices/*/suppliers` | list الـ supplier fwnodes | `cat` |
+| `/sys/kernel/debug/devices/*/consumers` | list الـ consumer fwnodes | `cat` |
+| `/sys/kernel/debug/acpi/` | ACPI namespace كامل | `ls` + `cat` |
+| `/sys/kernel/debug/of/` | Device Tree nodes | `ls` recursively |
+
+```bash
+# عرض ACPI namespace كامل مع properties
+cat /sys/kernel/debug/acpi/acpica
+
+# Device Tree debug info
+find /sys/kernel/debug/of/ -name "properties" -exec cat {} \;
 ```
-/sys/kernel/debug/devices_deferred
-platform:my_device    # اسم الـ device اللي اتأخر probe-ه
-  Driver: my_driver   # الـ driver المسؤول
-  Waiting for: supplier_device  # اللي بينتظره
-```
-
-الـ `fw_devlink/graph` بيفرق بين links بـ `CYCLE` flag (مش هيسبب defer) وlinks عادية.
-
----
 
 #### 2. sysfs Entries
 
 ```bash
-# شوف الـ fwnode المرتبطة بـ device معين
-ls -la /sys/bus/platform/devices/<device_name>/
+# فحص الـ fwnode المرتبط بـ device معين
+ls -la /sys/bus/*/devices/*/of_node     # DT-based fwnode
+ls -la /sys/bus/*/devices/*/firmware_node  # ACPI fwnode
 
-# الـ of_node symlink (لو DT)
-ls -la /sys/bus/platform/devices/<device>/of_node
-# → يشاور على /sys/firmware/devicetree/base/...
-
-# شوف كل properties الـ DT node
-ls /sys/firmware/devicetree/base/<path_to_node>/
-cat /sys/firmware/devicetree/base/<path_to_node>/compatible
-
-# فحص الـ supplier/consumer links
-ls /sys/bus/platform/devices/<device>/supplier:*/
-ls /sys/bus/platform/devices/<device>/consumer:*/
-
-# شوف status الـ device link
-cat /sys/bus/platform/devices/<device>/supplier:<supplier>/auto_remove_on
-cat /sys/bus/platform/devices/<device>/supplier:<supplier>/status
+# فحص الـ device links (supplier/consumer)
+cat /sys/bus/*/devices/*/device_links/*/status
+cat /sys/bus/*/devices/*/device_links/*/auto_remove_consumers
+cat /sys/bus/*/devices/*/device_links/*/supplier
+cat /sys/bus/*/devices/*/device_links/*/consumer
 ```
 
----
+مثال على output طبيعي:
+
+```
+/sys/devices/platform/soc/fe300000.mmc/device_links/0--1/status
+>> 32   # DL_STATE_ACTIVE = 32
+```
+
+| sysfs Path | المعنى |
+|-----------|--------|
+| `device_links/*/status` | حالة الـ link: 1=dormant, 2=available, 4=consumer_probe, 8=active, 32=active |
+| `device_links/*/flags` | `DL_FLAG_STATELESS`, `DL_FLAG_AUTOREMOVE_CONSUMER` إلخ |
+| `of_node -> /sys/firmware/devicetree/` | symlink للـ DT node |
+
+```bash
+# فحص كل الـ device links في الـ system
+find /sys/devices -name "device_links" -type d | while read d; do
+    echo "=== $d ==="
+    ls "$d"/
+done
+```
 
 #### 3. ftrace — Tracepoints والـ Events
 
 ```bash
-# Enable function tracing للـ fwnode subsystem
+# تفعيل الـ fwnode/devlink events
 cd /sys/kernel/debug/tracing
 
-# تتبع كل دوال الـ property reading
-echo "fwnode_property_read*" > set_ftrace_filter
-echo "device_property_read*" >> set_ftrace_filter
+# الـ events المتاحة للـ device + fwnode
+grep -r "fwnode\|devlink\|fw_devlink" available_events
+
+# تفعيل كل الـ device probe events (بيشمل fwnode resolution)
+echo 1 > events/device/enable
+
+# تفعيل driver probe tracing
+echo 1 > events/initcall/enable
+
+# تفعيل الـ supplier/consumer link events
+echo 1 > events/bus/enable
+
+# مثال كامل: تتبع probe failures المرتبطة بـ fwnode
+echo 0 > trace
+echo 1 > events/device/enable
+echo 1 > events/bus/enable
 echo function > current_tracer
-echo 1 > tracing_on
-# ... شغّل الـ driver ...
-cat trace
-
-# استخدم trace events للـ device links
-echo 1 > events/devlink/enable
-echo 1 > tracing_on
-# ثم اقرأ الـ trace
-cat trace | grep devlink
-
-# تتبع دوال الـ probe path مع الـ fwnode
-echo "really_probe" > set_ftrace_filter
-echo "driver_probe_device" >> set_ftrace_filter
-echo "fwnode_link_add" >> set_ftrace_filter
-echo function_graph > current_tracer
-echo 1 > tracing_on
+echo "device_link*:fwnode*:fw_devlink*" > set_ftrace_filter
+cat trace_pipe
 ```
-
-**مثال output مفيد:**
-
-```
- 1) | really_probe() {
- 1) | fwnode_link_add() {    /* supplier link being added */
- 1)   0.312 us    |   }
- 1) + 15.231 us   | }
-```
-
----
-
-#### 4. printk والـ Dynamic Debug
 
 ```bash
-# فعّل dynamic debug لكل ملفات الـ fwnode subsystem
-echo "file drivers/base/property.c +p" > /sys/kernel/debug/dynamic_debug/control
-echo "file drivers/base/fwnode.c +p" >> /sys/kernel/debug/dynamic_debug/control
-echo "file drivers/base/core.c +p" >> /sys/kernel/debug/dynamic_debug/control
-
-# أو فعّل بـ module name (لو driver معين)
-echo "module my_driver +p" > /sys/kernel/debug/dynamic_debug/control
-
-# فعّل الـ fw_devlink debug messages
-echo "file drivers/base/devlink.c +pmfl" > /sys/kernel/debug/dynamic_debug/control
-# p = printk, m = module name, f = function, l = line
-
-# شوف إيه اللي enabled حالياً
-cat /sys/kernel/debug/dynamic_debug/control | grep "property\|fwnode\|devlink"
-
-# من kernel cmdline (early boot)
-# أضف للـ bootargs:
-dyndbg="file drivers/base/property.c +p"
+# تتبع فحص الـ fwnode ops calls
+echo ':fwnode_call_int_op*' >> set_ftrace_filter
+echo function > current_tracer
+cat trace_pipe | grep -E "fwnode|devlink"
 ```
 
----
+#### 4. printk / Dynamic Debug
+
+```bash
+# تفعيل dynamic debug لكل الـ fwnode/devlink messages
+echo 'file drivers/base/core.c +p' > /sys/kernel/debug/dynamic_debug/control
+echo 'file drivers/base/devlink.c +p' > /sys/kernel/debug/dynamic_debug/control
+echo 'file drivers/base/property.c +p' > /sys/kernel/debug/dynamic_debug/control
+echo 'file drivers/base/swnode.c +p' > /sys/kernel/debug/dynamic_debug/control
+
+# تفعيل ACPI fwnode messages
+echo 'file drivers/acpi/property.c +p' > /sys/kernel/debug/dynamic_debug/control
+echo 'file drivers/acpi/scan.c +p' > /sys/kernel/debug/dynamic_debug/control
+
+# تفعيل DT/OF fwnode messages
+echo 'file drivers/of/property.c +p' > /sys/kernel/debug/dynamic_debug/control
+echo 'file drivers/of/base.c +p' > /sys/kernel/debug/dynamic_debug/control
+
+# تفعيل كل fwnode-related modules دفعة واحدة
+echo 'module fwnode +p' > /sys/kernel/debug/dynamic_debug/control
+
+# رفع مستوى الـ loglevel مؤقتاً
+echo 8 > /proc/sys/kernel/printk
+```
+
+الـ kernel command line لتفعيل debugging من البداية:
+
+```bash
+# في /etc/default/grub أو bootloader
+GRUB_CMDLINE_LINUX="fw_devlink=on loglevel=8 dyndbg=+p"
+
+# تفعيل fw_devlink strict mode (يكشف dependencies مفقودة)
+GRUB_CMDLINE_LINUX="fw_devlink=on"
+
+# أو عبر sysfs runtime
+echo on > /sys/bus/platform/devices/.../firmware_node
+```
 
 #### 5. Kernel Config Options للـ Debugging
 
-| Config Option | الوظيفة |
-|---|---|
-| `CONFIG_DEBUG_DRIVER` | يفعّل pr_debug في drivers/base كلها |
-| `CONFIG_ACPI_DEBUG` | يطبع ACPI namespace و method eval |
-| `CONFIG_OF_DYNAMIC` | يسمح بتعديل DT في runtime (testing) |
-| `CONFIG_PROVE_LOCKING` | يكتشف locking bugs في الـ fwnode ops |
-| `CONFIG_DEBUG_DEVRES` | يتبع managed resources (devm_*) |
-| `CONFIG_DYNAMIC_DEBUG` | يفعّل pr_debug الـ selective |
-| `CONFIG_SOFTLOCKUP_DETECTOR` | يكتشف lockups أثناء الـ probe |
-| `CONFIG_FWNODE_MDIO` | debugging الـ MDIO fwnode graph |
-| `CONFIG_OF_UNITTEST` | unit tests لـ OF/fwnode layer |
-| `CONFIG_ACPI_TABLE_UPGRADE` | تحديث ACPI tables في runtime |
+| Config | الوظيفة |
+|--------|---------|
+| `CONFIG_DEBUG_DRIVER` | تفعيل driver core debug messages |
+| `CONFIG_DEBUG_DEVRES` | تتبع الـ devres allocations المرتبطة بـ devices |
+| `CONFIG_DEVICE_PRIVATE` | دعم private memory للـ devices (يحتاج debugging خاص) |
+| `CONFIG_OF_DYNAMIC` | دعم runtime DT changes + debugging |
+| `CONFIG_OF_UNITTEST` | unit tests للـ OF/DT fwnode |
+| `CONFIG_ACPI_DEBUG` | ACPI verbose debugging |
+| `CONFIG_ACPI_DEBUGGER` | interactive ACPI debugger |
+| `CONFIG_DEBUG_FS` | تفعيل debugfs (مطلوب لأغلب ما سبق) |
+| `CONFIG_PROVE_LOCKING` | كشف lock ordering violations في fwnode ops |
+| `CONFIG_LOCKDEP` | الـ full lock dependency tracking |
+| `CONFIG_KASAN` | كشف memory errors في fwnode allocations |
+| `CONFIG_KCSAN` | كشف data races في concurrent fwnode access |
+| `CONFIG_FW_DEVLINK_DEBUG` | debug output لـ fw_devlink (إذا موجود في kernel version) |
 
 ```bash
-# تأكد إن الـ config options موجودة
-zcat /proc/config.gz | grep -E "CONFIG_DEBUG_DRIVER|CONFIG_OF_DYNAMIC|CONFIG_DYNAMIC_DEBUG"
+# تحقق من الـ config الحالية
+zcat /proc/config.gz | grep -E "DEBUG_DRIVER|OF_UNITTEST|ACPI_DEBUG|DEBUG_DEVRES"
 ```
 
----
-
-#### 6. أدوات خاصة بالـ Subsystem
+#### 6. devlink والـ Tools الخاصة بالـ Subsystem
 
 ```bash
-# أداة dtc لفحص الـ Device Tree
-dtc -I fs /sys/firmware/devicetree/base > /tmp/current_dt.dts
-# ثم ابحث عن الـ node اللي عندك مشكلة فيه
-grep -A 20 "my_device" /tmp/current_dt.dts
+# fw_devlink: التحكم في سلوك الـ fwnode device links
+cat /sys/bus/platform/devices/*/firmware_node/
 
-# فحص ACPI tables
-acpidump > /tmp/acpi.dat
-acpixtract -a /tmp/acpi.dat
-iasl -d DSDT.dat   # يطلع DSDT.dsl قابل للقراءة
-grep -i "my_device" DSDT.dsl
+# تغيير fw_devlink mode runtime
+echo "on"       > /sys/bus/*/fw_devlink   # strict: defer probe حتى كل suppliers جاهزة
+echo "permissive" > /sys/bus/*/fw_devlink # relaxed: probe حتى لو supplier مش موجود
 
-# devlink tool (iproute2) — مش نفس الـ kernel fw_devlink
-# لكن لفحص الـ fwnode لـ network devices:
-devlink dev show
-devlink dev info pci/0000:01:00.0
+# أداة: evtest لفحص device nodes المرتبطة بـ input fwnodes
+evtest /dev/input/eventX
 
-# فحص الـ software_node
-ls /sys/kernel/debug/software_nodes/ 2>/dev/null
+# أداة: acpidump + acpixtract لـ ACPI fwnode
+acpidump > acpi.dat
+acpixtract -a acpi.dat
+iasl -d DSDT.dat   # decompile إلى readable ASL
 
-# سكريبت لطباعة كل fwnode properties لـ device
-for f in /sys/firmware/devicetree/base/soc/my_device/*; do
-    echo -n "$(basename $f): "
-    xxd $f 2>/dev/null || cat $f 2>/dev/null
-done
+# أداة: dtc لفحص Device Tree fwnodes
+dtc -I fs /sys/firmware/devicetree/base/ > current.dts
+
+# أداة: fwts (Firmware Test Suite)
+fwts acpi -r results.log
+
+# أداة: i2cdetect للـ I2C devices المرتبطة بـ fwnodes
+i2cdetect -y 1
 ```
 
----
+#### 7. جدول الـ Error Messages الشائعة
 
-#### 7. رسائل الـ Error الشائعة → المعنى → الحل
+| رسالة الـ Kernel Log | المعنى | الحل |
+|---------------------|--------|------|
+| `Waiting for supplier <fwnode>` | الـ device في انتظار supplier لم يُـprobe بعد | تحقق أن الـ supplier module محمّل، أو أضف `fw_devlink=permissive` |
+| `fwnode ops not set` | `fwnode_handle->ops == NULL` — الـ fwnode غير مكتمل التهيئة | تحقق من `fwnode_init()` call في الـ driver |
+| `ERROR: Failed to create fwnode link` | فشل `fwnode_link_add()` — غالباً memory allocation | فحص `/proc/meminfo`، ربما OOM |
+| `could not find phandle` | الـ DT reference لـ phandle غير موجود في الـ DT | تحقق من الـ DTS file، الـ phandle مش معرّف |
+| `of_fwnode_get: could not get ref` | فشل الحصول على reference لـ OF fwnode | الـ node مش موجود أو deleted |
+| `ACPI: No handler for region` | الـ ACPI fwnode يحاول access region غير مدعومة | تحقق من الـ ACPI tables |
+| `fw_devlink: Cycle detected` | الـ fwnode links فيها circular dependency (`FWLINK_FLAG_CYCLE`) | راجع الـ DTS/ACPI topology، تحقق من الـ supplier/consumer relations |
+| `swnode: duplicate node name` | software node بنفس الاسم مسجّل مرتين | تحقق من الـ driver registration order |
+| `fwnode_handle is NULL` | الـ device مش عنده fwnode مرتبط | تحقق من `device_set_node()` أو `of_node` assignment |
+| `graph_get_next_endpoint: no endpoint` | لا يوجد endpoint في الـ fwnode graph | تحقق من الـ port/endpoint في DTS |
 
-| رسالة الـ kernel log | المعنى | الحل |
-|---|---|---|
-| `probe deferral - supplier X not ready` | الـ consumer بيحاول يعمل probe قبل الـ supplier | تأكد إن الـ supplier device/driver اتحمل، فحص `devices_deferred` |
-| `fwnode_property_read_u32: -EINVAL` | الـ property موجودة لكن نوعها غلط | تأكد من نوع الـ property في DTS (u32 مش string) |
-| `fwnode_property_read_u32: -ENODATA` | الـ property مش موجودة خالص | تأكد من اسم الـ property في DTS/ACPI |
-| `fwnode_handle is NULL` | الـ device مش مربوط بـ fwnode | تأكد إن `dev->fwnode` اتضبط صح في platform data |
-| `ERROR: Bad cell-index for <node>` | الـ phandle reference فيها index برا الـ range | فحص عدد الـ `#xxx-cells` في الـ parent node |
-| `not creating device link ... no supplier found` | الـ `fw_devlink` مش لاقي الـ supplier node | اسم الـ supplier في DT مش متطابق مع الـ device المسجل |
-| `graph_get_remote_endpoint: NULL` | endpoint الـ graph مش متوصل لـ remote | فحص `remote-endpoint` phandle في DTS |
-| `-ENXIO from fwnode_call_int_op` | الـ fwnode مش NULL لكن الـ op نفسها مش موجودة | الـ fwnode_operations struct ناقصها الـ function pointer دي |
-| `supplier X prevented from binding` | `FWNODE_FLAG_BEST_EFFORT` مش set والـ supplier مش جاهز | إما تضيف الـ flag أو تصلح ترتيب الـ probe |
-| `cycle detected in fwnode link` | دورة في الـ supplier/consumer graph | فحص الـ DT، ممكن تضيف `FWLINK_FLAG_IGNORE` بحذر |
-
----
-
-#### 8. مواضع `dump_stack()` و`WARN_ON()`
-
-أماكن استراتيجية تحط فيها debug assertions:
+#### 8. أماكن إضافة `dump_stack()` و `WARN_ON()`
 
 ```c
-/* في fwnode_init() — تتأكد إن الـ ops مش NULL */
+/* في fwnode_init() — تحقق من صحة التهيئة */
 static inline void fwnode_init(struct fwnode_handle *fwnode,
                                const struct fwnode_operations *ops)
 {
-    WARN_ON(!ops);          /* لازم يكون عنده ops */
+    WARN_ON(!ops); /* ops يجب أن يكون غير NULL */
     fwnode->ops = ops;
     INIT_LIST_HEAD(&fwnode->consumers);
     INIT_LIST_HEAD(&fwnode->suppliers);
 }
 
-/* في fwnode_link_add() — تتأكد من عدم وجود cycles */
-int fwnode_link_add(struct fwnode_handle *con, struct fwnode_handle *sup,
-                    u8 flags)
-{
-    WARN_ON(con == sup);    /* الـ device مش هيكون supplier لنفسه */
-    /* ... */
+/* عند استدعاء fwnode_call_int_op — تحقق من الـ fwnode قبل الاستدعاء */
+/* في drivers بتاعتك: */
+if (WARN_ON(IS_ERR_OR_NULL(fwnode))) {
+    dump_stack();
+    return -EINVAL;
 }
 
-/* في driver probe — تتأكد من الـ fwnode قبل ما تستخدمه */
-static int my_driver_probe(struct platform_device *pdev)
-{
-    struct fwnode_handle *fwnode = dev_fwnode(&pdev->dev);
+/* عند fwnode_link_add — تحقق من cycles */
+WARN_ON(con == sup); /* self-link = bug */
 
-    if (WARN_ON(!fwnode)) {
-        /* dump_stack هنا يساعد تعرف مين استدعى الـ probe */
-        dump_stack();
-        return -ENODEV;
-    }
-    /* ... */
-}
-
-/* لو بتنفذ fwnode_operations — تتأكد من valid state */
-static int mydrv_fwnode_property_read_int_array(
-    const struct fwnode_handle *fwnode,
-    const char *propname,
-    unsigned int elem_size, void *val, size_t nval)
-{
-    struct mydrv_data *data = container_of(fwnode, struct mydrv_data, fwnode);
-    WARN_ON(!data->initialized);  /* الـ hardware لازم يكون initialized */
-    /* ... */
-}
+/* في fwnode_dev_initialized — تحقق من double-init */
+WARN_ON(initialized && (fwnode->flags & FWNODE_FLAG_INITIALIZED));
 ```
+
+نقاط استراتيجية في الـ kernel source للـ breakpoints/tracing:
+
+- `drivers/base/property.c` → `fwnode_property_read_*` — عند فشل قراءة property
+- `drivers/base/core.c` → `device_link_add()` — عند إنشاء device link
+- `drivers/base/devlink.c` → `fw_devlink_link_device()` — ربط الـ fwnode بالـ device
+- `drivers/of/property.c` → `of_fwnode_get_reference_args()` — عند فشل phandle resolution
 
 ---
 
 ### Hardware Level
 
-#### 1. التحقق من إن حالة الـ Hardware بتطابق حالة الـ Kernel
+#### 1. التحقق أن الـ Hardware State يطابق الـ Kernel State
 
 ```bash
-# تأكد من إن الـ device ظهر للـ kernel
-dmesg | grep "my_device\|my_driver"
+# مقارنة الـ devices المكتشفة في DT مع الـ probed devices
+# الـ devices في DT:
+find /sys/firmware/devicetree/base/ -name "compatible" -exec grep -l "." {} \; | wc -l
 
-# تحقق من الـ FWNODE_FLAG_INITIALIZED
-# من داخل kernel (بـ printk مؤقت):
-# pr_info("flags: 0x%x\n", fwnode->flags);
+# الـ devices المرتبطة بـ fwnodes والمـ probed فعلاً:
+find /sys/bus/*/devices/ -name "of_node" | wc -l
 
-# فحص إن الـ device available (status = "okay" في DT)
-cat /sys/firmware/devicetree/base/soc/my_device/status
-# يجيب: okay
+# مقارنة ACPI namespace مع الـ probed devices
+cat /sys/kernel/debug/acpi/acpica | grep -c "Device"
+ls /sys/bus/acpi/devices/ | wc -l
 
-# تحقق من device availability عبر sysfs
-cat /sys/bus/platform/devices/my_device/of_node/status
-
-# تأكد من الـ DMA coherency
-cat /sys/bus/platform/devices/my_device/dma_coherent 2>/dev/null
+# فحص unbound devices (عندها fwnode بس مش عندها driver)
+find /sys/bus/*/devices/ -name "driver" | wc -l
+find /sys/bus/*/devices/ -maxdepth 1 -type l | wc -l
 ```
-
----
 
 #### 2. Register Dump Techniques
 
+للـ devices المرتبطة بـ fwnode عندها memory-mapped registers:
+
 ```bash
-# devmem2: اقرأ register بعنوان فيزيائي
-# تثبيت: apt install devmem2 أو compile من source
-devmem2 0xFE200000 w    # اقرأ 32-bit word من العنوان ده
+# قراءة register بـ devmem2 (يحتاج تثبيت)
+devmem2 0xFE300000 w    # قراءة word من base address الـ device
 
-# /dev/mem (لو CONFIG_DEVMEM=y والـ strict mode مش enabled)
-dd if=/dev/mem bs=4 count=1 skip=$((0xFE200000 / 4)) 2>/dev/null | xxd
+# قراءة مباشرة من /dev/mem (يحتاج CONFIG_STRICT_DEVMEM=n)
+dd if=/dev/mem bs=4 count=1 skip=$((0xFE300000 / 4)) 2>/dev/null | xxd
 
-# io utility (من package iotools)
-io -4 0xFE200000         # قراءة 32-bit
+# باستخدام io utility (من package ioport)
+io -4 -r 0xFE300000
 
-# لو MMIO عبر /proc/iomem، اعرف العناوين أولاً
-cat /proc/iomem | grep "my_device\|my_controller"
-# ثم استخدم devmem2 بالعنوان الصح
-
-# لـ PCIe devices، اقرأ config space
-lspci -vvv -s 01:00.0
-setpci -s 01:00.0 0x04.w   # قراءة Command register
+# من داخل الـ kernel باستخدام ioremap في driver مؤقت:
 ```
 
----
+```c
+/* snippet لقراءة registers من kernel module مؤقت للـ debugging */
+void __iomem *base;
+u32 val;
+
+base = ioremap(0xFE300000, 0x1000); /* map 4KB */
+if (!base) {
+    pr_err("ioremap failed\n");
+    return -ENOMEM;
+}
+val = readl(base + 0x00); /* قراءة register 0 */
+pr_info("REG[0x00] = 0x%08x\n", val);
+iounmap(base);
+```
+
+```bash
+# فحص الـ iomem map لمعرفة base addresses
+cat /proc/iomem | grep -i "mmc\|i2c\|spi\|gpio"
+# مثال output:
+# fe300000-fe3000ff : fe300000.mmc
+```
 
 #### 3. Logic Analyzer / Oscilloscope Tips
 
-**للـ I2C fwnode graph:**
-- راقب SDA/SCL على الـ oscilloscope
-- الـ START condition: SDA ينزل وهو SCL عالي
-- لو الـ driver قرأ property `clock-frequency` غلط → هتشوف timing مختلف
-- تأكد إن الـ `reg` property في DTS بتطابق الـ hardware address على الـ bus
+للتحقق من الـ hardware عند debugging fwnode graph endpoints:
 
-**للـ SPI:**
-- راقب CS، SCLK، MOSI، MISO
-- لو `spi-max-frequency` property اتقرأت غلط → هتشوف clock سريع/بطيء أكتر من اللازم
-
-**للـ GPIO-based fwnode:**
-- استخدم `gpioinfo` و`gpioget` لقبل ما تشيل الـ driver
-- قارن قراءة GPIO مع الـ logic analyzer
-
-```bash
-# فحص GPIO assignments
-gpioinfo gpiochip0
-# شوف إيه الـ pin المرتبط بالـ fwnode
-cat /sys/firmware/devicetree/base/my_device/gpios | xxd
+```
+Protocol       | Signal Lines         | What to Check
+---------------|---------------------|------------------------------------------
+I2C            | SDA, SCL            | ACK/NACK بعد address، stretch conditions
+SPI            | MOSI,MISO,CLK,CS    | timing بين CS assertion والـ first clock
+UART           | TX, RX              | baud rate مطابق لـ DTS clock-frequency
+MIPI CSI-2     | D-PHY lanes         | lane enable sequence، LP/HS transition
+I2S/SAI        | BCLK,LRCK,DATA     | sample rate = DTS-specified rate
+GPIO interrupt | GPIO pin            | edge type يطابق "interrupts" property في DTS
 ```
 
----
+نقاط القياس على الـ logic analyzer:
 
-#### 4. Hardware Issues الشائعة → Kernel Log Patterns
+1. عند device probe: راقب الـ reset GPIO (مذكور في fwnode كـ `reset-gpios`)
+2. الـ power sequence: `supply-gpios` / `enable-gpios` يجب تفعيلها بالترتيب الصحيح
+3. الـ clock signal: تحقق أن الـ frequency مطابقة لـ `clock-frequency` في DTS
 
-| المشكلة الـ hardware | الـ pattern في kernel log |
-|---|---|
-| الـ device مش موجود على البورد أو مش متوصل | `probe of my_device failed with error -ENODEV` |
-| الـ IRQ line مش متوصل | `IRQ X: nobody cared` أو `nobody cared (try booting with irqpoll)` |
-| الـ power rail مش شغال | `timeout waiting for device to become ready` |
-| الـ clock source مش configured | `could not get clk: -ENOENT` |
-| عنوان I2C غلط في DTS | `i2c i2c-0: no device found at 0xXX` |
-| الـ reg property بتشاور على عنوان برا الـ parent range | `translation of ... failed` أو `bad address` |
-| شورت في الـ SDA line | `i2c transfer timed out` بشكل متكرر |
+#### 4. Hardware Issues → Kernel Log Patterns
 
----
+| المشكلة Hardware | Pattern في الـ Kernel Log | التشخيص |
+|-----------------|--------------------------|---------|
+| الـ device مش موجود فعلياً لكن في DT | `probe deferred` ثم timeout | `i2cdetect` أو scope على SDA/SCL |
+| voltage supply غلط | `regulator: failed to enable` | قياس VDDIO بالـ multimeter |
+| clock غلط أو مش شغال | `clk: failed to prepare` | oscilloscope على CLK pin |
+| GPIO reset مش شغال | device يـfail بعد probe مباشرة | logic analyzer على RESET# pin |
+| interrupt مش واصل | `irq: no irq handler` | oscilloscope على INT pin |
+| DMA coherency مشكلة | `DMA-API: device not supported` | الـ `dev_dma_attr` غلط في DT |
 
 #### 5. Device Tree Debugging
 
 ```bash
-# اقرأ الـ DTB الـ current المستخدم من الـ kernel
-dtc -I fs /sys/firmware/devicetree/base -O dts -o /tmp/live_dt.dts 2>/dev/null
-less /tmp/live_dt.dts
+# تحويل DT الحالي المحمّل إلى readable DTS
+dtc -I fs -O dts /sys/firmware/devicetree/base/ -o /tmp/current.dts 2>/dev/null
 
-# قارن مع الـ DTB اللي compile-ت منه
-dtc -I dtb -O dts my_board.dtb -o /tmp/compiled_dt.dts
-diff /tmp/live_dt.dts /tmp/compiled_dt.dts
+# مقارنة DTS الأصلية مع الـ compiled DTB المحمّل
+diff original.dts /tmp/current.dts
 
-# تحقق من الـ phandle references محلولة صح
-# كل &label في DTS بيتحول لـ phandle number
-grep -A5 "my_device" /tmp/live_dt.dts
+# فحص node معين بالاسم
+find /sys/firmware/devicetree/base/ -name "*.mmc" -o -name "fe300000*" | xargs ls
 
-# تحقق من الـ #address-cells و#size-cells
-cat /sys/firmware/devicetree/base/soc/\#address-cells | xxd
-# لازم تطابق عدد الـ values في reg property
+# قراءة property معينة من DT node
+hexdump -C /sys/firmware/devicetree/base/soc/mmc@fe300000/clock-frequency
+# output: 00000000  00 bb 8f 00                    (= 12288000 Hz)
 
-# فحص الـ interrupts property
-cat /sys/firmware/devicetree/base/my_device/interrupts | xxd
-# عدد الـ bytes = عدد الـ interrupts × #interrupt-cells × 4
+# التحقق من الـ phandle references
+cat /sys/firmware/devicetree/base/soc/mmc@fe300000/clocks | xxd
 
-# تحقق من الـ overlays (لو بتستخدم)
-ls /sys/firmware/devicetree/overlays/ 2>/dev/null
+# فحص الـ fwnode graph endpoints في DT
+find /sys/firmware/devicetree/base/ -name "endpoint*" -type d
 
-# Tool متخصصة: fdtget لقراءة property معينة
-fdtget /boot/my_board.dtb /soc/my_device compatible
-fdtget /boot/my_board.dtb /soc/my_device reg
+# التحقق من port/endpoint naming (يجب يتطابق مع SWNODE_GRAPH_PORT_NAME_FMT)
+ls /sys/firmware/devicetree/base/*/port@0/endpoint@0/
 ```
 
-**تحقق إن الـ `status = "okay"` موجودة:**
-
 ```bash
-fdtget /boot/my_board.dtb /soc/my_device status
-# لازم يرجع: okay
-# لو رجع: disabled → الـ device مش هيتعمل probe
+# تحقق أن الـ DT compatible string مطابق للـ driver
+cat /sys/firmware/devicetree/base/soc/i2c@fe804000/compatible
+# output: rockchip,rk3399-i2c
+
+# مقارنة مع driver table
+grep -r "rockchip,rk3399-i2c" /sys/bus/*/drivers/*/
 ```
 
 ---
 
-### Practical Commands — جاهزة للـ Copy/Paste
+### Practical Commands
 
-#### فحص سريع لأي device مش بيعمل probe
+#### مجموعة أوامر جاهزة
 
 ```bash
 #!/bin/bash
-DEVICE="my_device_name"  # غير ده
+# === fwnode Debug Script ===
 
-echo "=== Deferred probes ==="
-cat /sys/kernel/debug/devices_deferred | grep -A3 "$DEVICE"
+DEVICE="${1:-}"  # مثال: fe300000.mmc
 
-echo "=== dmesg for device ==="
-dmesg | grep -i "$DEVICE" | tail -30
+echo "=== 1. Device Links Status ==="
+if [ -n "$DEVICE" ]; then
+    find /sys/devices -name "*${DEVICE}*" -type d | head -3 | while read d; do
+        echo "Device: $d"
+        ls "$d/device_links/" 2>/dev/null | while read link; do
+            echo "  Link: $link"
+            cat "$d/device_links/$link/status" 2>/dev/null
+            cat "$d/device_links/$link/flags" 2>/dev/null
+        done
+    done
+fi
 
-echo "=== Device links (suppliers) ==="
-ls /sys/bus/platform/devices/$DEVICE/supplier:* 2>/dev/null
+echo ""
+echo "=== 2. Deferred Probes (waiting for fwnode suppliers) ==="
+cat /sys/kernel/debug/devices/deferred 2>/dev/null || \
+    dmesg | grep -i "deferred\|supplier"
 
-echo "=== fwnode flags (via DT) ==="
-cat /sys/firmware/devicetree/base/$(ls -la /sys/bus/platform/devices/$DEVICE/of_node | awk '{print $NF}' | sed 's|.*base/||')/status 2>/dev/null
+echo ""
+echo "=== 3. fwnode Flags Check ==="
+# flags byte: bit0=LINKS_ADDED, bit1=NOT_DEVICE, bit2=INITIALIZED,
+#             bit3=NEEDS_CHILD_BOUND, bit4=BEST_EFFORT, bit5=VISITED
+dmesg | grep -i "fwnode\|fw_devlink" | tail -20
 
-echo "=== Properties ==="
-ls /sys/firmware/devicetree/base/$(readlink /sys/bus/platform/devices/$DEVICE/of_node | sed 's|.*base/||')/ 2>/dev/null
+echo ""
+echo "=== 4. DT Node Properties ==="
+if [ -n "$DEVICE" ]; then
+    find /sys/firmware/devicetree/base/ -name "*${DEVICE%.*}*" -type d | \
+    head -1 | while read node; do
+        echo "Node: $node"
+        ls "$node/"
+        echo "--- compatible ---"
+        cat "$node/compatible" 2>/dev/null | tr '\0' '\n'
+    done
+fi
+
+echo ""
+echo "=== 5. ACPI Devices (if applicable) ==="
+ls /sys/bus/acpi/devices/ 2>/dev/null | head -10
 ```
-
-#### تفعيل الـ fw_devlink verbose logging
 
 ```bash
-# من cmdline (أضف للـ grub أو U-Boot):
-fw_devlink=on
+# فحص سريع لحالة الـ fw_devlink
+echo "=== fw_devlink mode ==="
+cat /sys/bus/platform/devices/.../firmware_node 2>/dev/null
 
-# أو اكتب في sysfs (runtime):
-echo on > /sys/bus/platform/fw_devlink 2>/dev/null
+# تفعيل verbose fw_devlink من command line
+echo "fw_devlink.delay_sync_state=1" >> /proc/cmdline  # ليس runtime
 
-# شوف الـ current mode
-cat /proc/cmdline | grep fw_devlink
+# مشاهدة الـ probe order بالـ ftrace
+echo function_graph > /sys/kernel/debug/tracing/current_tracer
+echo "really_probe" > /sys/kernel/debug/tracing/set_graph_function
+echo 1 > /sys/kernel/debug/tracing/tracing_on
+# ... trigger probe ...
+cat /sys/kernel/debug/tracing/trace | grep -A5 "really_probe"
+echo 0 > /sys/kernel/debug/tracing/tracing_on
 ```
-
-#### تتبع كل property reads لـ driver معين
 
 ```bash
-# Enable function graph tracing
-cd /sys/kernel/debug/tracing
-echo 0 > tracing_on
-echo function_graph > current_tracer
-echo "fwnode_property_read*:mod:my_driver" > set_ftrace_filter 2>/dev/null || \
-echo "fwnode_property_read*" > set_ftrace_filter
-echo 1 > tracing_on
-
-# حمّل الـ module
-modprobe my_driver
-
-echo 0 > tracing_on
-cat trace | head -100
-```
-
-**مثال الـ output:**
-
-```
- 0) | fwnode_property_read_u32_array() {
- 0) | fwnode_call_int_op() {
- 0) | of_fwnode_property_read_int_array() {
- 0)   2.140 us    |     of_find_property();
- 0)   0.871 us    |     of_read_number();
- 0)   4.820 us    |   }
- 0)   5.903 us    |  }
- 0)   7.102 us    | }
-```
-
-**التفسير:** وقت التنفيذ الكلي 7µs، الـ property اتقرأت من DT بنجاح عبر `of_fwnode_property_read_int_array`.
-
-#### فحص الـ fwnode_link graph يدوياً
-
-```bash
-# الـ suppliers والـ consumers لكل device
-for dev in /sys/bus/platform/devices/*/; do
-    name=$(basename $dev)
-    sup_count=$(ls $dev/supplier:* 2>/dev/null | wc -l)
-    con_count=$(ls $dev/consumer:* 2>/dev/null | wc -l)
-    if [ "$sup_count" -gt 0 ] || [ "$con_count" -gt 0 ]; then
-        echo "$name: suppliers=$sup_count consumers=$con_count"
+# فحص شامل لـ fwnode graph endpoints
+echo "=== fwnode Graph Endpoints ==="
+find /sys/firmware/devicetree/base/ -path "*/port*/endpoint*" -type d | \
+while read ep; do
+    echo "Endpoint: $ep"
+    if [ -f "$ep/remote-endpoint" ]; then
+        echo "  Remote: $(cat $ep/remote-endpoint | xxd | head -1)"
     fi
 done
+
+# مثال output:
+# Endpoint: /sys/firmware/devicetree/base/isi@58100000/port@0/endpoint@0
+#   Remote: 00000000 00000045 00 ...  (phandle = 0x45)
 ```
 
-#### استخدام WARN_ON لكشف NULL fwnode في runtime
-
 ```bash
-# أضف kernel param لـ panic on WARN (للـ CI/testing)
-echo 1 > /proc/sys/kernel/panic_on_warn
-
-# أو من cmdline:
-# panic_on_warn=1
+# تفعيل dynamic debug لـ fwnode subsystem كامل
+for f in \
+    drivers/base/property.c \
+    drivers/base/core.c \
+    drivers/base/devlink.c \
+    drivers/base/swnode.c \
+    drivers/of/property.c \
+    drivers/acpi/property.c; do
+    echo "file $f +pflmt" > /sys/kernel/debug/dynamic_debug/control 2>/dev/null
+done
+dmesg -w | grep -E "fwnode|devlink|property"
 ```
 
-#### قراءة ACPI _DSD properties (مكافئة DT properties)
-
 ```bash
-# _DSD = Device-Specific Data → بيحتوي على fwnode properties في ACPI
-# باستخدام acpi_dbg tool
-acpi_dbg -e "\_SB.MY_DEV._DSD"
+# استخدام devmem2 لـ dump registers device مرتبط بـ fwnode
+PHYS_BASE=$(grep -i "target-device-name" /proc/iomem | \
+            awk '{print $1}' | cut -d'-' -f1)
+if [ -n "$PHYS_BASE" ]; then
+    for offset in 0x00 0x04 0x08 0x0c 0x10 0x14 0x18 0x1c; do
+        ADDR=$((16#${PHYS_BASE} + 16#${offset#0x}))
+        printf "REG[%s] = " "$offset"
+        devmem2 $(printf "0x%x" $ADDR) w 2>/dev/null | grep "Value"
+    done
+fi
+```
 
-# أو من sysfs (ACPI devices)
-ls /sys/firmware/acpi/devices/
-cat /sys/bus/acpi/devices/MYDEV0001\:00/description 2>/dev/null
+#### تفسير الـ Output المهم
+
+```
+# dmesg example مع fwnode deferred probe:
+[    3.421] platform fe300000.mmc: Waiting for supplier of clk, id "clk_arb"
+
+# التفسير:
+# - fe300000.mmc = المـ consumer (عنده fwnode handle)
+# - "clk_arb" = اسم الـ supplier fwnode (من DTS phandle)
+# - الـ link: FWLINK_FLAG_CYCLE مش set → دي مش cycle، الـ supplier مش مـ probe
+
+# الحل: تحقق أن الـ clock driver محمّل:
+lsmod | grep clk
+dmesg | grep "clk_arb\|clock-controller"
+```
+
+```
+# ftrace function_graph output:
+  0)               |  fwnode_call_int_op() {
+  0)               |    of_fwnode_property_read_int_array() {
+  0)   0.521 us    |      of_find_property();
+  0)   1.203 us    |    } /* of_fwnode_property_read_int_array */
+  0)   2.018 us    |  } /* fwnode_call_int_op */
+
+# التفسير: الـ fwnode call أخدت ~2µs، والـ property وُجدت بنجاح
+# لو return value كان -EINVAL → الـ ops مش set (fwnode_has_op فشل)
+# لو return value كان -ENXIO → الـ ops موجودة بس الـ op نفسها NULL
 ```
 ## Phase 6: سيناريوهات من الحياة العملية
 
 ---
 
-### السيناريو الأول: Industrial Gateway على AM62x — الـ I2C sensor مش بيـprobe
+### السيناريو الأول: Industrial Gateway على AM62x — Device لا يـprobe أبدًا
 
 #### العنوان
-**الـ fwnode supplier link بيمنع الـ I2C temperature sensor من الـ probe على gateway صناعي**
+**FWNODE_FLAG_INITIALIZED** مش بيتـset، وـdevice بيفضل في limbo
 
 #### السياق
-فريق بيشتغل على industrial gateway بيستخدم **Texas Instruments AM62x** SoC. الـ gateway بيقرأ بيانات من sensor حرارة عبر **I2C** (TMP117)، ومتوصل بـ HDMI encoder خارجي. الـ board bring-up بدأ حديثاً، والـ DT كُتب من الصفر.
+شغال على industrial gateway بيستخدم **Texas Instruments AM62x** SoC. الـgateway بيجمع بيانات من حساسات عبر **I2C** وبيبعتها على شبكة Ethernet. البورد اتعمل bring-up من أسبوعين، والـI2C controller driver بيـload بس الـclient devices (الحساسات) مش بتـprobe.
 
 #### المشكلة
-عند boot، الـ TMP117 driver بيديك:
-
+```bash
+$ dmesg | grep i2c
+[    2.341] i2c i2c-0: Added multiplexed i2c bus 1
+[    2.342] i2c i2c-0: Added multiplexed i2c bus 2
+# لا أي رسالة عن الـclient drivers
+$ ls /sys/bus/i2c/devices/
+i2c-0  i2c-1  i2c-2
+# الـclient nodes موجودة في DT بس مش populated كـdevices
 ```
-[ 4.123456] i2c i2c-1: Failed to get supply 'vdd': -EPROBE_DEFER
-[ 4.123789] tmp117 1-0048: probe deferred
-```
-
-الـ probe بيتأجل للأبد — حتى بعد ما الـ regulator driver اتحمل بنجاح. الـ sensor مش بيظهر في `/sys/bus/i2c/devices/`.
 
 #### التحليل
-
-الـ kernel بيستخدم `fwnode_link_add()` عشان يبني قائمة `suppliers` جوه `fwnode_handle`:
-
-```c
-/* fwnode.h */
-struct fwnode_handle {
-    struct fwnode_handle *secondary;
-    const struct fwnode_operations *ops;
-    struct device *dev;
-    struct list_head suppliers;   /* كل fwnode_link بيبان هنا */
-    struct list_head consumers;
-    u8 flags;
-};
-```
-
-الـ `fw_devlink` subsystem بيمشي على suppliers list دي قبل ما يسمح بـ probe. لو في `fwnode_link` موجود في القائمة ومش marked كـ `FWLINK_FLAG_CYCLE` ولا `FWLINK_FLAG_IGNORE`:
+الـkernel بيمشي على الـfwnode graph عشان يـcreate الـdevices. المشكلة في الـflag `FWNODE_FLAG_INITIALIZED`:
 
 ```c
-/* fwnode.h */
-struct fwnode_link {
-    struct fwnode_handle *supplier;
-    struct list_head s_hook;      /* hook في قائمة supplier */
-    struct fwnode_handle *consumer;
-    struct list_head c_hook;      /* hook في قائمة consumer */
-    u8 flags;
-};
-```
+// في fwnode.h
+#define FWNODE_FLAG_INITIALIZED  BIT(2)
 
-المشكلة: في الـ DT، الـ sensor node فيه `pinctrl-0` بيشاور على `pinctrl` node اللي `status = "disabled"`. الـ `fw_devlink` بيشوفه supplier غير initialized (الـ `FWNODE_FLAG_INITIALIZED` مش set)، فبيدخل في defer loop لا نهاية ليها.
-
-`fwnode_dev_initialized()` المفروض يتعمل من الـ pinctrl driver لما يخلص bind، بس لما الـ node disabled، مفيش driver بيـbind ومفيش حد بيعمل:
-
-```c
-/* fwnode.h */
 static inline void fwnode_dev_initialized(struct fwnode_handle *fwnode,
                                           bool initialized)
 {
@@ -2314,756 +1931,531 @@ static inline void fwnode_dev_initialized(struct fwnode_handle *fwnode,
 }
 ```
 
-فالـ supplier فضل `FWNODE_FLAG_INITIALIZED = 0` وفالـ consumer (TMP117) عالق في defer.
+الـI2C multiplexer driver بيـcall `fwnode_dev_initialized()` بـ`false` بدل `true` بعد ما يـsetup الـchannels. ده بيخلي الـkernel يعتقد إن الـhardware ماتهيأش لسه، فبيـdefer تسجيل الـclient devices.
+
+الـfwnode_handle الخاص بـmux node فيه:
+```c
+struct fwnode_handle {
+    struct fwnode_handle *secondary; // NULL هنا
+    const struct fwnode_operations *ops;
+    struct device *dev;
+    struct list_head suppliers;
+    struct list_head consumers;
+    u8 flags; // BIT(2) = 0 ← المشكلة هنا
+};
+```
 
 #### الحل
-
-**خيار 1 — DT fix:** شيل الـ `pinctrl-0` من الـ sensor node لو هو مش محتاجه فعلاً:
-
-```dts
-/* قبل */
-&i2c1 {
-    tmp117@48 {
-        compatible = "ti,tmp117";
-        reg = <0x48>;
-        pinctrl-names = "default";
-        pinctrl-0 = <&i2c1_pins>;  /* هنا المشكلة */
-        vdd-supply = <&vdd_3v3>;
-    };
-};
-
-/* بعد */
-&i2c1 {
-    tmp117@48 {
-        compatible = "ti,tmp117";
-        reg = <0x48>;
-        /* شلنا pinctrl من الـ sensor نفسه، الـ I2C controller هو اللي بيـhandle الـ pinmux */
-        vdd-supply = <&vdd_3v3>;
-    };
-};
+```bash
+# أول حاجة، تحقق من الـflags الحالية
+$ cat /sys/kernel/debug/devices_deferred
+# هتلاقي I2C client nodes هنا
 ```
 
-**خيار 2 — fw_devlink=off للتشخيص:**
+في الـdriver code:
+```c
+// i2c-mux-driver.c — بعد ما تـsetup الـchannels
+static int i2c_mux_probe(struct i2c_client *client)
+{
+    // ... setup code ...
 
-```bash
-# أضف للـ kernel cmdline مؤقتاً
-fw_devlink=off
-```
+    // الـsource of the bug — كان بيبعت false
+    // fwnode_dev_initialized(dev_fwnode(&client->dev), false);
 
-**تحقق من السبب:**
-
-```bash
-# شوف suppliers list للـ fwnode
-cat /sys/kernel/debug/devices_deferred
-# أو
-grep -r "tmp117" /sys/kernel/debug/supply_map 2>/dev/null
+    // الصح:
+    fwnode_dev_initialized(dev_fwnode(&client->dev), true);
+    return 0;
+}
 ```
 
 #### الدرس المستفاد
-**الـ `suppliers` list في `fwnode_handle` بتتبني تلقائياً من أي property بيشاور على node تاني.** حتى `pinctrl-0` على node داخل I2C بيخلق `fwnode_link`. لو الـ supplier disabled ومفيش driver بيـcall `fwnode_dev_initialized()`، الـ consumer هيفضل في defer loop. دايماً اتحقق من `/sys/kernel/debug/devices_deferred` وشوف مين الـ supplier المُعلَّق.
+`FWNODE_FLAG_INITIALIZED` مش مجرد flag تجميلية — الـkernel بيستخدمها عشان يعرف امتى يبدأ يـpopulate الـchild devices. أي driver بيـmanage child nodes لازم يـcall `fwnode_dev_initialized(fwnode, true)` صراحةً بعد ما يخلص الـhardware setup.
 
 ---
 
-### السيناريو الثاني: Android TV Box على Allwinner H616 — HDMI مش بيشتغل بسبب graph endpoint
+### السيناريو الثاني: Android TV Box على Allwinner H616 — HDMI مش بيشتغل بسبب graph endpoints
 
 #### العنوان
-**الـ `graph_get_next_endpoint` بيرجع NULL وشاشة الـ HDMI فارغة على TV box**
+**fwnode_endpoint** غلط بيكسر الـHDMI pipeline في بورد Allwinner H616
 
 #### السياق
-منتج Android TV box بيستخدم **Allwinner H616**. الـ display stack: DE2 (Display Engine) → HDMI encoder → connector. المطور ورث DT من board قديم (H6) وعدّل عليه. بعد أول boot، HDMI مش بيديك صورة خالص.
+بتعمل Android TV box على **Allwinner H616**. الـSoC عنده display engine بيتكلم مع **HDMI transmitter** عبر TCON. بعد كل boot، الشاشة بتفضل سودة رغم إن الـkernel بيـdetect الـHDMI device.
 
 #### المشكلة
-
-```
-[ 3.456] sun8i-de2 1000000.display-engine: failed to bind all components
-[ 3.457] sun8i-hdmi 6000000.hdmi: endpoint 0 not found
+```bash
+$ dmesg | grep -i hdmi
+[    3.12] sun50i-h616-hdmi: probe failed: -EPROBE_DEFER
+[    3.13] sun50i-h616-hdmi: probe failed: -EPROBE_DEFER
+[   10.50] sun50i-h616-hdmi: probe failed: -ENODEV
+# بعد كذا retry، بيفشل نهائي
 ```
 
 #### التحليل
-
-الـ display driver بيستخدم `fwnode_operations.graph_get_next_endpoint` عشان يمشي على الـ graph. الـ `fwnode_operations` struct في `fwnode.h`:
-
-```c
-struct fwnode_operations {
-    /* ... */
-    struct fwnode_handle *
-    (*graph_get_next_endpoint)(const struct fwnode_handle *fwnode,
-                               struct fwnode_handle *prev);
-
-    struct fwnode_handle *
-    (*graph_get_remote_endpoint)(const struct fwnode_handle *fwnode);
-
-    struct fwnode_handle *
-    (*graph_get_port_parent)(struct fwnode_handle *fwnode);
-
-    int (*graph_parse_endpoint)(const struct fwnode_handle *fwnode,
-                                struct fwnode_endpoint *endpoint);
-};
-```
-
-الـ macro اللي بيتنادى:
-
-```c
-#define fwnode_call_ptr_op(fwnode, op, ...)     \
-    (fwnode_has_op(fwnode, op) ?                \
-     (fwnode)->ops->op(fwnode, ## __VA_ARGS__) : NULL)
-```
-
-لو `graph_get_next_endpoint` بيرجع NULL، يعني إما:
-- الـ `fwnode_has_op` بيرجع false (الـ ops مش set)
-- أو الـ OF graph parser مش لاقي الـ port/endpoint nodes
-
-الـ `fwnode_endpoint` struct:
+الـHDMI driver بيستخدم `graph_get_next_endpoint` عشان يـwalk الـfwnode graph ويلاقي الـremote TCON endpoint. الـstruct اللي بيحملها:
 
 ```c
 struct fwnode_endpoint {
-    unsigned int port;   /* رقم الـ port */
-    unsigned int id;     /* رقم الـ endpoint */
+    unsigned int port;   // رقم الـport في الـgraph
+    unsigned int id;     // رقم الـendpoint
     const struct fwnode_handle *local_fwnode;
 };
 ```
 
-المشكلة في الـ DT: المطور نسي الـ naming convention المطلوب:
-
+الـDevice Tree كانت فيه:
 ```dts
-/* غلط — اسم عشوائي */
-de2_out: port {
-    de2_out_ep: endpoint {
-        remote-endpoint = <&hdmi_in_ep>;
-    };
-};
-
-/* صح — لازم يتبع SWNODE_GRAPH_PORT_NAME_FMT */
-ports {
-    port@0 {                    /* "port@%u" */
-        #address-cells = <1>;
-        #size-cells = <0>;
-        de2_out_ep: endpoint@0 { /* "endpoint@%u" */
-            reg = <0>;
-            remote-endpoint = <&hdmi_in_ep>;
+/* DT خاطئ */
+&hdmi {
+    ports {
+        port@0 {
+            endpoint@0 {  /* id = 0, correct */
+                remote-endpoint = <&tcon_out>;
+            };
         };
     };
 };
-```
 
-الـ `fwnode.h` بيعرّف الـ naming:
-
-```c
-#define SWNODE_GRAPH_PORT_NAME_FMT      "port@%u"
-#define SWNODE_GRAPH_ENDPOINT_NAME_FMT  "endpoint@%u"
-```
-
-لما الـ OF backend بيدور على endpoints، بيدور على nodes باسم `port@N`. لو الاسم `port` بدون `@N`، الـ `graph_get_next_endpoint` مش بيلاقيه.
-
-#### الحل
-
-صحح الـ DT:
-
-```dts
-&de2 {
+&tcon {
     ports {
-        #address-cells = <1>;
-        #size-cells = <0>;
-
-        port@0 {
-            reg = <0>;
-            #address-cells = <1>;
-            #size-cells = <0>;
-            de2_out: endpoint@0 {
-                reg = <0>;
+        port@1 {          /* port رقم 1 */
+            endpoint@1 {  /* id = 1 — المشكلة! */
                 remote-endpoint = <&hdmi_in>;
             };
         };
     };
 };
+```
 
-&hdmi {
+الـdriver بيعمل `graph_parse_endpoint` على الـTCON node ويـexpect:
+- `port = 1, id = 0`
+
+بس الـDT بيديه `port = 1, id = 1`، فالـmatching بيفشل. الـkernel بيستخدم `SWNODE_GRAPH_ENDPOINT_NAME_FMT` = `"endpoint@%u"` عشان يـlookup، والـlookup بيرجع الـwrong node.
+
+```c
+// الـmacros في fwnode.h
+#define SWNODE_GRAPH_PORT_NAME_FMT      "port@%u"
+#define SWNODE_GRAPH_ENDPOINT_NAME_FMT  "endpoint@%u"
+```
+
+#### الحل
+```dts
+/* DT صح */
+&tcon {
     ports {
-        #address-cells = <1>;
-        #size-cells = <0>;
-
-        port@0 {
-            reg = <0>;
-            #address-cells = <1>;
-            #size-cells = <0>;
-            hdmi_in: endpoint@0 {
-                reg = <0>;
-                remote-endpoint = <&de2_out>;
+        port@1 {
+            endpoint@0 {  /* id لازم يبدأ من 0 */
+                remote-endpoint = <&hdmi_in>;
             };
         };
     };
 };
 ```
 
-**تشخيص:**
-
 ```bash
-# تحقق إن الـ graph links اتبنت صح
-cat /sys/kernel/debug/of_graph
-# أو
-dtc -I fs /proc/device-tree | grep -A5 "port@"
+# تحقق بعد الإصلاح
+$ cat /sys/kernel/debug/of_graph/hdmi/ports/port@0/endpoint@0/remote
+# لازم يطلع: /soc/tcon@1/ports/port@1/endpoint@0
 ```
 
 #### الدرس المستفاد
-**الـ `SWNODE_GRAPH_PORT_NAME_FMT` و `SWNODE_GRAPH_ENDPOINT_NAME_FMT` مش مجرد اقتراح — دول convention إجباري.** الـ `graph_get_next_endpoint` في `fwnode_operations` بيمشي على الـ node names بالـ pattern ده. اسم غلط = الـ graph مش بيتبني = display stack كامل بيوقع.
+الـ`fwnode_endpoint.id` بيمثل الـindex داخل الـport، مش رقم اعتباطي. `endpoint@0` دايمًا هو أول endpoint في الـport. الـnaming convention مكتوبة صراحةً في `fwnode.h` والـmacros `SWNODE_GRAPH_*_NAME_FMT` بتأكدها.
 
 ---
 
-### السيناريو الثالث: IoT Sensor Node على STM32MP1 — الـ SPI DMA مش شغال
+### السيناريو الثالث: IoT Sensor على STM32MP1 — Probe defer loop بسبب fwnode_link cycle
 
 #### العنوان
-**الـ `device_dma_supported` بيرجع false على STM32MP1 وبيعطل الـ SPI DMA transfers**
+**FWLINK_FLAG_CYCLE** مش متـset وبيحصل infinite defer على STM32MP1
 
 #### السياق
-IoT sensor node بيستخدم **STM32MP1** كـ host processor. الـ sensor بيتكلم عبر **SPI** بـ data rate عالي (20 MHz). المطور عايز يستخدم DMA عشان يخفف الـ CPU load. لكن الـ SPI driver مش بيعمل DMA transfers وبيرجع للـ PIO mode.
+بتعمل IoT sensor node على **STM32MP157** SoC. الجهاز فيه **SPI** sensor متوصل بـ**GPIO expander** اللي نفسه بيتكلم على **I2C**. الـSPI driver بيـdepend على الـGPIO expander، والـGPIO expander driver بيحتاج SPI clock — circular dependency.
 
 #### المشكلة
-
+```bash
+$ dmesg | tail -20
+[  120.0] spi-stm32: probe deferred (waiting for gpio-expander)
+[  120.1] gpio-expander: probe deferred (waiting for spi-stm32)
+[  120.2] spi-stm32: probe deferred (waiting for gpio-expander)
+# loop لا نهائي — الجهاز مبيـbootش أبدًا
 ```
-[ 2.891] spi-stm32 44004000.spi: DMA not available, using PIO mode
-[ 2.892] spi-stm32 44004000.spi: registered master spi0
-```
-
-الـ CPU utilization بيوصل لـ 80% عند full throughput بدل ما يبقى 5%.
 
 #### التحليل
-
-الـ SPI driver بيتحقق من DMA support عبر:
+الـkernel بيبني `fwnode_link` بين الـnodes:
 
 ```c
-/* fwnode_operations */
-bool (*device_dma_supported)(const struct fwnode_handle *fwnode);
-enum dev_dma_attr (*device_get_dma_attr)(const struct fwnode_handle *fwnode);
+struct fwnode_link {
+    struct fwnode_handle *supplier;  // gpio-expander fwnode
+    struct list_head s_hook;         // hook في suppliers list
+    struct fwnode_handle *consumer;  // spi-stm32 fwnode
+    struct list_head c_hook;         // hook في consumers list
+    u8 flags;                        // المشكلة: FWLINK_FLAG_CYCLE مش مضبوط
+};
 ```
 
-والـ enum:
+الـflags الموجودة:
+```c
+#define FWLINK_FLAG_CYCLE   BIT(0)  // لو مضبوط، مش بيـdefer probe
+#define FWLINK_FLAG_IGNORE  BIT(1)  // لو مضبوط، بيتجاهل الـlink كله
+```
+
+الـkernel cycle detection algorithm المفروض يـset `FWLINK_FLAG_CYCLE` لما يكتشف إن الـlink جزء من دائرة، بس الـDT كانت بتـexpress الـdependency بطريقة غير مباشرة عبر `clocks` property، والـcycle detection ماكنش بيمسك الـloop ده.
+
+الـfwnode_handle للـSPI controller:
+```c
+// suppliers list فيها: gpio-expander
+// consumers list فيها: spi-sensor
+// flags: 0x00 — FWLINK_FLAG_CYCLE مش مضبوط
+```
+
+#### الحل
+**Option 1** — تصحيح الـDT عشان تكسر الـcycle:
+```dts
+/* بدل ما الـGPIO expander يـdepend على SPI clock مباشرةً */
+&gpio_expander {
+    /* استخدم fixed-clock بدل SPI-derived clock */
+    clocks = <&fixed_clk_26mhz>;
+};
+```
+
+**Option 2** — لو الـcycle ضرورية، mark الـlink:
+```bash
+# عبر الـdebugfs
+$ echo 1 > /sys/kernel/debug/fwnode_links/spi-stm32/gpio-expander/cycle_flag
+```
+
+**Option 3** — في الـdriver، استخدم `FWNODE_FLAG_BEST_EFFORT`:
+```c
+// في الـGPIO expander driver init
+fwnode->flags |= FWNODE_FLAG_BEST_EFFORT;
+// ده بيخلي الـdriver يـprobe حتى لو مش كل الـsuppliers جاهزة
+```
+
+#### الدرس المستفاد
+الـ`fwnode_link` مع فلاجيه `FWLINK_FLAG_CYCLE` و`FWLINK_FLAG_IGNORE` هي الـmechanism اللي الـkernel بيتعامل بيها مع circular hardware dependencies. أي hardware topology فيها دائرة لازم تتعامل معاها صراحةً — إما بكسر الـcycle في الـDT أو بـset الـflag المناسبة.
+
+---
+
+### السيناريو الرابع: Automotive ECU على i.MX8QM — DMA مش شغال بسبب dev_dma_attr غلط
+
+#### العنوان
+**DEV_DMA_NON_COHERENT** بدل **DEV_DMA_COHERENT** بيكسر الـUSB DMA على i.MX8QM
+
+#### السياق
+بتعمل automotive ECU على **NXP i.MX8QM** SoC. الـECU محتاج **USB 3.0** عشان يـstream camera data بـhigh throughput. بعد bring-up الأولي، الـUSB بيشتغل بس بـsporatic data corruption وـthroughput منخفض جدًا.
+
+#### المشكلة
+```bash
+$ dmesg | grep usb
+[    4.23] usb 1-1: new SuperSpeed USB device
+[    4.24] usb-storage 1-1:1.0: USB Mass Storage device detected
+$ dd if=/dev/sda of=/dev/null bs=1M count=100
+# throughput: 12 MB/s بدل 300+ MB/s المتوقعة
+# وبعدين:
+[  45.11] usb 1-1: Transfer error on endpoint 2
+```
+
+#### التحليل
+الـfwnode API بيوفر `device_get_dma_attr` عشان الـdrivers تعرف الـDMA coherency model:
 
 ```c
 enum dev_dma_attr {
-    DEV_DMA_NOT_SUPPORTED,
-    DEV_DMA_NON_COHERENT,
-    DEV_DMA_COHERENT,
+    DEV_DMA_NOT_SUPPORTED,   // الجهاز مش بيدعم DMA أصلًا
+    DEV_DMA_NON_COHERENT,    // لازم manual cache flush/invalidate
+    DEV_DMA_COHERENT,        // hardware بيعمل cache coherency أوتوماتيك
 };
 ```
 
-الـ macro اللي بيـcall الـ op:
+الـops struct:
+```c
+struct fwnode_operations {
+    // ...
+    bool (*device_dma_supported)(const struct fwnode_handle *fwnode);
+    enum dev_dma_attr (*device_get_dma_attr)(const struct fwnode_handle *fwnode);
+    // ...
+};
+```
+
+الـACPI table للـi.MX8QM كانت بتـreport الـUSB controller كـ`DEV_DMA_NON_COHERENT` بسبب typo في الـPMAT table. الـUSB driver بعدين بيعمل manual cache operations زيادة عن اللزوم، وده بيسبب corruption لأن الـhardware نفسه بيعمل coherency.
 
 ```c
-#define fwnode_call_bool_op(fwnode, op, ...)    \
-    (fwnode_has_op(fwnode, op) ?                \
-     (fwnode)->ops->op(fwnode, ## __VA_ARGS__) : false)
-```
-
-لو `device_dma_supported` مش موجود في الـ ops، بيرجع `false` تلقائياً. الـ OF backend بيـimplements الـ op دي، لكن بتقرا من الـ DT property `dma-coherent` أو من معلومات الـ IOMMU.
-
-المشكلة: المطور نسى يحط `dma-ranges` في الـ DT لـ SoC دي:
-
-```dts
-/* غلط — مفيش dma-ranges */
-soc {
-    #address-cells = <1>;
-    #size-cells = <1>;
-    /* مفيش dma-ranges! */
-
-    spi@44004000 {
-        compatible = "st,stm32h7-spi";
-        reg = <0x44004000 0x400>;
-        dmas = <&dmamux1 37 0x400 0x05>,
-               <&dmamux1 38 0x400 0x05>;
-        dma-names = "rx", "tx";
-    };
-};
-```
-
-بدون `dma-ranges`، الـ OF fwnode backend بيعتبر الـ device مش accessible من DMA، فالـ `device_dma_supported` بيرجع false.
-
-#### الحل
-
-```dts
-soc {
-    #address-cells = <1>;
-    #size-cells = <1>;
-    /* أضف dma-ranges عشان يعرف الـ kernel إن الـ DMA accessible */
-    dma-ranges = <0x00000000 0x00000000 0xffffffff>;
-
-    spi@44004000 {
-        compatible = "st,stm32h7-spi";
-        reg = <0x44004000 0x400>;
-        dmas = <&dmamux1 37 0x400 0x05>,
-               <&dmamux1 38 0x400 0x05>;
-        dma-names = "rx", "tx";
-        /* لو الـ SoC non-coherent DMA */
-        /* مفيش dma-coherent property هنا = NON_COHERENT */
-    };
-};
-```
-
-**تحقق:**
-
-```bash
-# شوف الـ DMA attr للـ device
-cat /sys/bus/platform/devices/44004000.spi/dma_coherent_mask
-# أو من kernel log مع dynamic debug
-echo "module spi_stm32 +p" > /sys/kernel/debug/dynamic_debug/control
-dmesg | grep -i dma
-```
-
-**كود تشخيص في driver:**
-
-```c
-/* الـ driver بيقرأ الـ DMA attr عبر fwnode */
-if (!fwnode_call_bool_op(fwnode, device_dma_supported)) {
-    dev_warn(dev, "DMA not available, using PIO mode\n");
-    /* فالـ driver بيـfallback لـ PIO */
+// الـUSB driver بيعمل كده
+enum dev_dma_attr attr = device_get_dma_attr(dev);
+if (attr == DEV_DMA_NON_COHERENT) {
+    // بيعمل cache flush قبل كل transfer — خطأ على i.MX8QM
+    dma_sync_single_for_device(dev, dma_addr, size, DMA_TO_DEVICE);
 }
 ```
 
+#### الحل
+```bash
+# تحقق من الـDMA attributes الحالية
+$ cat /sys/devices/platform/32f10110.usb/dma_coherent
+# أو عبر أدوات ACPI
+$ acpidump -n IORT | grep -A5 "USB"
+```
+
+إصلاح الـACPI IORT table لـset الـflag الصح:
+```
+# في IORT table — Named Component entry للـUSB
+Cache coherency: 1  # كان 0 (non-coherent)
+```
+
+أو workaround في الـkernel command line:
+```bash
+# في bootloader
+setenv bootargs "${bootargs} iommu.passthrough=1"
+```
+
 #### الدرس المستفاد
-**الـ `device_dma_supported` في `fwnode_operations` بيتحكم في أساسي جداً — هل الـ device يقدر يستخدم DMA.** الـ `fwnode_call_bool_op` بيرجع `false` لو الـ op مش موجود أو لو الـ DT مش فيه `dma-ranges` صح. على STM32MP1 و SoCs زيها، `dma-ranges` في الـ soc node حاجة أساسية مش اختيارية.
+`dev_dma_attr` اللي بيتيجي من `fwnode_operations->device_get_dma_attr` بيأثر مباشرةً على كل الـDMA operations في الـsystem. على الـplatforms اللي بتستخدم ACPI (زي i.MX في بعض الـautomotive configurations)، الـIMAT/IORT table هي المصدر، وأي error فيها بيأثر على الـperformance والـcorrectness معًا.
 
 ---
 
-### السيناريو الرابع: Automotive ECU على i.MX8 — Probe Defer Cycle بيعمل Deadlock
+### السيناريو الخامس: Custom Board Bring-up على RK3562 — Software Node مش بيشتغل مع fwnode_reference_args
 
 #### العنوان
-**الـ `FWLINK_FLAG_CYCLE` وضع غلط بيخلي ECU يـboot بدون CAN interface**
+**fwnode_reference_args** مع software nodes على RK3562 — الـargs مش بتتقرأ صح
 
 #### السياق
-**Automotive ECU** بيستخدم **NXP i.MX8** للـ ADAS processing. فيه CAN controller (FlexCAN) بيعتمد على clock provider، وأحياناً الـ clock provider نفسه بيرجع للـ CAN عبر power domain. النتيجة: circular dependency في الـ `fwnode_link` graph.
+بتعمل custom industrial board على **Rockchip RK3562**. البورد فيها **custom FPGA** متوصل على **SPI**، والـFPGA بتـcontrol بعض الـGPIOs. عشان ما تكتبش DT overlay معقد، قررت تستخدم **software nodes** عشان تـdescribe الـFPGA وعلاقتها بالـSPI.
 
 #### المشكلة
-
-```
-[ 5.234] fsl-flexcan 30c00000.can: probe deferred due to supplier 30390000.clock-controller
-[ 5.235] fsl-flexcan 30c00000.can: ... which is waiting on 30c00000.can (cycle detected)
-[ 5.240] WARNING: circular dependency in fwnode link graph
-```
-
-الـ CAN interface مش بيظهر خالص حتى بعد full boot. الـ vehicle network معطل.
-
-#### التحليل
-
-الـ kernel لما يشوف cycle في الـ `fwnode_link` graph، بيـmark الـ links كـ `FWLINK_FLAG_CYCLE`:
-
-```c
-/* fwnode.h */
-/*
- * CYCLE: The fwnode link is part of a cycle. Don't defer probe.
- * IGNORE: Completely ignore this link, even during cycle detection.
- */
-#define FWLINK_FLAG_CYCLE   BIT(0)
-#define FWLINK_FLAG_IGNORE  BIT(1)
-
-struct fwnode_link {
-    struct fwnode_handle *supplier;
-    struct list_head s_hook;
-    struct fwnode_handle *consumer;
-    struct list_head c_hook;
-    u8 flags;           /* هنا بيتحط FWLINK_FLAG_CYCLE */
-};
-```
-
-لما `flags` = `FWLINK_FLAG_CYCLE`، المفروض الـ probe ordering يتجاهل الـ link ده ويسمح لأي طرف يـprobe أول. بس في الحالة دي، الـ DT عنده مشكلة: الـ power domain node فيه property بتشاور على الـ CAN node بدون سبب حقيقي — بقايا من copy-paste من board تاني.
-
-الـ `fw_devlink` subsystem بيبني الـ `fwnode_link` عبر `fwnode_link_add()`:
-
-```c
-/* fwnode.h */
-int fwnode_link_add(struct fwnode_handle *con,
-                    struct fwnode_handle *sup,
-                    u8 flags);
-```
-
-وبيـpurge الـ links اللي مش محتاجها بـ:
-
-```c
-void fwnode_links_purge(struct fwnode_handle *fwnode);
-void fw_devlink_purge_absent_suppliers(struct fwnode_handle *fwnode);
-```
-
-الـ cycle detection algorithm بيمشي على الـ `suppliers` و `consumers` lists في كل `fwnode_handle` وبيلاقي الـ cycle. بس في الحالة دي، الـ cycle حقيقي من الـ DT بسبب property زيادة.
-
-**تحديد الـ cycle:**
-
 ```bash
-# شوف الـ fwnode graph
-cat /sys/kernel/debug/devices_deferred
-# شوف الـ supplier links
-ls /sys/kernel/debug/device_link/
+$ dmesg | grep fpga
+[    5.44] fpga-spi: failed to get gpio reference: -ENOENT
+[    5.44] fpga-spi: probe failed: -ENOENT
 ```
 
-#### الحل
-
-**شيل الـ property الزيادة من الـ DT:**
-
-```dts
-/* قبل — الـ power domain بيشاور على CAN بالغلط */
-power-domains-ctrl@30390000 {
-    compatible = "fsl,imx8mq-gpc";
-    reg = <0x30390000 0x10000>;
-    /* دي property غلط — بتخلق link من PDC للـ CAN */
-    fsl,imx-src = <&can1>;   /* شيلها */
-};
-
-/* بعد — شلنا الـ property الغلط */
-power-domains-ctrl@30390000 {
-    compatible = "fsl,imx8mq-gpc";
-    reg = <0x30390000 0x10000>;
-    /* مفيش reference للـ CAN هنا */
-};
-```
-
-**لو الـ cycle حقيقي وصعب تشيله، استخدم `FWLINK_FLAG_IGNORE` من الـ driver:**
+الـdriver بيحاول يـread reference لـGPIO controller مع arguments (pin number + flags):
 
 ```c
-/* في الـ driver اللي بيخلق الـ link يدوياً */
-fwnode_link_add(consumer_fwnode, supplier_fwnode,
-                FWLINK_FLAG_IGNORE);  /* تجاهل الـ link ده في cycle detection */
-```
-
-**تأكيد بعد الحل:**
-
-```bash
-# تأكد إن الـ CAN probe نجح
-ip link show can0
-# أو
-dmesg | grep flexcan
-```
-
-#### الدرس المستفاد
-**الـ `fwnode_link` graph بيتبني من أي property في الـ DT بتشاور على node تانية.** حتى property زيادة أو غلط بتعمل cycle. الـ `FWLINK_FLAG_CYCLE` بيتحط أوتوماتيكي بس مش دايماً بيحل المشكلة. الحل الصح: شيل الـ dependency الغلط من الـ DT. في automotive systems، الـ boot time حرج — cycle في الـ fwnode graph يعني interface critical زي CAN مش بيـprobe.
-
----
-
-### السيناريو الخامس: Custom Board Bring-up على RK3562 — Software Node مش بيشتغل مع I2C Camera
-
-#### العنوان
-**استخدام `software_node` مع camera ISP على RK3562 بيفشل لأن الـ `fwnode_init` مش اتعمل صح**
-
-#### السياق
-فريق bring-up بيشتغل على custom board بيستخدم **Rockchip RK3562**. الـ board فيه camera module MIPI-CSI متوصل على ISP. الـ camera driver بيستخدم **software_node** (مش DT) عشان الـ board مش ليها DT بعد — الـ driver بيـregister الـ node يدوياً من الـ driver code. الـ ISP مش بيـdetect الـ camera.
-
-#### المشكلة
-
-```
-[ 6.123] rkisp1 fdfe0000.isp: failed to find remote endpoint
-[ 6.124] rkisp1 fdfe0000.isp: graph endpoint not found: -ENOENT
-[ 6.125] rkisp1 fdfe0000.isp: probe failed: -ENOENT
+struct fwnode_reference_args args;
+ret = fwnode_property_get_reference_args(fwnode, "gpios",
+                                          "#gpio-cells", 2, 0, &args);
+// ret = -ENOENT دايمًا
 ```
 
 #### التحليل
-
-الـ software_node system بيستخدم `struct fwnode_handle` مع custom `fwnode_operations`. عشان الـ fwnode يشتغل صح، لازم يتعمله `fwnode_init()`:
+الـstruct المسؤولة:
 
 ```c
-/* fwnode.h */
-static inline void fwnode_init(struct fwnode_handle *fwnode,
-                               const struct fwnode_operations *ops)
-{
-    fwnode->ops = ops;
-    INIT_LIST_HEAD(&fwnode->consumers);  /* لازم تتعمل */
-    INIT_LIST_HEAD(&fwnode->suppliers);  /* لازم تتعمل */
-}
+#define NR_FWNODE_REFERENCE_ARGS  16  // أقصى عدد args
+
+struct fwnode_reference_args {
+    struct fwnode_handle *fwnode;       // reference لـGPIO controller
+    unsigned int nargs;                  // عدد الـargs (المفروض 2)
+    u64 args[NR_FWNODE_REFERENCE_ARGS]; // [pin_number, flags]
+};
 ```
 
-المطور عمل كده:
+الـfwnode_operations بتوفر:
+```c
+int (*get_reference_args)(const struct fwnode_handle *fwnode,
+                          const char *prop,        // "gpios"
+                          const char *nargs_prop,  // "#gpio-cells"
+                          unsigned int nargs,       // 2
+                          unsigned int index,       // 0
+                          struct fwnode_reference_args *args);
+```
+
+المشكلة كانت في كيفية تعريف الـsoftware node:
 
 ```c
-/* كود المطور الغلط */
-static struct fwnode_handle cam_fwnode = {
-    .ops = &software_node_ops,
-    /* نسي يعمل INIT_LIST_HEAD للـ consumers و suppliers */
+/* خاطئ — software node definition */
+static const struct software_node_ref_args fpga_gpios[] = {
+    SOFTWARE_NODE_REFERENCE(&gpio_controller_node, 5, 0),
 };
 
-/* نتيجة: الـ consumers.next و suppliers.next = NULL */
-/* لما الـ fw_devlink يحاول يمشي على القوائم دول → kernel panic أو سلوك غريب */
+static const struct property_entry fpga_props[] = {
+    PROPERTY_ENTRY_REF_ARRAY("gpios", fpga_gpios),
+    /* نسي يـdefine "#gpio-cells" على الـGPIO controller software node */
+    { }
+};
 ```
 
-الـ `fwnode_has_op` بيتحقق:
-
-```c
-#define fwnode_has_op(fwnode, op) \
-    (!IS_ERR_OR_NULL(fwnode) && (fwnode)->ops && (fwnode)->ops->op)
-```
-
-الـ ops موجودة، فالـ macro بيرجع true. لكن لما الـ `add_links` callback بيتعمل:
-
-```c
-int (*add_links)(struct fwnode_handle *fwnode);
-```
-
-بيحاول يمشي على الـ suppliers list اللي هي uninitialized (مش اتعملها `INIT_LIST_HEAD`). الـ linked list code بيـaccess `suppliers.next` وبيلاقي garbage pointer.
-
-في نفس الوقت، الـ graph endpoint للـ camera محتاج الـ `port@0/endpoint@0` structure، والـ naming convention:
-
-```c
-/* لازم تتبع الـ macros دي */
-#define SWNODE_GRAPH_PORT_NAME_FMT      "port@%u"
-#define SWNODE_GRAPH_ENDPOINT_NAME_FMT  "endpoint@%u"
-```
-
-المطور استخدم اسم `"port"` بدل `"port@0"` في الـ software_node properties.
+الـ`get_reference_args` implementation للـsoftware nodes بتدور على `#gpio-cells` property في الـGPIO controller node عشان تعرف كام argument تـparse. لو الـproperty دي مش موجودة، بترجع `-ENOENT`.
 
 #### الحل
-
-**أولاً — صحح الـ fwnode_init:**
-
 ```c
-/* camera driver — صح */
-static struct fwnode_handle cam_fwnode;
-
-static int camera_probe(struct i2c_client *client)
-{
-    /* لازم تستخدم fwnode_init قبل أي حاجة تانية */
-    fwnode_init(&cam_fwnode, &software_node_ops);
-
-    /* دلوقتي الـ consumers و suppliers lists initialized */
-    /* ... باقي الـ probe code */
-}
-```
-
-**ثانياً — صحح الـ graph node names:**
-
-```c
-/* غلط */
-static const struct software_node cam_port_node = {
-    .name = "port",          /* غلط */
-    .parent = &cam_node,
+/* صح — لازم تـdefine #gpio-cells على الـGPIO controller node */
+static const struct property_entry gpio_ctrl_props[] = {
+    PROPERTY_ENTRY_U32("#gpio-cells", 2),  // ← ده كان ناقص
+    { }
 };
 
-static const struct software_node cam_ep_node = {
-    .name = "endpoint",      /* غلط */
-    .parent = &cam_port_node,
+static const struct software_node gpio_ctrl_node = {
+    .name = "gpio-controller",
+    .properties = gpio_ctrl_props,
 };
 
-/* صح */
-static const struct software_node cam_port_node = {
-    .name = "port@0",        /* يتبع SWNODE_GRAPH_PORT_NAME_FMT */
-    .parent = &cam_node,
+/* والـFPGA node تـreference الـGPIO controller */
+static const struct software_node_ref_args fpga_gpios[] = {
+    SOFTWARE_NODE_REFERENCE(&gpio_ctrl_node, 5, 0), // pin 5, active high
 };
 
-static const struct software_node cam_ep_node = {
-    .name = "endpoint@0",    /* يتبع SWNODE_GRAPH_ENDPOINT_NAME_FMT */
-    .parent = &cam_port_node,
+static const struct property_entry fpga_props[] = {
+    PROPERTY_ENTRY_REF_ARRAY("gpios", fpga_gpios),
+    { }
 };
 ```
-
-**ثالثاً — verify:**
 
 ```bash
-# شوف الـ software nodes المسجلة
-ls /sys/bus/platform/drivers/rkisp1/
-# أو
-cat /sys/kernel/debug/software_nodes
-# تأكد إن الـ camera فيه fwnode مع graph
-v4l2-ctl --list-devices
-```
+# تحقق من الـsoftware nodes بعد الإصلاح
+$ ls /sys/kernel/debug/software_nodes/
+gpio-controller  fpga-spi
 
-**تحقق من الـ link بين الـ ISP و camera:**
-
-```bash
-media-ctl -p -d /dev/media0
-# المفروض يظهر link بين camera sensor و ISP
+$ cat /sys/kernel/debug/software_nodes/gpio-controller/properties/#gpio-cells
+2
 ```
 
 #### الدرس المستفاد
-**`fwnode_init()` مش اختياري — هي اللي بتعمل `INIT_LIST_HEAD` للـ `consumers` و `suppliers` lists.** بدونها، أي كود بيمشي على القوائم دول هيوقع في undefined behavior أو kernel panic. في board bring-up بدون DT، الـ software_node system قوي جداً بس محتاج `fwnode_init()` صح وناميق convention صح (`port@N`, `endpoint@N`) عشان الـ graph API تشتغل.
-
+الـ`fwnode_reference_args` mechanism بتعتمد على وجود الـ`#xxx-cells` property على الـsupplier node — حتى لو كنت بتستخدم software nodes بدل DT. ده mirror لنفس القاعدة في Device Tree: أي node بتعمل references ليها لازم تـdefine كام cell بتستخدم. الـ`NR_FWNODE_REFERENCE_ARGS = 16` هو الـhard limit، وأي reference محتاج أكتر من 16 argument هيفشل.
 ## Phase 7: مصادر ومراجع
 
 ### مقالات LWN.net
 
-دي أهم المقالات على LWN.net اللي بتغطي الـ fwnode framework وكل اللي يتعلق بيه:
+دي أهم المقالات اللي بتشرح تطور الـ fwnode infrastructure في الـ kernel:
 
-| المقال | الوصف |
-|--------|-------|
-| [device property: Introducing software nodes](https://lwn.net/Articles/770825/) | بيشرح إزاي الـ `software_node` (swnode) اتضافت كنوع مستقل من الـ fwnode، بديل عن الـ `property_set` |
-| [Software fwnode references](https://lwn.net/Articles/789099/) | بيغطي إضافة دعم الـ reference arguments للـ software nodes، وازاي تشاور على node تاني من جوا الـ swnode |
-| [ACPI graph support](https://lwn.net/Articles/718184/) | بيشرح دعم الـ fwnode graph endpoints في ACPI وازاي اتربطت بنفس الـ ops اللي بتستخدمها الـ OF |
-| [Unified fwnode endpoint parser](https://lwn.net/Articles/737780/) | بيغطي توحيد الـ endpoint parser في الـ v4l2_fwnode وربطه بالـ fwnode_operations |
-| [introduce fwnode in the I2C subsystem](https://lwn.net/Articles/889236/) | مثال عملي على إزاي subsystem كامل (I2C) بدأ يستخدم الـ fwnode بدل ما يتعامل مع الـ OF و ACPI بشكل منفصل |
-| [gpiolib: Two new helpers and way toward fwnode](https://lwn.net/Articles/889987/) | بيوضح إزاي الـ gpiolib بدأت تتحول من الـ `of_node` للـ fwnode API |
-| [Add support for software nodes to gpiolib](https://lwn.net/Articles/914223/) | تكملة للموضوع: إضافة swnode support كاملة للـ gpiolib |
-| [Platform devices and device trees](https://lwn.net/Articles/448502/) | خلفية مهمة عن العلاقة بين الـ platform devices والـ device tree، اللي الـ fwnode جه يوحّدها مع ACPI |
+| المقال | الرابط | الأهمية |
+|--------|--------|---------|
+| Add ACPI _DSD and unified device properties support | [lwn.net/Articles/612062](https://lwn.net/Articles/612062/) | **الأساس** — بيشرح أول تقديم لفكرة الـ unified device property API اللي منها اتولد الـ fwnode |
+| ACPI graph support | [lwn.net/Articles/718184](https://lwn.net/Articles/718184/) | بيشرح إزاي اتضافت الـ graph endpoints للـ fwnode عشان تشتغل مع ACPI و OF بنفس الـ interface |
+| Device property: Introducing software nodes | [lwn.net/Articles/770825](https://lwn.net/Articles/770825/) | بيشرح الـ `software_node` — نوع fwnode مستقل عن DT و ACPI |
+| Software fwnode references | [lwn.net/Articles/789099](https://lwn.net/Articles/789099/) | بيتكلم عن تحسينات الـ software node و references |
+| Unified fwnode endpoint parser | [lwn.net/Articles/737780](https://lwn.net/Articles/737780/) | بيشرح توحيد الـ endpoint parser في V4L2 فوق الـ fwnode |
+| Introduce fwnode in the I2C subsystem | [lwn.net/Articles/889236](https://lwn.net/Articles/889236/) | مثال عملي على إزاي الـ subsystems بتعتمد الـ fwnode |
+| gpiolib: Two new helpers and way toward fwnode | [lwn.net/Articles/889987](https://lwn.net/Articles/889987/) | مثال تاني من gpiolib على migration للـ fwnode |
 
 ---
 
-### التوثيق الرسمي في الـ kernel
+### توثيق الـ Kernel الرسمي
 
-#### ملفات `Documentation/` المباشرة
+الملفات دي في `Documentation/` هي المرجع الرسمي:
 
 ```
-Documentation/driver-api/driver-model/
-Documentation/firmware-guide/acpi/dsd/graph.rst
-Documentation/firmware-guide/acpi/dsd/properties-rules.rst
+Documentation/driver-api/infrastructure.rst
+    → شرح device drivers infrastructure وفيه section للـ fwnode API
+
 Documentation/firmware-guide/acpi/enumeration.rst
-Documentation/devicetree/usage-model.rst
+    → بيشرح إزاي ACPI بيستخدم الـ fwnode لتعداد الـ devices
+
+Documentation/firmware-guide/acpi/dsd/graph.rst
+    → الـ ACPI DSD graph ports/endpoints وعلاقتهم بالـ fwnode_endpoint
+
+Documentation/firmware-guide/acpi/namespace.rst
+    → بيشرح الـ ACPI namespace وتمثيله كـ fwnode tree
 ```
 
-**الـ fwnode graph documentation (ACPI DSD):**
-- [Graphs — The Linux Kernel documentation](https://www.kernel.org/doc/html/v5.2/firmware-guide/acpi/dsd/graph.html) — بيشرح إزاي الـ graph endpoints بتشتغل مع ACPI _DSD وإزاي الـ fwnode بيوفر abstraction موحدة
-- [ACPI Based Device Enumeration](https://docs.kernel.org/firmware-guide/acpi/enumeration.html) — بيغطي إزاي الـ ACPI devices بتتـenumerate وبتتعرف على الـ fwnode بتاعها
-
-**الـ V4L2 fwnode kAPI:**
-- [V4L2 fwnode kAPI](https://docs.kernel.org/driver-api/media/v4l2-fwnode.html) — مثال حي على استخدام الـ fwnode_operations في subsystem حقيقي
-
-**الـ driver infrastructure:**
-- [Device drivers infrastructure](https://docs.kernel.org/driver-api/infrastructure.html) — بيشمل الـ `fwnode_handle`, `device_property_*`, `fwnode_property_*` APIs
+الروابط على docs.kernel.org:
+- [Device drivers infrastructure](https://docs.kernel.org/driver-api/infrastructure.html)
+- [ACPI Based Device Enumeration](https://docs.kernel.org/firmware-guide/acpi/enumeration.html)
+- [Graphs — ACPI DSD](https://www.kernel.org/doc/html/v5.2/firmware-guide/acpi/dsd/graph.html)
+- [V4L2 fwnode kAPI](https://docs.kernel.org/driver-api/media/v4l2-fwnode.html)
 
 ---
 
-### Kernel Source Files المهمة
-
-الملفات دي هي اللي بتـimplement الـ fwnode framework فعلاً:
+### ملفات الـ Source الأساسية في الـ Kernel
 
 ```
-include/linux/fwnode.h          ← الـ header الأساسي (الملف اللي بندرسه)
-include/linux/property.h        ← الـ public API للـ device properties
-drivers/base/property.c         ← implementation الـ device_property_* و fwnode_property_*
-drivers/base/swnode.c           ← software nodes implementation
-drivers/base/core.c             ← ربط الـ fwnode بالـ struct device
+include/linux/fwnode.h          ← التعريفات الأساسية (الـ file ده نفسه)
+include/linux/property.h        ← الـ public API فوق الـ fwnode
+drivers/base/property.c         ← implementation الـ device property API
+drivers/base/swnode.c           ← implementation الـ software_node fwnode
+drivers/acpi/property.c         ← ACPI backend للـ fwnode operations
+drivers/of/property.c           ← OF/DT backend للـ fwnode operations
 ```
 
 ---
 
-### Kernel Commits المهمة
+### Commits المهمة في تاريخ الـ fwnode
 
-#### الـ commit الأصلي — إدخال الـ fwnode
-
-الـ fwnode framework اتقدّم أول ما Rafael J. Wysocki كتبه في 2015 كجزء من توحيد الـ device property API:
-
-- **[PATCH] driver core: Implement device property accessors through fwnode ones**
-  - [linux.kernel.narkive.com](https://linux.kernel.narkive.com/pNOj9vdt/patch-driver-core-implement-device-property-accessors-through-fwnode-ones)
-  - ده الـ patch اللي حوّل الـ `device_property_*()` functions عشان تستخدم الـ `fwnode_property_*()` جواها
-
-- **[PATCH 04/20] device property: Add operations struct for fwnode operations**
-  - [patchwork.kernel.org](https://patchwork.kernel.org/project/linux-acpi/patch/1487869276-25244-5-git-send-email-sakari.ailus@linux.intel.com/)
-  - ده الـ patch اللي أدخل الـ `struct fwnode_operations` كـ vtable موحدة
-
-- **[PATCH] device property: Fallback to secondary fwnode if primary misses the property**
-  - [linux.kernel.narkive.com](https://linux.kernel.narkive.com/XO6y722J/patch-v1-08-13-device-property-fallback-to-secondary-fwnode-if-primary-misses-the-property)
-  - بيوضح فلسفة الـ primary/secondary fwnode chain
-
-#### الـ fw_devlink improvements
-
-- **[PATCH v1 0/9] fw_devlink improvements** — Saravana Kannan (Google)
-  - [lore.kernel.org](https://lore.kernel.org/linux-devicetree/CAGETcx_nVXbHzZ3+_aR4SZtSnSBU=Rfp8Qm2jOs7zGZRaH_88A@mail.gmail.com/T/)
-  - بيغطي تحسينات الـ `fw_devlink` وعلاقتها بالـ `FWNODE_FLAG_NEEDS_CHILD_BOUND_ON_ADD` و `FWNODE_FLAG_BEST_EFFORT`
-
-- **[PATCH v4 3/8] driver core: Add fw_devlink.strict kernel param**
-  - [mail-archive.com](https://www.mail-archive.com/linux-kernel@vger.kernel.org/msg2468715.html)
+| الوصف | المصدر |
+|-------|--------|
+| أول تقديم لـ `fwnode_handle` و device property API (2015 — Rafael J. Wysocki) | [github.com/torvalds/linux — fwnode.h](https://github.com/torvalds/linux/blob/master/include/linux/fwnode.h) |
+| تاريخ التعديلات على الملف | [cregit — fwnode.h@4.14](https://cregit.linuxsources.org/code/4.14/include/linux/fwnode.h.html) |
+| الـ patch series الخاصة بالـ secondary fwnode fallback | [linux.kernel.narkive](https://linux.kernel.narkive.com/XO6y722J/patch-v1-08-13-device-property-fallback-to-secondary-fwnode-if-primary-misses-the-property) |
+| device property — implement accessors through fwnode | [linux.kernel.narkive](https://linux.kernel.narkive.com/pNOj9vdt/patch-driver-core-implement-device-property-accessors-through-fwnode-ones) |
 
 ---
 
-### Mailing List Discussions
+### نقاشات Mailing List
 
-مناقشات مهمة على الـ LKML وقوائم البريد ذات الصلة:
+- **[PATCH v9 00/12] Device property improvements, add %pfw format specifier** — نقاش مهم عن تحسينات الـ fwnode formatting وطباعة أسماء الـ nodes:
+  [mail-archive.com](https://www.mail-archive.com/linux-kernel@vger.kernel.org/msg2123755.html)
 
-| الموضوع | الرابط |
-|---------|-------|
-| `set_secondary_fwnode()` export discussion | [lists.openwall.net](https://lists.openwall.net/linux-kernel/2020/04/08/743) |
-| Fix secondary fwnode handling in `set_primary_fwnode()` | [lore.kernel.org/patchwork](https://lore.kernel.org/patchwork/patch/1298392) |
-| Do not overwrite secondary fwnode with NULL | [mail-archive.com](https://www.mail-archive.com/linux-i2c@vger.kernel.org/msg22196.html) |
-| `fw_devlink` debug command line parameter | [lore.kernel.org/all](https://lore.kernel.org/all/20210914043928.4066136-6-saravanak@google.com/) |
-| `fwnode_device_is_available()` introduction | [patchwork.kernel.org](https://patchwork.kernel.org/project/linux-acpi/patch/1496741861-8240-5-git-send-email-sakari.ailus@linux.intel.com/) |
-
-**الـ LKML archive:** [lkml.org](https://lkml.org/) — ابحث بـ `fwnode` أو `fwnode_handle` أو `fw_devlink`
+- **لو عايز تتابع النقاشات الجديدة**، ابحث في:
+  - [lore.kernel.org/linux-acpi](https://lore.kernel.org/linux-acpi/) — نقاشات ACPI وfwnode
+  - [lore.kernel.org/linux-devicetree](https://lore.kernel.org/linux-devicetree/) — نقاشات DT وfwnode
 
 ---
 
-### كتب مُوصى بيها
+### كتب مقترحة
 
-#### Linux Device Drivers (LDD3) — Corbet, Rubini, Kroah-Hartman
-الكتاب ده قديم شوية ومش بيغطي الـ fwnode API مباشرة، لكن:
-- **Chapter 14: The Linux Device Model** — أساس لفهم الـ `struct device`, `kobject`, وازاي الـ device model بيشتغل
-- الـ fwnode هو extension طبيعي للـ device model اللي LDD3 بيشرحه
-- متاح مجانًا: [lwn.net/Kernel/LDD3](https://lwn.net/Kernel/LDD3/)
+#### Linux Device Drivers, 3rd Edition (LDD3)
+- **الفصل 14**: The Linux Device Model
+  - بيشرح الـ `kobject`, `kset`, و device model اللي فوقيه الـ fwnode بيشتغل
+  - متاح مجاناً: [lwn.net/Kernel/LDD3](https://lwn.net/Kernel/LDD3/)
 
 #### Linux Kernel Development — Robert Love (3rd Edition)
-- **Chapter 17: Devices and Modules** — بيغطي الـ device model والـ sysfs
-- بيبني فهم الأساس اللي الـ fwnode بيتبنى عليه
-- الـ fwnode نفسه أحدث من الكتاب ده، بس الخلفية ضرورية
+- **الفصل 17**: Devices and Modules
+  - بيغطي الـ device model الأساسي
+  - **الفصل 13**: The Virtual Filesystem — مفيد لفهم abstraction layers زي الـ fwnode ops
 
 #### Embedded Linux Primer — Christopher Hallinan (2nd Edition)
-- **Chapter 15: Bootstrapping Linux** — بيغطي إزاي الـ firmware (DT, ACPI) بتـpass الـ platform info للـ kernel
-- مهم كخلفية لفهم ليه الـ fwnode abstraction ضرورية في البيئات الـ embedded
+- **الفصل 15**: Bootstrapping and Board Porting
+  - بيشرح الـ Device Tree وإزاي الـ firmware بتصف الـ hardware — ده الأساس اللي الـ fwnode بيجرده
 
 #### Professional Linux Kernel Architecture — Wolfgang Mauerer
-- بيغطي الـ driver model بعمق أكبر من LDD3
-- مفيد لفهم الـ device lifecycle اللي الـ fwnode بيتعامل معاه
+- **الفصل 6**: Device Drivers
+  - تغطية عميقة للـ device infrastructure في الـ kernel
 
 ---
 
-### KernelNewbies
+### kernelnewbies.org
 
-الـ KernelNewbies بتتبع التغييرات في كل kernel release. ابحث فيها عن التغييرات المتعلقة بالـ fwnode في:
+مفيش صفحة مخصصة لـ fwnode على kernelnewbies، لكن التغييرات المتعلقة بيه بتظهر في صفحات الـ kernel releases:
 
-- [Linux_6.14 — KernelNewbies](https://kernelnewbies.org/Linux_6.14) — بيذكر `v4l: fwnode: Add support for CSI-2 C-PHY line orders` وتغييرات تانية في الـ fwnode
-- [Linux_6.15 — KernelNewbies](https://kernelnewbies.org/Linux_6.15)
-- [Linux_6.13 — KernelNewbies](https://kernelnewbies.org/Linux_6.13)
-- [LinuxChanges — KernelNewbies](https://kernelnewbies.org/LinuxChanges) — للـ releases الأقدم
-- [Documents — KernelNewbies](https://kernelnewbies.org/Documents) — فيه شرح لكتير من الـ kernel concepts
+- [Linux 6.14 — kernelnewbies.org](https://kernelnewbies.org/Linux_6.14) — فيه تغييرات متعلقة بـ V4L2 fwnode CSI-2 C-PHY
+- [Linux 6.13 — kernelnewbies.org](https://kernelnewbies.org/Linux_6.13)
+- [KernelGlossary](https://kernelnewbies.org/KernelGlossary) — للمصطلحات العامة
 
 ---
 
-### eLinux.org
+### elinux.org
 
-الـ eLinux.org مش عندها صفحة مخصصة للـ fwnode، لكن الموارد دي مفيدة كخلفية:
-
-- [eLinux.org Device Tree Reference](https://elinux.org/Device_Tree_Reference) — الـ DT هو أحد الـ fwnode backends
-- [eLinux.org Device Tree Usage](https://elinux.org/Device_Tree_Usage) — إزاي الـ DT properties بتتقرأ، نفس الـ pattern اللي الـ fwnode بيوحّده
+الـ elinux.org مفيهاش صفحة مخصصة لـ fwnode، لكن الـ Device Tree documentation المرتبطة بيه متاحة هنا:
+- [Device Tree Usage — elinux.org](https://elinux.org/Device_Tree_Usage)
+- [Device Tree Reference — elinux.org](https://elinux.org/Device_Tree_Reference)
 
 ---
 
-### Search Terms للبحث عن مزيد من المعلومات
+### Search Terms للبحث عن معلومات أكثر
 
-لو حابب تعمق أكتر، استخدم الـ search terms دي:
+لو عايز تعمق أكتر، استخدم الـ keywords دي:
 
 ```
-# للبحث في الـ LKML
-fwnode_handle linux kernel
-fwnode_operations vtable
-fw_devlink probe ordering
-software_node swnode kernel
-fwnode_graph_get_next_endpoint
+# في Google / DuckDuckGo
+linux kernel fwnode_handle operations vtable
+linux kernel device property unified API ACPI OF
+linux kernel software_node swnode
+linux kernel fwnode_link fw_devlink
+linux kernel fwnode graph endpoint port
 
-# للبحث في git log
-git log --oneline -- include/linux/fwnode.h
-git log --oneline -- drivers/base/property.c
-git log --oneline -- drivers/base/swnode.c
+# في lore.kernel.org
+fwnode_operations add_links
+fw_devlink strict mode
+fwnode secondary fallback
+swnode software_node properties
 
-# للبحث في kernel source
-git grep "fwnode_operations" -- include/
-git grep "fwnode_has_op" -- drivers/
-
-# في LWN.net
-site:lwn.net fwnode
-site:lwn.net "device property" kernel
-site:lwn.net "software node" kernel
-
-# في patchwork
-site:patchwork.kernel.org fwnode
+# في git log داخل الـ kernel source
+git log --oneline --follow include/linux/fwnode.h
+git log --oneline --follow drivers/base/property.c
+git log --oneline --follow drivers/base/swnode.c
 ```
-
----
-
-### ملخص سريع للمصادر حسب الأولوية
-
-| الأولوية | المصدر | ليه؟ |
-|----------|--------|-------|
-| 1 | `include/linux/fwnode.h` + `include/linux/property.h` | الـ source نفسه هو أدق توثيق |
-| 2 | [LWN: Introducing software nodes](https://lwn.net/Articles/770825/) | بيشرح الـ design decisions |
-| 3 | [LWN: Software fwnode references](https://lwn.net/Articles/789099/) | بيكمل الصورة |
-| 4 | [Kernel docs: ACPI DSD Graphs](https://www.kernel.org/doc/html/v5.2/firmware-guide/acpi/dsd/graph.html) | مثال عملي على الـ fwnode graph API |
-| 5 | [LDD3 Chapter 14](https://lwn.net/Kernel/LDD3/) | الأساس النظري للـ device model |
-| 6 | [fw_devlink improvements](https://lore.kernel.org/linux-devicetree/CAGETcx_nVXbHzZ3+_aR4SZtSnSBU=Rfp8Qm2jOs7zGZRaH_88A@mail.gmail.com/T/) | لفهم الـ FWNODE_FLAG_* flags |
 ## Phase 8: Writing simple module
 
-### الهدف
+### الفكرة
 
-**الـ** `fwnode_link_add()` هي function مُصدَّرة من firmware node subsystem بتُضاف link بين consumer و supplier node. هنستخدم **kprobe** عشان نعمل hook عليها ونطبع اسم الـ fwnode اللي بيتعمله link لحظة ما بيتنادى عليها.
-
-ده بيخلينا نشوف إزاي الـ kernel بيبني dependency graph بين الـ firmware nodes وقت bootup أو device registration.
+**`fwnode_link_add`** هي دالة exported موجودة في `drivers/base/core.c` بتتسمى كل ما الـ firmware node graph بيحاول يربط consumer بـ supplier (مثلاً لما الـ device tree بيحل الـ `phandle` dependencies). هنستخدم **kprobe** عشان نعترض الاستدعاء ونطبع معلومات عن الـ nodes اللي بتتربط.
 
 ---
 
@@ -3072,101 +2464,103 @@ site:patchwork.kernel.org fwnode
 ```c
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * fwnode_link_add kprobe tracer
+ * fwnode_link_add kprobe monitor
  *
- * Hooks fwnode_link_add() to log every firmware node link
- * being created — shows consumer/supplier relationships.
+ * Hooks fwnode_link_add() to trace firmware node link creation:
+ * who is the consumer, who is the supplier, and what flags are set.
  */
 
-#include <linux/kernel.h>
-#include <linux/module.h>
-#include <linux/kprobes.h>
-#include <linux/fwnode.h>       /* fwnode_handle, fwnode_call_ptr_op */
-#include <linux/device.h>       /* struct device */
+#include <linux/module.h>       /* MODULE_LICENSE, module_init/exit */
+#include <linux/kernel.h>       /* pr_info */
+#include <linux/kprobes.h>      /* kprobe API */
+#include <linux/fwnode.h>       /* struct fwnode_handle, fwnode_get_name */
+#include <linux/property.h>     /* fwnode_get_name() wrapper */
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Kernel Explorer");
-MODULE_DESCRIPTION("Trace fwnode_link_add() calls via kprobe");
+MODULE_DESCRIPTION("kprobe on fwnode_link_add to trace fw node dependency links");
 
 /* ------------------------------------------------------------------ */
-/*  helper: safely get the name of an fwnode (may be NULL)             */
+/*  kprobe handler — called just BEFORE fwnode_link_add() executes     */
 /* ------------------------------------------------------------------ */
-static const char *safe_fwnode_name(const struct fwnode_handle *fwnode)
-{
-    if (!fwnode || !fwnode->ops || !fwnode->ops->get_name)
-        return "<unknown>";
-    return fwnode->ops->get_name(fwnode);
-}
 
-/* ------------------------------------------------------------------ */
-/*  pre-handler: runs BEFORE fwnode_link_add executes                  */
-/*  pt_regs holds the CPU registers at the probe site                  */
-/* ------------------------------------------------------------------ */
+/*
+ * الـ pre_handler بيتشغل قبل تنفيذ الدالة الأصلية بمباشرة.
+ * الـ regs بتحمل قيم الـ registers في لحظة الاستدعاء على الـ architecture.
+ */
 static int handler_pre(struct kprobe *p, struct pt_regs *regs)
 {
     /*
-     * Calling convention on x86-64:
-     *   arg0 (rdi) = con  — consumer fwnode_handle *
-     *   arg1 (rsi) = sup  — supplier fwnode_handle *
-     *   arg2 (rdx) = flags (u8)
-     *
-     * On ARM64 use regs->regs[0], regs->regs[1], regs->regs[2].
+     * على x86_64: الـ arguments بتتمرر في rdi, rsi, rdx بالترتيب.
+     * fwnode_link_add(con, sup, flags)  →  rdi=con, rsi=sup, rdx=flags
      */
-#ifdef CONFIG_X86_64
     struct fwnode_handle *con = (struct fwnode_handle *)regs->di;
     struct fwnode_handle *sup = (struct fwnode_handle *)regs->si;
-    u8 flags                  = (u8)regs->dx;
-#elif defined(CONFIG_ARM64)
-    struct fwnode_handle *con = (struct fwnode_handle *)regs->regs[0];
-    struct fwnode_handle *sup = (struct fwnode_handle *)regs->regs[1];
-    u8 flags                  = (u8)regs->regs[2];
-#else
-    /* Fallback: skip on unsupported arch */
+    u8 flags = (u8)regs->dx;
+
+    /* استخراج اسم الـ node من الـ ops->get_name لو موجودة */
+    const char *con_name = "<unknown>";
+    const char *sup_name = "<unknown>";
+
+    if (con && con->ops && con->ops->get_name)
+        con_name = con->ops->get_name(con);
+
+    if (sup && sup->ops && sup->ops->get_name)
+        sup_name = sup->ops->get_name(sup);
+
+    pr_info("fwnode_link_add: consumer=[%s] supplier=[%s] flags=0x%x%s%s\n",
+            con_name, sup_name, flags,
+            (flags & BIT(0)) ? " CYCLE"  : "",   /* FWLINK_FLAG_CYCLE   */
+            (flags & BIT(1)) ? " IGNORE" : "");  /* FWLINK_FLAG_IGNORE  */
+
+    /* return 0 = لا تغيّر execution flow، استكمل الدالة الأصلية */
     return 0;
-#endif
-
-    pr_info("fwnode_link_add: consumer=[%s] supplier=[%s] flags=0x%02x\n",
-            safe_fwnode_name(con),
-            safe_fwnode_name(sup),
-            flags);
-
-    return 0; /* 0 = let the probed function continue normally */
 }
 
 /* ------------------------------------------------------------------ */
-/*  kprobe descriptor — points to the symbol we want to hook           */
+/*  kprobe struct                                                       */
 /* ------------------------------------------------------------------ */
+
+/*
+ * بنحدد اسم الـ symbol اللي هنحطّ فيه الـ probe.
+ * الـ kernel بيحوّل الاسم لـ address وقت register.
+ */
 static struct kprobe kp = {
     .symbol_name = "fwnode_link_add",
     .pre_handler = handler_pre,
 };
 
 /* ------------------------------------------------------------------ */
-/*  module_init: register the kprobe                                   */
+/*  init / exit                                                         */
 /* ------------------------------------------------------------------ */
+
 static int __init fwnode_probe_init(void)
 {
     int ret;
 
+    /*
+     * register_kprobe بتحط breakpoint على الدالة المحددة.
+     * لو فشل (مثلاً الـ symbol مش موجود أو مش kprobeable) بترجع error.
+     */
     ret = register_kprobe(&kp);
     if (ret < 0) {
         pr_err("fwnode_probe: register_kprobe failed: %d\n", ret);
         return ret;
     }
 
-    pr_info("fwnode_probe: planted kprobe on %s @ %px\n",
-            kp.symbol_name, kp.addr);
+    pr_info("fwnode_probe: kprobe planted on fwnode_link_add @ %px\n",
+            kp.addr);
     return 0;
 }
 
-/* ------------------------------------------------------------------ */
-/*  module_exit: MUST unregister — otherwise the probe stays active    */
-/*  after the module text is gone → guaranteed kernel panic            */
-/* ------------------------------------------------------------------ */
 static void __exit fwnode_probe_exit(void)
 {
+    /*
+     * لازم نشيل الـ kprobe في الـ exit عشان منخليش breakpoint
+     * في الـ kernel بعد ما الـ module اتفك — ده بيسبب kernel panic.
+     */
     unregister_kprobe(&kp);
-    pr_info("fwnode_probe: removed kprobe from %s\n", kp.symbol_name);
+    pr_info("fwnode_probe: kprobe removed from fwnode_link_add\n");
 }
 
 module_init(fwnode_probe_init);
@@ -3175,7 +2569,43 @@ module_exit(fwnode_probe_exit);
 
 ---
 
-### Makefile
+### شرح كل قسم
+
+#### الـ Includes
+
+| Header | السبب |
+|--------|-------|
+| `linux/module.h` | الـ macros الأساسية لأي module: `module_init`, `MODULE_LICENSE`, إلخ |
+| `linux/kprobes.h` | تعريف `struct kprobe` وفنكشنز `register_kprobe` / `unregister_kprobe` |
+| `linux/fwnode.h` | تعريف `struct fwnode_handle` و`struct fwnode_operations` اللي بنستخدمهم في الـ cast |
+| `linux/property.h` | بيضم الـ wrappers المعيارية للـ fwnode API |
+
+---
+
+#### الـ `handler_pre` — الـ Callback
+
+**الـ `pt_regs *regs`** بيحمل حالة الـ CPU registers لحظة اعتراض الدالة.
+على x86_64 الـ calling convention بيحط أول 3 arguments في `rdi`, `rsi`, `rdx` — فبنعمل cast مباشر من الـ registers للـ structs المناسبة.
+
+بنجيب اسم كل node عن طريق الـ `ops->get_name` pointer الموجود في `struct fwnode_operations` — لو الـ node مش عنده الـ op ده (مثلاً node مش مكتملة)، بنطبع `<unknown>`.
+
+الـ flags بنحللها بنفس تعريفات `FWLINK_FLAG_CYCLE` و`FWLINK_FLAG_IGNORE` من `fwnode.h` عشان الـ output يكون readable.
+
+---
+
+#### الـ `struct kprobe kp`
+
+بنحدد فقط `symbol_name` و`pre_handler`. الـ kernel بيحل الـ symbol لـ address تلقائياً وقت `register_kprobe`. لو احتجنا نشتغل بعد تنفيذ الدالة ممكن نضيف `post_handler` بنفس الأسلوب.
+
+---
+
+#### الـ `module_init` / `module_exit`
+
+**الـ init** بيسجّل الـ kprobe — لو فشل بيرجع الـ error للـ kernel وما بيكملش تحميل الـ module. **الـ exit** إلزامي يشيل الـ kprobe؛ تركه مزروع بعد تفريغ الـ module بيخلي الـ kernel يقفز لكود اتشال من الذاكرة ويعمل **kernel panic**.
+
+---
+
+### Makefile للتجميع
 
 ```makefile
 obj-m += fwnode_probe.o
@@ -3189,109 +2619,28 @@ clean:
 	make -C $(KDIR) M=$(PWD) clean
 ```
 
----
-
-### شرح كل جزء
-
-#### الـ includes
-
-```c
-#include <linux/kprobes.h>
-#include <linux/fwnode.h>
-```
-
-**الـ** `kprobes.h` بيجيب `struct kprobe` و `register_kprobe()` / `unregister_kprobe()`.
-**الـ** `fwnode.h` بيجيب `struct fwnode_handle` و `fwnode_operations` اللي محتاجينهم عشان نقرأ اسم الـ node.
-
----
-
-#### الـ `safe_fwnode_name()`
-
-```c
-static const char *safe_fwnode_name(const struct fwnode_handle *fwnode)
-```
-
-الـ fwnode مش لازم يكون عنده `ops->get_name` — بعض الـ nodes بدائية أو بتتعمل في مرحلة مبكرة. الـ NULL check ده بيحمي من kernel panic جوّا الـ probe handler.
-
----
-
-#### الـ `handler_pre()`
-
-```c
-static int handler_pre(struct kprobe *p, struct pt_regs *regs)
-```
-
-الـ kprobe بيوقف التنفيذ قبل ما `fwnode_link_add` تشتغل وبيديك الـ `pt_regs` — يعني registers الـ CPU اللي فيها الـ arguments. إحنا بنقرأ `rdi` و `rsi` على x86-64 (أو `regs[0]` و `regs[1]` على ARM64) عشان نعرف مين consumer ومين supplier.
-
----
-
-#### الـ `struct kprobe kp`
-
-```c
-static struct kprobe kp = {
-    .symbol_name = "fwnode_link_add",
-    .pre_handler = handler_pre,
-};
-```
-
-**الـ** `.symbol_name` بيخلي الـ kernel يحل الـ address تلقائياً من الـ kallsyms — مش محتاج تكتب address يدوي.
-**الـ** `.pre_handler` هي الـ callback اللي بتتنادى عليها قبل ما الـ function الأصلية تشتغل.
-
----
-
-#### الـ `module_init`
-
-```c
-ret = register_kprobe(&kp);
-```
-
-`register_kprobe` بتزرع breakpoint عند بداية `fwnode_link_add`. لو رجعت قيمة سالبة يبقى إما الـ symbol مش موجود في الـ kernel (مش compiled) أو الـ CONFIG_KPROBES مش enabled.
-
----
-
-#### الـ `module_exit`
-
-```c
-unregister_kprobe(&kp);
-```
-
-لازم تعمل unregister في الـ exit وإلا لما الـ module يتشال من الـ memory، الـ breakpoint هيظل بيشاور على كود اتمسح → **kernel panic** فوري. ده مش اختياري.
-
----
-
-### تشغيل وقراءة الـ output
+### تشغيل واختبار
 
 ```bash
-# بناء الـ module
-make
-
-# تحميله
+# تحميل الـ module
 sudo insmod fwnode_probe.ko
 
-# مشاهدة الـ log (بيظهر لما device جديد بيتـ probe)
-sudo dmesg -w | grep fwnode_link_add
+# تشغيل أي عملية probe (مثلاً تحميل driver يستخدم device tree)
+sudo modprobe some_dt_driver
 
-# تفريغه
+# مشاهدة الـ output
+sudo dmesg | grep fwnode_probe
+
+# تفريغ الـ module
 sudo rmmod fwnode_probe
 ```
 
-مثال على الـ output لو جهاز USB اتوصل:
+**مثال على الـ output المتوقع:**
 
 ```
-fwnode_probe: planted kprobe on fwnode_link_add @ ffffffff81a3c220
-fwnode_probe: fwnode_link_add: consumer=[/i2c@0/sensor@48] supplier=[/clocks/osc24M] flags=0x00
-fwnode_probe: fwnode_link_add: consumer=[/i2c@0/sensor@48] supplier=[/regulators/vdd] flags=0x00
+[  42.123456] fwnode_probe: kprobe planted on fwnode_link_add @ ffffffffc0a1b234
+[  42.789012] fwnode_probe: fwnode_link_add: consumer=[/soc/i2c@ff160000/sensor@48] supplier=[/clocks/clk_apb] flags=0x0
+[  43.001234] fwnode_probe: fwnode_link_add: consumer=[/soc/spi@ff180000] supplier=[/soc/pinctrl] flags=0x0
 ```
 
-ده بيوضح إن الـ sensor محتاج الـ clock والـ regulator قبل ما يتـ probe — ده بالظبط الـ dependency graph اللي الـ `fw_devlink` بيعمله.
-
----
-
-### ملاحظات مهمة
-
-| نقطة | تفصيل |
-|------|--------|
-| `CONFIG_KPROBES=y` | لازم يكون enabled في الـ kernel config |
-| `CONFIG_KALLSYMS=y` | عشان الـ `.symbol_name` يشتغل |
-| الـ handler بيشتغل في interrupt context | ممنوع تعمل sleep أو تاخد non-spinlock mutex |
-| الـ `regs` layout معتمد على architecture | الكود عنده `#ifdef` للـ x86-64 والـ ARM64 |
+كل سطر بيكشف dependency جديدة الـ kernel بيبنيها في graph الـ firmware nodes — ده مفيد جداً في debug مشاكل الـ `deferred probe` وترتيب تحميل الـ drivers.

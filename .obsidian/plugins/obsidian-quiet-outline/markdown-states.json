@@ -150,18 +150,22 @@
     "expandedKeys": []
   },
   "README.md": {
-    "scroll": 0,
+    "scroll": 1715.3653273809523,
     "cursor": {
       "from": {
-        "line": 418,
+        "line": 1728,
         "ch": 0
       },
       "to": {
-        "line": 418,
+        "line": 1728,
         "ch": 0
       }
     },
-    "expandedKeys": []
+    "expandedKeys": [
+      "item-2-14",
+      "item-3-59",
+      "item-1-58"
+    ]
   },
   "Untitled.md": {
     "scroll": 0,

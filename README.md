@@ -1709,6 +1709,25 @@ F:	kernel/workqueue_internal.h
 - [ ] [workqueue.rst](Documentation/core-api/workqueue.rst.md)
 - [ ] [workqueue.h](include/linux/workqueue.h.md)
 
+## `SOFTWARE NODES AND DEVICE PROPERTIES`
+
+```
+R:	Andy Shevchenko <andriy.shevchenko@linux.intel.com>
+R:	Daniel Scally <djrscally@gmail.com>
+R:	Heikki Krogerus <heikki.krogerus@linux.intel.com>
+R:	Sakari Ailus <sakari.ailus@linux.intel.com>
+L:	linux-acpi@vger.kernel.org
+S:	Maintained
+F:	drivers/base/property.c
+F:	drivers/base/swnode.c
+F:	include/linux/fwnode.h
+F:	include/linux/property.h
+```
+
+- [ ] [fwnode.h](include/linux/fwnode.h.md)
+- [ ] [property.h](include/linux/property.h.md)
+
+
 # TODO
 - [ ] https://docs.kernel.org/core-api/kernel-api.html
 - [ ] Linux notifications subsystem: include/linux/notifier.h
