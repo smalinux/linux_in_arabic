@@ -446,6 +446,7 @@ F:	include/linux/pinctrl/
 - [ ] [pinconf.c](drivers/pinctrl/pinconf.c.md)
 - [ ] [pinconf-generic.c](drivers/pinctrl/pinconf-generic.c.md)
 - [ ] [devicetree.c](drivers/pinctrl/devicetree.c.md)
+- [ ] [pinctrl-single.c](drivers/pinctrl/pinctrl-single.c.md)
 - [ ] 
 - [ ] [pinctrl-amlogic-a4.c](drivers/pinctrl/meson/pinctrl-amlogic-a4.c.md)
 - [ ] [pinctrl-amlogic-c3.c](drivers/pinctrl/meson/pinctrl-amlogic-c3.c.md)

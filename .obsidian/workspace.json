@@ -195,6 +195,7 @@
   },
   "active": "e0e1e770d577effd",
   "lastOpenFiles": [
+    "drivers/pinctrl/pinctrl-single.c.md",
     "include/linux/workqueue.h.md",
     "Documentation/core-api/workqueue.rst.md",
     "scripts/dtc/checks.c.md",
@@ -230,7 +231,6 @@
     "drivers/reset/reset-sunxi.c.md",
     "drivers/net/ethernet/allwinner/sun4i-emac.c.md",
     "drivers/net/ethernet/allwinner",
-    "drivers/net/ethernet/stmicro/stmmac/dwmac-sun8i.c.md",
     "assets/Pasted image 20260223223812.png",
     "Pasted image 20260223223716.png",
     "Pasted image 20260223223642.png",
