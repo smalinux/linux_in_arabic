@@ -233,6 +233,7 @@ F:	kernel/irq/
 F:	lib/group_cpus.c
 ```
 
+**DONE** 😸
 - [ ] include/linux/group_cpus.h
 - [ ] include/linux/irq.h
 - [ ] include/linux/irqhandler.h
@@ -391,7 +392,7 @@ F:	include/linux/iommu.h
 F:	include/linux/iova.h
 F:	include/linux/of_iommu.h
 ```
-
+DONE 😸
 - [ ] include/linux/iommu.h
 - [ ] include/linux/iova.h
 - [ ] include/linux/of_iommu.h

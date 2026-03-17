@@ -1,201 +1,785 @@
 ## Phase 1: الصورة الكبيرة ببساطة
 
-### ما هو الـ IOMMU؟
+### الـ Subsystem اللي بيتبعه الملف
 
-تخيّل أن لديك مدينة كبيرة (الذاكرة RAM)، وفيها أحياء سكنية (عناوين الذاكرة). كل جهاز في الحاسوب (GPU، بطاقة شبكة، وحدة صوت) يريد الوصول إلى هذه المدينة ليقرأ ويكتب البيانات. لو تركت كل جهاز يتجوّل بحرية في المدينة كلها، فأي جهاز مخترق أو معطوب قد يُفسد بيانات نظام التشغيل أو يسرق كلمات مرور المستخدمين.
-
-**الـ IOMMU** (Input-Output Memory Management Unit) هو "الشرطي" الذي يجلس بين الأجهزة والذاكرة. كل جهاز لا يرى العناوين الحقيقية للذاكرة — بل يرى عناوين وهمية خاصة به تسمى **IOVA** (I/O Virtual Address). الـ IOMMU يترجم هذه العناوين الوهمية إلى الحقيقية، ويرفض أي وصول غير مُصرَّح به.
+الـ `of_iommu.h` جزء من **IOMMU Subsystem** في الـ Linux kernel، وبالتحديد هو الجسر بين الـ **Device Tree (OF = Open Firmware)** وبين الـ IOMMU framework. الـ maintainers الأساسيين هم Joerg Roedel و Will Deacon، والـ mailing list هو `iommu@lists.linux.dev`.
 
 ---
 
-### أين تأتي مشكلة الـ Device Tree؟
+### الصورة الكبيرة — قبل أي كود
 
-في عالم الـ x86 (Intel/AMD)، كل جهاز يُعرّف نفسه عبر الـ PCI بـ ID واضح، فيعرف الـ IOMMU من هو. لكن في عالم الـ ARM (هواتف ذكية، راوترات، أجهزة مدمجة)، لا يوجد PCI في الغالب — الأجهزة مدمجة مباشرة في الـ SoC ولا تُعرّف نفسها تلقائياً. لذلك يُستخدم **Device Tree (DT)** — ملف وصف ثابت يخبر الكيرنل: "هذا الجهاز موجود، وهذا عنوانه، وهو متصل بهذا الـ IOMMU بهذا الـ ID."
+#### الـ IOMMU إيه أصلاً؟
+
+تخيل إن عندك بيت (الـ RAM)، وعندك ضيوف (الـ devices زي GPU، NIC، USB controller). كل ضيف محتاج يدخل أوض معينة (memory addresses). من غير حارس، أي device ممكن يقرأ أو يكتب في أي مكان في الـ RAM — ده خطر أمني ضخم.
+
+الـ **IOMMU** (Input-Output Memory Management Unit) هو الحارس ده. هو hardware موجود على الـ CPU/SoC بيتحكم في الـ DMA (Direct Memory Access) للـ devices. بيعمل virtual address space للـ device تماماً زي ما الـ MMU بيعمله للـ processes.
+
+```
+[ Device (GPU/NIC) ] --DMA request--> [ IOMMU ] --translated--> [ Physical RAM ]
+                                          |
+                                    checks page tables
+                                    (per-device isolation)
+```
+
+**فايدته:**
+- **Security**: isolates devices عن بعض (مهم في virtualization وـ VFIO)
+- **Protection**: device معطوب أو malicious مش هيقدر يكتب في kernel memory
+- **Virtualization**: بيخلي VM تتحكم في device حقيقي بأمان (VFIO/VFIO-PCI)
 
 ---
 
-### ما هو دور `of_iommu.h`؟
+#### الـ Device Tree إيه وليه محتاجينه هنا؟
 
-**الـ `of_iommu.h`** هو الـ header الذي يُعلن عن جسر الربط بين عالم الـ **OF (Open Firmware / Device Tree)** وعالم الـ **IOMMU subsystem** في الكيرنل.
+في عالم الـ embedded وـ ARM/RISC-V السيسطمات، الـ hardware مش بيعرف يـ self-describe نفسه زي PCI. فبيتوصف في ملف نصي اسمه **Device Tree (DT)**، وده بيتحول لـ binary blob اسمه **DTB** وبيتحمل مع الـ kernel.
 
-القصة بالتفصيل:
-
-1. عند إقلاع النظام، يقرأ الكيرنل الـ Device Tree ويكتشف الأجهزة.
-2. لكل جهاز، يحتاج الكيرنل أن يعرف: هل هذا الجهاز متصل بـ IOMMU؟ وما هو الـ ID الذي يستخدمه للتعريف عن نفسه لهذا الـ IOMMU؟
-3. `of_iommu_configure()` هي الدالة المسؤولة عن قراءة خاصية `iommus` أو `iommu-map` من الـ Device Tree لهذا الجهاز، ثم إخبار الـ IOMMU driver بأن يُسجّل هذا الجهاز.
-4. `of_iommu_get_resv_regions()` تقرأ خاصية `memory-region` و`iommu-addresses` من الـ DT لتعرف: ما هي مناطق الـ IOVA المحجوزة لهذا الجهاز (مثل مناطق الـ firmware أو الـ DMA الثابت) التي يجب ألا يستخدمها أي شخص آخر.
-
----
-
-### القصة الكاملة بمثال
-
-لنقل أن لديك SoC من ARM يحتوي على:
-- GPU متصل بـ SMMU (ARM's IOMMU)
-- بطاقة شبكة متصلة بنفس الـ SMMU
-
-في الـ Device Tree:
+مثلاً في الـ Device Tree:
 ```
 gpu@ff000000 {
-    iommus = <&smmu 0x01>;  /* هذا الـ GPU له ID = 0x01 في الـ SMMU */
+    iommus = <&smmu 0x42>;  /* ← connected to SMMU, stream ID 0x42 */
 };
 
-eth@ff100000 {
-    iommus = <&smmu 0x02>;  /* الشبكة لها ID = 0x02 */
+smmu: iommu@fd800000 {
+    compatible = "arm,smmu-v3";
+    #iommu-cells = <1>;
 };
 ```
 
-عندما يبدأ الكيرنل:
-1. يجد الـ GPU ويريد تهيئته مع الـ IOMMU.
-2. يُنادي `of_iommu_configure(gpu_dev, gpu_node, NULL)`.
-3. هذه الدالة تقرأ `iommus = <&smmu 0x01>` من الـ DT.
-4. تجد الـ SMMU driver وتُسجّل الـ GPU معه بـ stream ID = 0x01.
-5. الآن الـ GPU محاصر داخل مساحة العناوين الوهمية الخاصة به — لا يستطيع لمس ذاكرة الكيرنل أو ذاكرة الشبكة.
+الـ `iommus` property دي بتقول: الـ GPU ده متوصل بالـ IOMMU controller اللي اسمه `smmu`، وعنده stream ID = `0x42`.
 
 ---
 
-### لماذا هذا الـ header مهم؟
+#### دور `of_iommu.h` تحديداً
 
-- **الفصل بين طبقات الكود**: الـ bus code (مثل `platform_bus`، `amba_bus`) يُنادي `of_iommu_configure()` دون أن يعرف شيئاً عن تفاصيل أي IOMMU driver محدد.
-- **دعم `CONFIG_OF_IOMMU`**: إذا لم يكن الـ Device Tree مُفعّلاً في الـ build، الدوال تتحول إلى stubs فارغة (أو ترجع `-ENODEV`) فلا يتعطل الكود على x86.
-- **تجريد النظام**: نفس كود الـ bus يعمل على Qualcomm SMMU، Apple DART، ARM SMMU v1/v2/v3، MediaTek IOMMU — لأن الجميع يتحدث عبر هذا الـ interface الموحّد.
+الملف ده هو **واجهة (interface/API header)** بسيطة جداً بتعلن عن دالتين بس، مسؤوليتهم هي:
+
+**أولاً: `of_iommu_configure()`**
+لما الـ kernel بيعمل probe لـ device معين، بيحتاج يعرف: هل الـ device ده موصل بـ IOMMU؟ وإيه الـ stream ID بتاعه؟ الدالة دي بتقرأ معلومات الـ Device Tree وبتربط الـ device بالـ IOMMU driver الصح.
+
+```
+device probe
+    └─> of_iommu_configure()
+            └─> reads "iommus" / "iommu-map" from DT
+            └─> calls iommu_ops->of_xlate() on the right driver
+            └─> device now has iommu_fwspec attached
+```
+
+**ثانياً: `of_iommu_get_resv_regions()`**
+بعض الـ devices محتاجة مناطق معينة في الـ address space تكون محجوزة (reserved) — زي MSI doorbell addresses. الدالة دي بتجيب الـ reserved regions دي من الـ Device Tree.
 
 ---
 
-### الملفات المرتبطة التي يجب معرفتها
+### القصة الكاملة — من البداية للنهاية
+
+تخيل عندك SoC فيها GPU ومتوصلة بـ ARM SMMU (وهو IOMMU من ARM):
+
+1. **Boot time**: الـ kernel بيقرأ الـ DTB، بيلاقي node الـ GPU.
+2. **Driver probe**: driver الـ GPU بيتعمل probe.
+3. **IOMMU setup**: الـ bus code بيستدعي `of_iommu_configure(dev, gpu_node, NULL)`.
+4. **DT parsing**: الدالة بتقرأ `iommus = <&smmu 0x42>` من الـ Device Tree.
+5. **Driver lookup**: بتدور على الـ SMMU driver اللي registered نفسه.
+6. **Translation**: بتستدعي `smmu_ops->of_xlate(dev, &spec)` عشان تسجل الـ stream ID.
+7. **fwspec attached**: دلوقتي الـ device عنده `iommu_fwspec` فيها كل معلومات الـ IOMMU.
+8. **Domain allocation**: الـ IOMMU core بيعمل `iommu_domain` ويربط الـ device بيه.
+9. **DMA isolated**: كل DMA من الـ GPU دلوقتي بيعدي من الـ SMMU وبيتترجم.
+
+الـ `of_iommu.h` هو الـ header اللي بيعلن عن خطوة 3 دي.
+
+---
+
+### ليه الملف صغير جداً؟
+
+الملف عمداً بسيط — هو مجرد **public API declaration**. كل الـ implementation موجودة في `drivers/iommu/of_iommu.c`. الفصل ده مهم: أي driver أو subsystem محتاج يـ configure IOMMU من DT، بيـ include الـ header ده بس من غير ما يعرف أي تفاصيل implementation.
+
+كمان لو `CONFIG_OF_IOMMU` مش enabled (زي على x86 من غير DT)، الـ inline stubs بترجع `-ENODEV` بشكل صامت — الكود مش هيـ break.
+
+---
+
+### الملفات المرتبطة اللي المفروض تعرفها
 
 | الملف | الدور |
+|-------|-------|
+| `include/linux/of_iommu.h` | الملف ده — public API header |
+| `drivers/iommu/of_iommu.c` | الـ implementation الكاملة للـ API |
+| `include/linux/iommu.h` | الـ IOMMU core API (domains, ops, fwspec) |
+| `drivers/iommu/iommu.c` | الـ IOMMU core framework |
+| `include/linux/of.h` | الـ Device Tree core API |
+| `drivers/iommu/arm/arm-smmu/arm-smmu.c` | مثال على IOMMU driver بيستخدم `of_xlate` |
+| `drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.c` | ARM SMMU v3 driver |
+| `drivers/iommu/dma-iommu.c` | الـ DMA layer فوق IOMMU |
+| `Documentation/devicetree/bindings/iommu/` | الـ DT bindings specs |
+
+---
+
+### ملفات الـ Subsystem الأساسية (Core + Headers + HW Drivers)
+
+**Core:**
+- `drivers/iommu/iommu.c` — القلب الأساسي للـ framework
+- `drivers/iommu/of_iommu.c` — الـ DT glue layer
+- `drivers/iommu/dma-iommu.c` — DMA API integration
+- `drivers/iommu/iova.c` — IOVA allocator
+
+**Headers:**
+- `include/linux/iommu.h` — الـ main IOMMU API
+- `include/linux/of_iommu.h` — الـ DT-IOMMU bridge API (الملف ده)
+- `include/linux/iova.h` — IOVA types
+
+**HW Drivers (أمثلة):**
+- `drivers/iommu/arm/arm-smmu/arm-smmu.c` — ARM SMMU v1/v2
+- `drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.c` — ARM SMMU v3
+- `drivers/iommu/intel/iommu.c` — Intel VT-d
+- `drivers/iommu/amd/iommu.c` — AMD IOMMU (AMD-Vi)
+- `drivers/iommu/apple-dart.c` — Apple DART (M1/M2)
+- `drivers/iommu/tegra-smmu.c` — NVIDIA Tegra SMMU
+- `drivers/iommu/mtk_iommu.c` — MediaTek IOMMU
+## Phase 2: شرح الـ OF-IOMMU Framework
+
+### المشكلة اللي بيحلها الـ Subsystem ده
+
+في السيستم الـ embedded، عندك devices زي GPU، DMA controller، أو Network card كلها بتعمل **DMA** — بتكتب وبتقرأ من الـ RAM مباشرة.
+
+من غير حماية، أي device ممكن يوصل لأي عنوان في الـ RAM — حتى لو ده RAM بتاع kernel أو process تانية. ده security hole واسع جداً، وفي بيئة الـ virtualization بيبقى كارثة.
+
+الحل هو الـ **IOMMU** (Input-Output Memory Management Unit): هو unit هاردوير موجود بين الـ bus والـ RAM، بيترجم الـ **IOVA** (I/O Virtual Address) اللي الـ device شايفها لـ Physical Address حقيقي، وبيطبّق صلاحيات Read/Write على كل mapping.
+
+بس السؤال: **إزاي الـ kernel يعرف إن الـ device دي متوصلة بأنهي IOMMU؟ وإيه الـ stream ID بتاعتها؟**
+
+في البيئات اللي بتستخدم **Device Tree** (معظم ARM embedded)، الإجابة موجودة في الـ DT nodes. وده بالضبط اللي بيعمله الـ `of_iommu` subsystem — يربط بين الـ Device Tree descriptions وبين الـ IOMMU framework.
+
+---
+
+### الحل: OF-IOMMU كـ Glue Layer
+
+الـ **`of_iommu`** مش IOMMU driver بنفسه — هو **glue layer** بين:
+
+- الـ **Device Tree parser** (OF = Open Firmware) اللي بيفهم الـ DT nodes
+- الـ **IOMMU core framework** اللي بيدير الـ domains والـ mappings
+- الـ **IOMMU hardware drivers** (مثلاً `arm-smmu`, `intel-iommu`, `ipmmu-vmsa`)
+
+الـ subsystem بيعمل حاجتين فقط:
+1. `of_iommu_configure()` — يقرأ الـ DT ويوصّل الـ device بالـ IOMMU driver الصح
+2. `of_iommu_get_resv_regions()` — يجيب الـ memory regions اللي الـ IOMMU محتاج يحجزها لنفسه (مثلاً MSI regions)
+
+---
+
+### الـ Big Picture Architecture
+
+```
+  ┌────────────────────────────────────────────────────────────────────┐
+  │                        Device Tree (DTB)                           │
+  │                                                                    │
+  │  gpu@fc000000 {                                                    │
+  │      iommus = <&smmu 0x120>;   ← phandle + stream-ID              │
+  │  };                                                                │
+  │                                                                    │
+  │  smmu: iommu@d0000000 {                                            │
+  │      compatible = "arm,smmu-v2";                                   │
+  │      #iommu-cells = <1>;       ← عدد args بعد الـ phandle         │
+  │  };                                                                │
+  └──────────────────────────┬─────────────────────────────────────────┘
+                             │  of_parse_phandle_with_args()
+                             ▼
+  ┌──────────────────────────────────────────────────────┐
+  │              of_iommu.c  (OF-IOMMU Glue)             │
+  │                                                      │
+  │  of_iommu_configure(dev, master_np, id)              │
+  │    ├─ يقرأ "iommus" property من الـ DT              │
+  │    ├─ يجيب الـ iommu_ops المسجّلة للـ IOMMU node    │
+  │    └─ يستدعي iommu_ops->of_xlate()                  │
+  │                                                      │
+  │  of_iommu_get_resv_regions(dev, list)                │
+  │    └─ يستدعي iommu_ops->get_resv_regions()           │
+  └──────────────────────┬───────────────────────────────┘
+                         │
+        ┌────────────────┼────────────────────┐
+        ▼                ▼                    ▼
+  ┌──────────┐    ┌──────────────┐    ┌──────────────┐
+  │arm-smmu.c│    │arm-smmu-v3.c │    │ipmmu-vmsa.c  │
+  │(IOMMU    │    │(IOMMU        │    │(IOMMU        │
+  │ Driver)  │    │ Driver)      │    │ Driver)      │
+  │          │    │              │    │              │
+  │.of_xlate │    │.of_xlate     │    │.of_xlate     │
+  └──────────┘    └──────────────┘    └──────────────┘
+        │                │                    │
+        └────────────────┴────────────────────┘
+                         │
+                         ▼
+  ┌──────────────────────────────────────────────────────┐
+  │              IOMMU Core Framework                    │
+  │                                                      │
+  │  iommu_group  ←─── devices sharing same page table  │
+  │  iommu_domain ←─── the actual IO page table         │
+  │  iommu_ops    ←─── vtable للـ hardware driver       │
+  └──────────────────────────────────────────────────────┘
+                         │
+                         ▼
+  ┌──────────────────────────────────────────────────────┐
+  │              IOMMU Hardware (ARM SMMU)               │
+  │  translates IOVA → PA for all bus masters            │
+  └──────────────────────────────────────────────────────┘
+```
+
+---
+
+### الـ Device Tree Integration: بالتفصيل
+
+الـ DT بيحدد العلاقة بين device وبين IOMMU عن طريق الـ `iommus` property:
+
+```dts
+/* مثال حقيقي من Qualcomm SoC */
+adreno_gpu: gpu@5000000 {
+    compatible = "qcom,adreno-630.2";
+    reg = <0x05000000 0x40000>;
+    iommus = <&adreno_smmu 0x0>,   /* stream ID للـ vertex/pixel */
+             <&adreno_smmu 0x1>;   /* stream ID للـ compute     */
+};
+
+adreno_smmu: iommu@5040000 {
+    compatible = "qcom,adreno-smmu";
+    reg = <0x05040000 0x10000>;
+    #iommu-cells = <1>;            /* كل device بتديله stream ID واحد */
+};
+```
+
+الـ `#iommu-cells = <1>` معناه إن كل reference للـ IOMMU دي بتاخد argument واحد إضافي بعد الـ phandle — وهو الـ **stream ID** (أو **SID**).
+
+الـ **Stream ID** هو الرقم اللي الـ SMMU بيعرف بيه مين بعت الـ transaction دي على الـ bus. كل device ليها SID فريد، والـ SMMU بيستخدمه عشان يبحث في الـ stream table ويجيب الـ page table المناسبة.
+
+---
+
+### الـ Core Abstraction: الـ `of_phandle_args`
+
+الـ struct الأساسي في اللعبة دي هو `struct of_phandle_args` (معرّف في `include/linux/of.h`):
+
+```c
+struct of_phandle_args {
+    struct device_node *np;      /* pointer للـ IOMMU node نفسه */
+    int args_count;              /* عدد الـ arguments (الـ cells) */
+    uint32_t args[MAX_PHANDLE_ARGS]; /* الـ stream IDs أو أي args تانية */
+};
+```
+
+لما الـ kernel يقرأ `iommus = <&smmu 0x120>`:
+- `np` → بيشاور على الـ `smmu` node
+- `args_count` = 1
+- `args[0]` = `0x120` (الـ stream ID)
+
+---
+
+### إيه اللي بيحصل تحديداً في `of_iommu_configure()`
+
+```
+of_iommu_configure(dev, master_np, id)
+       │
+       ├─ 1. يجيب device_node للـ device
+       │
+       ├─ 2. يعمل loop على كل entry في "iommus" property
+       │      └─ of_parse_phandle_with_args(np, "iommus", "#iommu-cells", ...)
+       │
+       ├─ 3. لكل entry: يجيب الـ iommu_ops المسجّلة للـ IOMMU node ده
+       │      └─ of_fwnode_handle(iommu_np) → iommu_ops
+       │
+       ├─ 4. يستدعي iommu_ops->of_xlate(dev, &iommu_spec)
+       │      └─ الـ driver بيضيف الـ device للـ iommu_group الصح
+       │         وبيحفظ الـ stream ID عشان يبني الـ stream table entry
+       │
+       └─ 5. الـ device دلوقتي connected للـ IOMMU وجاهزة تتاخد domain
+```
+
+---
+
+### تشبيه الدنيا الحقيقية — الـ Hotel والـ Room Key System
+
+تخيل فندق كبير (الـ SoC):
+
+| المفهوم الحقيقي | التشبيه |
 |---|---|
-| `include/linux/of_iommu.h` | **هذا الملف** — الـ API العلني لربط DT بالـ IOMMU |
-| `drivers/iommu/of_iommu.c` | التنفيذ الفعلي للدالتين المُعلنتين في الـ header |
-| `include/linux/iommu.h` | الـ core IOMMU API — تعريف `iommu_ops`، `iommu_domain`، `iommu_fwspec` |
-| `include/linux/iova.h` | إدارة مساحة عناوين الـ I/O الوهمية |
-| `drivers/iommu/iommu.c` | الـ core IOMMU subsystem — `iommu_probe_device`، `iommu_fwspec_init` |
-| `drivers/iommu/arm/arm-smmu/` | درايفر ARM SMMU v1/v2 (يستخدم `of_xlate`) |
-| `drivers/iommu/arm/arm-smmu-v3/` | درايفر ARM SMMU v3 الأحدث |
-| `drivers/iommu/intel/` | درايفر Intel VT-d IOMMU |
-| `drivers/iommu/amd/` | درايفر AMD-Vi IOMMU |
-| `drivers/iommu/apple-dart.c` | درايفر Apple DART IOMMU |
-| `drivers/iommu/mtk_iommu.c` | درايفر MediaTek IOMMU |
-| `Documentation/devicetree/bindings/iommu/` | توثيق خصائص الـ DT للـ IOMMU |
+| الـ IOMMU hardware | الـ Security system في الفندق |
+| الـ IOVA | رقم الغرفة اللي الـ device شايفاه |
+| الـ Physical Address | الموقع الفعلي للغرفة في المبنى |
+| الـ stream ID | رقم البطاقة الخاصة بكل نزيل |
+| الـ iommu_domain | الـ floor اللي المفتاح بيفتح غرفه بس |
+| الـ iommu_group | مجموعة نزلاء بيشتركوا نفس الـ floor |
+| الـ Device Tree | كتاب الحجوزات اللي بيقول مين في أنهي غرفة |
+| **الـ of_iommu** | **موظف الاستقبال** اللي بيقرأ الحجز ويسجّل النزيل في الـ system |
+
+موظف الاستقبال (of_iommu) مش بينفّذ الـ security بنفسه — بس هو اللي بيربط المعلومات الموجودة في كتاب الحجوزات (DT) بالـ security system (IOMMU driver). بدونه، كل device تبقى stranger والـ security system مش عارف يعاملها صح.
 
 ---
 
-### ملخص الهدف
+### الـ `of_iommu_get_resv_regions()`: ليه موجودة؟
 
-**الـ `of_iommu.h`** يُعلن عن دالتين فقط، لكنهما تُمثّلان الجسر الحيوي الذي يجعل كل جهاز مدمج في ARM محمياً بالـ IOMMU تلقائياً عند الإقلاع — بمجرد أن يصف الـ Device Tree العلاقة بين الجهاز والـ IOMMU. بدونهما، لا IOMMU يعمل على أي منصة تعتمد على الـ Device Tree.
-## Phase 2: شرح الـ OF_IOMMU Framework
+بعض منطق الـ IOMMU محتاج **reserved memory regions** — مناطق في الـ IO address space لازم تتعامل بطريقة خاصة:
 
-### المشكلة — لماذا يوجد هذا الـ subsystem؟
+- **MSI doorbell addresses**: لما device بتبعت MSI interrupt، بتكتب على address معينة. الـ IOMMU لازم يعرف العنوان ده ويتعامل معاه كـ `IOMMU_RESV_MSI` مش mapping عادي.
+- **Direct-mapped regions**: مناطق لازم تفضل physical == iova (identity mapped) طول الوقت.
 
-في الأنظمة المدمجة الحديثة (مثل SoCs تعتمد ARM)، يوجد عادةً **IOMMU** (Input-Output Memory Management Unit) — وهو وحدة hardware تترجم الـ I/O virtual addresses التي تصدرها الأجهزة الطرفية (DMA masters) إلى physical addresses حقيقية. هذا يعطي عزلاً (isolation) وحماية للذاكرة.
-
-المشكلة: لكي يعمل الـ IOMMU، يجب أن يعرف الـ kernel:
-1. أي IOMMU يتحكم في أي device؟
-2. ما هو الـ stream ID (أو master ID) الخاص بكل device؟
-
-في بيئة قائمة على **Device Tree** (وهي البيئة الشائعة في ARM embedded)، كل هذه المعلومات موجودة في الـ `.dts` file — لكن لا يوجد بدون `of_iommu` أي آلية لتحويل هذه البيانات النصية إلى ارتباط حقيقي داخل الـ kernel بين الـ device والـ IOMMU subsystem.
-
-**الـ `of_iommu` subsystem يحل هذه المشكلة بالضبط**: يقرأ الـ Device Tree، ويربط كل device بالـ IOMMU driver المناسب، ويمرر الـ stream IDs الصحيحة.
+الـ `of_iommu_get_resv_regions()` بتمشي على الـ DT وبتجمع كل الـ regions دي في `list_head` عشان الـ IOMMU core يعرف يتعامل معاها صح.
 
 ---
 
-### الحل — ماذا يفعل الـ kernel؟
+### الـ CONFIG_OF_IOMMU Guard
 
-الـ kernel يقسم المسألة إلى مرحلتين:
+الملف الكامل محاط بـ `#ifdef CONFIG_OF_IOMMU`:
 
-**1. وقت البوت (boot time):** الـ Device Tree يُحمَّل وتُبنى منه شجرة `device_node` في الذاكرة.
-
-**2. وقت probe الجهاز:** عندما يُراد ربط device بـ driver، تُستدعى `of_iommu_configure()` لتقرأ الـ DT properties مثل `iommus = <&smmu 0x100>` وتُنشئ الارتباط الصحيح مع الـ IOMMU driver.
-
-> **ملاحظة:** الـ **IOMMU subsystem** في الـ kernel (`linux/iommu.h`) هو subsystem مستقل يُعرِّف `struct iommu_ops`، `struct iommu_domain`، إلخ. الـ `of_iommu` ليس سوى **جسر DT** فوقه.
-
----
-
-### المكونات المترابطة — بنية الـ Device Tree ذات الصلة
-
-قبل أن نفهم الكود، لازم نفهم كيف يبدو الـ DT:
-
-```
-/* مثال حقيقي: Arm Cortex-A SoC */
-smmu0: iommu@d4000000 {
-    compatible = "arm,mmu-500";
-    reg = <0xd4000000 0x20000>;
-    #iommu-cells = <1>;           /* كل device يمرر stream ID واحد */
-};
-
-usb: usb@d1000000 {
-    compatible = "generic-ehci";
-    reg = <0xd1000000 0x1000>;
-    iommus = <&smmu0 0x100>;      /* مرتبط بـ smmu0 بـ stream ID = 0x100 */
-};
+```c
+#ifdef CONFIG_OF_IOMMU
+extern int of_iommu_configure(...);
+extern void of_iommu_get_resv_regions(...);
+#else
+/* stub functions تبعت -ENODEV أو void */
+static inline int of_iommu_configure(...) { return -ENODEV; }
+static inline void of_iommu_get_resv_regions(...) { }
+#endif
 ```
 
-**الـ `iommus` property** هي الرابط. الـ `of_iommu` يقرأها ويترجمها.
+ده pattern كلاسيكي في الـ kernel:
+- لو الـ platform مش بتستخدم DT (مثلاً x86 ACPI-only) → الـ `CONFIG_OF_IOMMU` بيبقى `n` والـ stubs بيتكمبايلوا بدلها
+- الـ callers مش محتاجين `#ifdef` في كودهم — كل حاجة transparent
 
 ---
 
-### المشهد الكبير — أين يقع OF_IOMMU في الـ kernel؟
+### إيه اللي الـ of_iommu بيمتلكه vs إيه اللي بيفوّضه
+
+| المسؤولية | of_iommu يملكها | يفوّضها لـ |
+|---|---|---|
+| قراءة `iommus` property من DT | ✅ | — |
+| parse الـ phandle args | ✅ | OF core (`of_parse_phandle_with_args`) |
+| ربط device بـ iommu_group | ❌ | IOMMU driver عبر `of_xlate()` |
+| بناء stream table entries | ❌ | IOMMU driver (arm-smmu, etc.) |
+| تخصيص الـ iommu_domain | ❌ | IOMMU core |
+| تنفيذ الـ page table walks | ❌ | IOMMU hardware + driver |
+| جمع reserved regions | ✅ (orchestration) | IOMMU driver عبر `get_resv_regions()` |
+| التعامل مع ACPI/non-DT | ❌ | `iort.c` (IORT subsystem) |
+
+---
+
+### العلاقة مع Subsystems تانية
+
+- **OF (Open Firmware / Device Tree subsystem)**: الـ `of_iommu` يعتمد عليه عشان يقرأ الـ DT nodes. الـ `struct device_node` و`struct of_phandle_args` كلهم من OF subsystem.
+- **IOMMU core** (`drivers/iommu/iommu.c`): هو اللي بيدير الـ groups والـ domains. الـ `of_iommu` بيكلمه عبر `iommu_ops`.
+- **DMA API** (`kernel/dma/`): بيستخدم الـ IOMMU domain عشان يعمل DMA mappings آمنة. الـ `of_iommu` هو الخطوة الأولى اللي بتخلي الـ DMA API يعرف يستخدم الـ IOMMU.
+- **Platform/bus drivers**: لما device بتتسجّل، الـ bus code (مثلاً `platform_bus_type`) بيستدعي `of_iommu_configure()` تلقائياً.
+
+---
+
+### الـ Struct Relationship Map
 
 ```
-+--------------------------------------------------+
-|            User Space (DMA operations)           |
-+--------------------------------------------------+
-          |
-+--------------------------------------------------+
-|           Linux Kernel                           |
-|                                                  |
-|  +-----------+    +----------+    +-----------+  |
-|  |  Device   |    |  DMA API |    | IOMMUFD   |  |
-|  |  Driver   |--->| (iommu_  |    | (vIOMMU   |  |
-|  | (usb,gpu) |    |  map/    |    | for VMs)  |  |
-|  +-----------+    | unmap)   |    +-----------+  |
-|       |           +----+-----+         |         |
-|       |                |               |         |
-|  +----|----------------|-----------+   |         |
-|  |    v                v           |   |         |
-|  |        IOMMU Core Subsystem     |   |         |
-|  |   (iommu.h: domain, group,      |<--+         |
-|  |    iommu_ops, iommu_attach...)  |             |
-|  +-----------+---------------------+             |
-|              |                                   |
-|  +-----------v---------------------+             |
-|  |      OF_IOMMU Bridge            |             |
-|  |  (of_iommu.h)                   |             |
-|  |  - of_iommu_configure()         |             |
-|  |  - of_iommu_get_resv_regions()  |             |
-|  +-----------+---------------------+             |
-|              |                                   |
-|  +-----------v---------------------+             |
-|  |     Device Tree Subsystem       |             |
-|  |  (of.h: device_node, property,  |             |
-|  |   of_phandle_args, phandle...)  |             |
-|  +-----------+---------------------+             |
-|              |                                   |
-|  +-----------v---------------------+             |
-|  |  Platform IOMMU Driver          |             |
-|  |  (arm-smmu.c, arm-smmu-v3.c,   |             |
-|  |   intel-iommu.c, etc.)          |             |
-|  |  implements: iommu_ops           |             |
-|  |  - .of_xlate()                  |             |
-|  |  - .probe_device()              |             |
-|  |  - .get_resv_regions()          |             |
-|  +-----------+---------------------+             |
-|              |                                   |
-+--------------|-----------------------------------+
-               |
-     +---------v---------+
-     |  IOMMU Hardware   |
-     | (ARM SMMUv3, etc) |
-     +-------------------+
+struct device
+    └── dev->iommu_group ──────────────────────┐
+    └── dev->fwnode (= device_node->fwnode)     │
+              │                                 │
+              │  of_iommu_configure()           ▼
+              │  reads "iommus" property   struct iommu_group
+              │                                 │
+              ▼                                 │
+    struct of_phandle_args                      │
+        ├── np → struct device_node (IOMMU)     │
+        └── args[] = [stream_id, ...]           │
+              │                                 │
+              │  iommu_ops->of_xlate()          │
+              ▼                                 │
+    struct iommu_ops  (per IOMMU hardware)      │
+        ├── .of_xlate()   ─── adds dev to ──────┘
+        ├── .probe_device()
+        ├── .domain_alloc_paging()
+        ├── .get_resv_regions()  ◄── of_iommu_get_resv_regions()
+        └── ...
+              │
+              ▼
+    struct iommu_domain
+        ├── type (DMA / IDENTITY / BLOCKED)
+        ├── ops → struct iommu_domain_ops
+        │           ├── .map_pages()
+        │           ├── .unmap_pages()
+        │           └── .iova_to_phys()
+        └── iova_cookie (DMA iova allocator state)
+```
+## Phase 3: التفاصيل العميقة — الـ Structs والعلاقات
+
+### نظرة عامة على الملف
+
+الـ `include/linux/of_iommu.h` هو **header بسيط جداً** — بيعرّف واجهة الربط بين الـ **Open Firmware (Device Tree)** والـ **IOMMU subsystem**. مش فيه structs خاصة بيه، لكن بيستخدم structs من subsystems تانية وبيعرّف API بيشتغل عليها. الفهم الحقيقي جاي من السياق الأكبر.
+
+---
+
+### 0. الـ Config Options والـ Flags — Cheatsheet
+
+#### Config Options
+
+| Option | المعنى |
+|--------|--------|
+| `CONFIG_OF_IOMMU` | لو مفعّل، الـ kernel يدعم ربط الـ Device Tree بالـ IOMMU. لو مش مفعّل، الدوال بتبقى stubs بترجع `-ENODEV` أو لا تعمل حاجة. |
+
+#### الـ IOMMU Permission Flags (من `iommu.h`)
+
+| Flag | القيمة | المعنى |
+|------|--------|--------|
+| `IOMMU_READ` | `1 << 0` | السماح بالقراءة |
+| `IOMMU_WRITE` | `1 << 1` | السماح بالكتابة |
+| `IOMMU_CACHE` | `1 << 2` | DMA cache coherency |
+| `IOMMU_NOEXEC` | `1 << 3` | منع التنفيذ |
+| `IOMMU_MMIO` | `1 << 4` | للـ MMIO زي MSI doorbells |
+| `IOMMU_PRIV` | `1 << 5` | صلاحيات supervisor فقط |
+
+#### الـ IOMMU Domain Types
+
+| Macro | المعنى |
+|-------|--------|
+| `IOMMU_DOMAIN_BLOCKED` | كل الـ DMA محجوب — عزل كامل |
+| `IOMMU_DOMAIN_IDENTITY` | الـ DMA addresses = الـ physical addresses (1:1) |
+| `IOMMU_DOMAIN_UNMANAGED` | الـ mappings بتتدار من المستخدم (VMs) |
+| `IOMMU_DOMAIN_DMA` | للاستخدام الداخلي مع DMA-API |
+| `IOMMU_DOMAIN_DMA_FQ` | نفس الفوق + batched TLB invalidation |
+| `IOMMU_DOMAIN_SVA` | Shared Virtual Addressing مع process |
+| `IOMMU_DOMAIN_NESTED` | nested stage-2 translation |
+
+#### الـ Reserved Region Types (`enum iommu_resv_type`)
+
+| القيمة | المعنى |
+|--------|--------|
+| `IOMMU_RESV_DIRECT` | لازم تتعمل map 1:1 دايماً |
+| `IOMMU_RESV_DIRECT_RELAXABLE` | 1:1 بس ممكن تتخفف في حالات (USB/Graphics) |
+| `IOMMU_RESV_RESERVED` | محجوزة — ممنوع تتعمل map خالص |
+| `IOMMU_RESV_MSI` | MSI hardware region (untranslated) |
+| `IOMMU_RESV_SW_MSI` | MSI translation window بتتدار بـ software |
+
+#### الـ device_node Flags
+
+| Flag | القيمة | المعنى |
+|------|--------|--------|
+| `OF_DYNAMIC` | 1 | الـ node اتخصصتله ذاكرة بـ `kmalloc` |
+| `OF_DETACHED` | 2 | انفصل عن الـ device tree |
+| `OF_POPULATED` | 3 | اتعمله device بالفعل |
+| `OF_POPULATED_BUS` | 4 | اتعمله platform bus للـ children |
+| `OF_OVERLAY` | 5 | مخصص لـ overlay |
+| `OF_OVERLAY_FREE_CSET` | 6 | في overlay cset بيتحرر |
+
+---
+
+### 1. الـ Structs المهمة
+
+#### `struct device` (forward declaration في الملف)
+
+**الغرض:** يمثّل أي device في الـ kernel — سواء PCI أو platform أو غيره.
+
+الملف بيستخدمه كـ parameter في الدالتين الرئيسيتين:
+- `of_iommu_configure(struct device *dev, ...)` — بيعمل configure للـ IOMMU للـ device ده.
+- `of_iommu_get_resv_regions(struct device *dev, ...)` — بيجيب الـ reserved regions الخاصة بالـ device.
+
+**الحقول المهمة في السياق ده (من `device.h`):**
+- `dev->iommu_group` — الـ IOMMU group اللي الـ device ده جزء منه.
+- `dev->fwnode` — الـ firmware node (هيكون `device_node` في حالة DT).
+- `dev->iommu` — الـ per-device IOMMU data.
+
+---
+
+#### `struct device_node` (forward declaration + تعريف في `of.h`)
+
+**الغرض:** يمثّل **node في الـ Device Tree** — يعني كل جهاز/controller موصوف في الـ DTS.
+
+| الحقل | النوع | المعنى |
+|-------|-------|--------|
+| `name` | `const char *` | اسم الـ node |
+| `phandle` | `phandle` (u32) | معرّف فريد للـ reference من nodes تانية |
+| `full_name` | `const char *` | الاسم الكامل مع المسار |
+| `fwnode` | `struct fwnode_handle` | الواجهة الموحدة لكل firmware nodes |
+| `properties` | `struct property *` | قائمة linked list من الـ properties |
+| `parent` | `struct device_node *` | الـ parent node |
+| `child` | `struct device_node *` | أول child |
+| `sibling` | `struct device_node *` | الـ node الجنبه على نفس المستوى |
+| `_flags` | `unsigned long` | الـ flags (OF_DYNAMIC, OF_POPULATED, ...) |
+
+**الـ `master_np` في `of_iommu_configure`:** ده pointer لـ `device_node` بيمثّل الـ **IOMMU master** — يعني الـ device اللي بيستخدم الـ IOMMU (مش الـ IOMMU controller نفسه). الـ core بيقرأ الـ property `iommus` من الـ DTS عشان يلاقي الـ IOMMU controller المناسب.
+
+---
+
+#### `struct iommu_ops` (forward declaration في الملف)
+
+**الغرض:** جدول الـ operations الخاص بـ IOMMU driver معين — الـ vtable.
+
+الملف بيعلنه كـ forward declaration بس، لكن الـ core بيستخدمه داخلياً في `of_iommu_configure` عشان يعرف إيه الـ IOMMU driver المسؤول عن الـ device ده.
+
+**أهم الـ ops في السياق ده:**
+- `ops->xlate` — بيترجم `of_phandle_args` لـ IOMMU group.
+- `ops->get_resv_regions` — بيجيب الـ reserved regions.
+- `ops->of_xlate` — نسخة تانية للترجمة من DT.
+
+---
+
+#### `struct iommu_resv_region` (من `iommu.h`)
+
+**الغرض:** وصف **منطقة ذاكرة محجوزة** ما يجيش الـ IOMMU يعمل لها map عادية.
+
+| الحقل | النوع | المعنى |
+|-------|-------|--------|
+| `list` | `struct list_head` | ربطها في الـ list |
+| `start` | `phys_addr_t` | بداية المنطقة في الذاكرة الفعلية |
+| `length` | `size_t` | الطول بالـ bytes |
+| `prot` | `int` | صلاحيات IOMMU (READ/WRITE/...) |
+| `type` | `enum iommu_resv_type` | نوع الحجز |
+
+**الـ `list` في `of_iommu_get_resv_regions`:** الـ function بتضيف عناصر لـ `list_head` الجاهزة من الـ caller — كل عنصر هو `iommu_resv_region` بيوصف منطقة محجوزة.
+
+---
+
+#### `struct of_phandle_args` (من `of.h`)
+
+**الغرض:** بيحمل نتيجة parse الـ property `iommus` من الـ DTS — يعني الـ phandle للـ IOMMU controller + الـ arguments (زي الـ stream ID).
+
+| الحقل | النوع | المعنى |
+|-------|-------|--------|
+| `np` | `struct device_node *` | الـ node الـ IOMMU controller |
+| `args_count` | `int` | عدد الـ arguments |
+| `args[]` | `uint32_t[MAX_PHANDLE_ARGS]` | الـ arguments (زي stream ID أو SID) |
+
+---
+
+### 2. مخططات علاقات الـ Structs
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    of_iommu_configure()                     │
+│            (struct device *dev, device_node *master_np)     │
+└──────────────┬──────────────────────────┬───────────────────┘
+               │                          │
+               ▼                          ▼
+    ┌──────────────────┐      ┌────────────────────────┐
+    │   struct device  │      │   struct device_node   │
+    │                  │      │   (master_np)          │
+    │  ┌────────────┐  │      │                        │
+    │  │ fwnode ────┼──┼─────►│ fwnode_handle          │
+    │  └────────────┘  │      │                        │
+    │  ┌────────────┐  │      │ properties ────────────┼──►  "iommus" property
+    │  │iommu_group │  │      │   (iommus = <&iommu0   │     (phandle + args)
+    │  └────────────┘  │      │             0x400>)    │
+    └──────────────────┘      └───────────┬────────────┘
+                                          │ of_parse_phandle_with_args()
+                                          ▼
+                              ┌────────────────────────┐
+                              │  struct of_phandle_args│
+                              │  np ──────────────────►│ IOMMU controller node
+                              │  args[0] = 0x400       │ (stream ID / SID)
+                              └───────────┬────────────┘
+                                          │ iommu_ops->of_xlate()
+                                          ▼
+                              ┌────────────────────────┐
+                              │   struct iommu_ops     │
+                              │   (IOMMU driver vtable)│
+                              │   .of_xlate()          │
+                              │   .get_resv_regions()  │
+                              └───────────┬────────────┘
+                                          │
+                                          ▼
+                              ┌────────────────────────┐
+                              │   struct iommu_group   │
+                              │   (device assigned)    │
+                              └────────────────────────┘
+```
+
+```
+of_iommu_get_resv_regions():
+
+    struct device *dev
+         │
+         │ dev->iommu_group → iommu_ops
+         ▼
+    iommu_ops->get_resv_regions()
+         │
+         │ يضيف عناصر في الـ list
+         ▼
+    struct list_head *list
+         │
+         ├──► struct iommu_resv_region (MSI region)
+         ├──► struct iommu_resv_region (DIRECT mapping)
+         └──► struct iommu_resv_region (RESERVED range)
 ```
 
 ---
 
-### تشريح الـ API — الدوال الجوهرية
+### 3. دورة حياة الـ IOMMU configuration عبر DT
 
-الملف `of_iommu.h` صغير لكنه محوري. يُعرِّف دالتين فقط:
+```
+Boot / Device Probe
+        │
+        ▼
+┌───────────────────────────────┐
+│   DTS Parser يقرأ device tree │
+│   ويبني struct device_node    │
+│   لكل node فيه               │
+└──────────────┬────────────────┘
+               │
+               ▼
+┌───────────────────────────────┐
+│  Platform/PCI bus driver      │
+│  يعمل probe للـ device        │
+│  ويجهّز struct device         │
+└──────────────┬────────────────┘
+               │
+               ▼
+┌───────────────────────────────┐
+│  of_iommu_configure() يتحاكى │
+│  لما الـ bus بيسجّل الـ device │
+│  (من iommu_probe_device)      │
+└──────────────┬────────────────┘
+               │
+               ▼
+┌───────────────────────────────┐
+│  يقرأ property "iommus" من   │
+│  master_np → of_phandle_args  │
+│  يجيب stream ID + controller │
+└──────────────┬────────────────┘
+               │
+               ▼
+┌───────────────────────────────┐
+│  يلاقي الـ iommu_ops الخاصة  │
+│  بالـ IOMMU controller ده    │
+│  عن طريق الـ driver المسجّل  │
+└──────────────┬────────────────┘
+               │
+               ▼
+┌───────────────────────────────┐
+│  iommu_ops->of_xlate()        │
+│  بيحوّل الـ phandle args      │
+│  لـ iommu_group               │
+└──────────────┬────────────────┘
+               │
+               ▼
+┌───────────────────────────────┐
+│  الـ device يتضاف للـ group  │
+│  ويتعمله domain attach        │
+│  جاهز للـ DMA                │
+└───────────────────────────────┘
 
-#### `of_iommu_configure()`
+
+Device Removal:
+        │
+        ▼
+┌───────────────────────────────┐
+│  iommu_release_device()       │
+│  بتشيل الـ device من الـ group│
+│  وتحرر الـ domain لو محتاج   │
+└───────────────────────────────┘
+```
+
+---
+
+### 4. Call Flow Diagrams
+
+#### `of_iommu_configure()` — التدفق الكامل
+
+```
+bus driver / iommu_probe_device()
+    │
+    └─► of_iommu_configure(dev, master_np, id)       [of_iommu.c]
+            │
+            ├─► of_property_read_bool(master_np, "iommu-map")
+            │       └── لو موجودة: مسار iommu-map (SMMU v3 style)
+            │
+            ├─► of_parse_phandle_with_args(master_np, "iommus", ...)
+            │       └── بيجيب: of_phandle_args { np=&iommu_node, args[0]=stream_id }
+            │
+            ├─► iommu_fwspec_init(dev, &iommu_np->fwnode, iommu_ops)
+            │       └── بيجهّز struct iommu_fwspec للـ device
+            │
+            ├─► iommu_ops->of_xlate(dev, &iommu_spec)
+            │       └── الـ IOMMU driver بيسجّل الـ stream ID للـ device
+            │
+            └─► iommu_probe_device(dev)
+                    └── بيعمل:
+                        ├─► iommu_ops->probe_device(dev)  → iommu_group
+                        ├─► iommu_group_add_device(group, dev)
+                        └─► iommu_setup_dma_ops(dev, ...)
+```
+
+#### `of_iommu_get_resv_regions()` — التدفق
+
+```
+iommu_get_resv_regions(dev, list)           [iommu.c]
+    │
+    └─► of_iommu_get_resv_regions(dev, list)  [of_iommu.c]
+            │
+            ├─► of_get_dma_range_info(dev, ...)
+            │       └── بيقرأ "dma-ranges" من DTS
+            │
+            ├─► لكل MSI controller في الـ DTS:
+            │       iommu_alloc_resv_region(msi_addr, size,
+            │                               IOMMU_RESV_MSI, ...)
+            │       list_add_tail(&region->list, list)
+            │
+            └─► الـ caller (iommu core) يستخدم الـ list
+                لتجنب map الـ regions دي في الـ IOMMU domain
+```
+
+---
+
+### 5. استراتيجية الـ Locking
+
+الملف نفسه ما عندوش locking — ده header بيعرّف API بس. لكن الـ implementation في `drivers/iommu/of_iommu.c` بتعتمد على:
+
+#### الـ Locks المستخدمة في السياق
+
+| الـ Lock | النوع | بيحمي إيه |
+|----------|-------|-----------|
+| `iommu_group->mutex` | `struct mutex` | الـ devices list داخل الـ group وأي تعديل عليه |
+| `iommu_group_list_lock` | `struct mutex` | الـ global list بتاع كل الـ groups |
+| `iommu_sva_lock` | `struct mutex` | الـ SVA domains list في الـ mm_struct |
+| `device_lock(dev)` | implicitly | بيتعمل hold من الـ bus driver أثناء الـ probe |
+| `of_node` refcounting | atomic | الـ `of_node_get/put` للـ reference counting |
+
+#### ترتيب الـ Locks (Lock Ordering)
+
+```
+device_lock(dev)
+    └─► iommu_group->mutex
+            └─► iommu_group_list_lock
+                    └─► (hardware register access — no sleep)
+```
+
+**قاعدة مهمة:** مش ينفع تمسك `iommu_group->mutex` وتحاول تعمل `device_lock` — ده هيعمل deadlock. الـ bus driver دايماً بيمسك الـ device lock الأول.
+
+#### الـ Reference Counting للـ device_node
+
+الـ `struct device_node` بيستخدم **refcounting** عبر `of_node_get()` و `of_node_put()`. لما `of_iommu_configure` تاخد الـ `master_np`، الـ caller مسؤول إن الـ node يفضل valid طول فترة الاستدعاء. الـ `of_parse_phandle_with_args` بيعمل `of_node_get` داخلياً ولازم يتبعه `of_node_put` بعد الاستخدام.
+
+```c
+/* مثال على الـ safe usage */
+struct of_phandle_args iommu_spec;
+int ret;
+
+ret = of_parse_phandle_with_args(master_np, "iommus",
+                                  "#iommu-cells", idx, &iommu_spec);
+if (ret)
+    return ret;
+
+/* ... استخدام iommu_spec.np ... */
+
+of_node_put(iommu_spec.np);  /* لازم دايماً بعد الاستخدام */
+```
+## Phase 4: شرح الـ Functions
+
+### جدول ملخص الـ API
+
+| Function | Config Guard | Return | الغرض |
+|---|---|---|---|
+| `of_iommu_configure` | `CONFIG_OF_IOMMU` | `int` | ربط device بالـ IOMMU المناسب عبر DT |
+| `of_iommu_get_resv_regions` | `CONFIG_OF_IOMMU` | `void` | جلب reserved memory regions من DT |
+
+---
+
+### تصنيف الـ Functions
+
+الـ header ده بسيط جداً — بيوفّر **فقط** واجهتين (2 exported functions) اللي بتشكّل الـ glue layer بين الـ **Open Firmware / Device Tree (OF)** والـ **IOMMU subsystem**. الفكرة الكاملة هي: بدل ما كل driver يفسّر الـ DT nodes يدوياً، الـ `of_iommu` layer بتعمل ده مرة واحدة بشكل موحّد.
+
+الـ functions الاتنين بيتم تعريفهم مرتين:
+- **Real implementation** لما `CONFIG_OF_IOMMU=y`
+- **Stub (no-op / error)** لما `CONFIG_OF_IOMMU` مش موجود — ده pattern شائع في الـ kernel علشان تتجنب `#ifdef` في كل مكان بره الـ header.
+
+---
+
+### المجموعة الأولى: Configuration & Binding
+
+#### `of_iommu_configure`
 
 ```c
 extern int of_iommu_configure(struct device *dev,
@@ -203,1164 +787,323 @@ extern int of_iommu_configure(struct device *dev,
                               const u32 *id);
 ```
 
-**هذه هي الدالة المحورية.** تُستدعى من `of_dma_configure()` في وقت الـ probe لأي device مدعوم بـ DT.
+**بتعمل إيه:**
+الـ function دي هي **نقطة الدخول الرئيسية** لربط أي device بالـ IOMMU بتاعه عبر الـ Device Tree. بتمشي على الـ `iommus` property في الـ DT node الخاص بالـ device، بتحدد الـ IOMMU driver المناسب، وبتستدعي `iommu_probe_device()` علشان تخلي الـ IOMMU driver يعمل setup للـ device. الـ function دي بتضمن إن الـ device هيشتغل صح مع الـ IOMMU قبل ما يبدأ أي DMA.
 
-| المعامل | النوع | الوظيفة |
-|---------|-------|---------|
-| `dev` | `struct device *` | الجهاز المراد تهيئته (مثلاً USB controller) |
-| `master_np` | `struct device_node *` | الـ DT node الخاص بهذا الجهاز |
-| `id` | `const u32 *` | stream ID اختياري (NULL = يقرأ من DT) |
+**Parameters:**
 
-**ماذا تفعل داخلياً؟**
+| Parameter | النوع | الوصف |
+|---|---|---|
+| `dev` | `struct device *` | الـ device اللي محتاج يتربط بالـ IOMMU — بيجي من الـ bus probe path |
+| `master_np` | `struct device_node *` | الـ DT node الخاص بالـ device — بيحتوي على الـ `iommus` property |
+| `id` | `const u32 *` | مؤشر لـ stream ID اختياري (ممكن يكون `NULL`) — بُعض الـ IOMMUs زي ARM SMMU بتستخدمه كـ stream identifier |
 
+**Return Value:**
+- `0` — النجاح، الـ device اتربط بالـ IOMMU بنجاح
+- `-ENODEV` — في الـ stub version (يعني `CONFIG_OF_IOMMU` مش موجود)
+- Error codes سالبة تانية — فشل في الـ probe أو مفيش IOMMU مناسب في الـ DT
+
+**Key Details:**
+
+- **Locking:** مفيش lock صريح في الـ header، لكن الـ implementation الداخلية بتعمل `device_lock(dev)` قبل ما تمس الـ `dev->iommu`.
+- **DT Parsing:** بتستخدم `of_parse_phandle_with_args()` داخلياً علشان تقرأ الـ `iommus = <&smmu 0x100>` property وتجيب الـ phandle والـ args.
+- **Side Effect رئيسي:** بتضبط `dev->iommu_group` — لو نجحت، الـ device بقى part من IOMMU group وهيتعامل معاه الـ DMA API بشكل مختلف.
+- **Error Path:** لو الـ IOMMU driver مش loaded أو مش registered بعد، بترجع error — الـ caller (عادةً bus notifier) ممكن يعيد المحاولة.
+
+**من بيستدعيها:**
+بيتم الـ call من `of_iommu_configure()` في مسار الـ device registration، تحديداً من:
+- `platform_bus` notifier
+- الـ `iommu_probe_device()` path في بعض الـ architectures
+- الـ bus-specific `add_device()` hooks زي `arm_smmu_add_device()`
+
+**Pseudocode Flow:**
+
+```c
+of_iommu_configure(dev, master_np, id):
+    // 1. ابحث عن iommu_ops اللي بيخدم الـ DT node ده
+    ops = of_iommu_xlate(master_np)
+    if (!ops)
+        return -ENODEV
+
+    // 2. اربط الـ ops بالـ device
+    dev->bus->iommu_ops = ops
+
+    // 3. استدع الـ IOMMU driver علشان يعمل probe للـ device
+    return iommu_probe_device(dev)
 ```
-of_iommu_configure(dev, master_np, id)
-     |
-     v
-[1] تقرأ "iommus" property من الـ DT node
-     |
-     v
-[2] تحلل struct of_phandle_args:
-     .np    = &smmu0_node   (phandle → device_node)
-     .args  = [0x100]       (stream ID)
-     |
-     v
-[3] تجد الـ IOMMU driver المسجل لهذا الـ node
-     (عبر of_parse_phandle_with_args + iommu_fwspec_init)
-     |
-     v
-[4] تستدعي iommu_ops->of_xlate(dev, &args)
-     (يضيف الـ stream ID إلى iommu_fwspec الخاص بالجهاز)
-     |
-     v
-[5] تستدعي iommu_probe_device(dev)
-     (تجعل الـ IOMMU driver يبدأ تتبع هذا الجهاز)
-     |
-     v
-[6] ترجع 0 عند النجاح، أو error code
-```
 
-#### `of_iommu_get_resv_regions()`
+---
+
+### المجموعة التانية: Reserved Regions
+
+#### `of_iommu_get_resv_regions`
 
 ```c
 extern void of_iommu_get_resv_regions(struct device *dev,
                                       struct list_head *list);
 ```
 
-تقرأ من الـ DT مناطق الذاكرة المحجوزة (reserved regions) المرتبطة بالجهاز — مثل مناطق MSI أو مناطق يجب mapping-ها 1:1. تُضاف إلى `list` كـ `struct iommu_resv_region`.
+**بتعمل إيه:**
+بتقرأ الـ **reserved memory regions** من الـ Device Tree وبتضيفهم لـ list. الـ reserved regions دي بتقول للـ IOMMU subsystem: "العناوين دي محجوزة — متعملش فيها map لأي device تاني." ده مهم جداً للـ firmware regions، الـ MSI doorbells، والـ memory اللي الـ bootloader حجزها.
 
-**لماذا هذا مهم؟** بعض الـ hardware (مثل MSI controllers) يتطلب أن تبقى عناوين معينة بدون ترجمة IOMMU (passthrough)، أو يجب حجزها لكيلا تُعطى للـ DMA API.
+**Parameters:**
 
----
-
-### الـ Stub عند غياب `CONFIG_OF_IOMMU`
-
-```c
-#ifndef CONFIG_OF_IOMMU
-
-static inline int of_iommu_configure(struct device *dev,
-                                     struct device_node *master_np,
-                                     const u32 *id)
-{
-    return -ENODEV;  /* لا يوجد IOMMU في الـ DT */
-}
-
-static inline void of_iommu_get_resv_regions(struct device *dev,
-                                             struct list_head *list)
-{
-    /* لا شيء */
-}
-
-#endif
-```
-
-هذا النمط شائع جداً في الـ kernel: **compile-time dead code elimination**. إذا لم يكن `CONFIG_OF_IOMMU` مفعَّلاً، الـ compiler يُبسِّط كل الاستدعاءات إلى `return -ENODEV` أو no-op، بدون أي overhead.
-
----
-
-### الـ Structs المترابطة — كيف تتصل ببعضها
-
-```
-struct device
-+----------------------------+
-| struct device_node *of_node|----> struct device_node (DT node)
-|                            |      +----------------------+
-| struct iommu_group *iommu_ |      | const char *name     |
-|   group                    |      | struct property      |
-|                            |      |   *properties        |
-| struct dev_iommu *iommu    |      |  (iommus, ...)       |
-|   +----------------------+ |      +----------------------+
-|   | struct iommu_fwspec  | |
-|   |   *fwspec            | |
-|   |   +----------------+ | |
-|   |   | struct fwnode  | | |     struct iommu_ops
-|   |   |  _handle *iommu| |----> +--------------------+
-|   |   |  _fwnode       | | |   | .of_xlate()        |
-|   |   | u32 ids[]      | | |   | .probe_device()    |
-|   |   | (stream IDs)   | | |   | .get_resv_regions()|
-|   |   +----------------+ | |   +--------------------+
-|   +----------------------+ |
-+----------------------------+
-
-struct of_phandle_args       (ناتج تحليل "iommus = <&smmu 0x100>")
-+---------------------------+
-| struct device_node *np    |---> node الخاص بالـ IOMMU hardware
-| int args_count            |     (smmu0 في مثالنا)
-| uint32_t args[MAX]        |     args[0] = 0x100 (stream ID)
-+---------------------------+
-
-struct iommu_resv_region     (لـ of_iommu_get_resv_regions)
-+----------------------------+
-| struct list_head list      |
-| phys_addr_t start          |
-| size_t length              |
-| int prot                   |
-| enum iommu_resv_type type  |
-|   IOMMU_RESV_DIRECT        |
-|   IOMMU_RESV_MSI           |
-|   IOMMU_RESV_RESERVED ...  |
-| void (*free)(...)          |
-+----------------------------+
-```
-
----
-
-### التشابه الواقعي — المطار وبطاقات الصعود
-
-تخيل **مطاراً حديثاً** به نظام أمني متعدد المناطق:
-
-| عنصر الـ kernel | التشابه في المطار |
-|----------------|-----------------|
-| **IOMMU hardware** | بوابات الأمن في المطار (تتحقق من كل شخص يدخل) |
-| **IOMMU driver** (`arm-smmu.c`) | طاقم الأمن المتخصص في نوع البوابة |
-| **IOMMU Core** (`iommu.h`) | إدارة المطار المركزية (سياسات موحدة) |
-| **Device Tree** | قاعدة بيانات الرحلات والمسافرين (من يسافر على أي رحلة) |
-| **`of_iommu_configure()`** | عملية **check-in**: تطابق المسافر (device) بالرحلة (IOMMU) وتصدر بطاقة صعود (fwspec مع stream ID) |
-| **`of_iommu_get_resv_regions()`** | قائمة المناطق المحظورة في المطار (لا يُسمح لأي أحد بالدخول إليها) |
-| **`struct of_phandle_args`** | بطاقة الهوية + رقم المقعد (معرف الـ device + stream ID) |
-| **`iommu_ops->of_xlate()`** | موظف الأمن الذي يسجل المسافر في النظام |
-| **`CONFIG_OF_IOMMU=n`** | مطار بدون نظام أمني — الكل يدخل بدون فحص (أو الدخول ممنوع بالكامل) |
-
-الدقة في التشابه: عملية الـ check-in (`of_iommu_configure`) لا تكون عند كل رحلة — بل **مرة واحدة فقط** عند boot وقت probe الجهاز، تماماً كما يسجّل المسافر نفسه في النظام مرة واحدة عند وصوله للمطار.
-
----
-
-### الـ Core Abstraction — الفكرة المحورية
-
-**الـ OF_IOMMU subsystem يحقق فصلاً واضحاً:**
-
-```
-[ما يصفه الـ Hardware Engineer في DTS]
-    iommus = <&smmu0 0x100>;
-          |
-          | (of_iommu_configure يحوِّل هذا الوصف إلى...)
-          v
-[ما يستخدمه الـ Kernel Driver]
-    dev->iommu->fwspec->ids[] = {0x100}
-    dev->iommu_group = smmu0_group
-```
-
-**الـ `iommu_fwspec`** هو القلب المجرد: هيكل يجمع كل الـ stream IDs الخاصة بجهاز واحد، ويربطها بـ firmware node (fwnode) للـ IOMMU المسؤول. الـ IOMMU driver لا يحتاج أن يعرف شيئاً عن DT — هذا عمل `of_iommu` وحده.
-
----
-
-### ما يملكه OF_IOMMU مقابل ما يفوِّضه للـ Drivers
-
-| المسؤولية | مَن يتولاها |
-|-----------|------------|
-| قراءة `iommus` property من DT | `of_iommu` (عبر `of_parse_phandle_with_args`) |
-| تحديد IOMMU driver المناسب | `of_iommu` (عبر `fwnode` lookup) |
-| تحليل stream ID وتسجيله في `fwspec` | الـ IOMMU driver (عبر `iommu_ops->of_xlate`) |
-| بناء الـ `iommu_group` | الـ IOMMU driver (عبر `iommu_ops->device_group`) |
-| إعداد الـ `iommu_domain` وربطه | الـ IOMMU Core + driver |
-| قراءة reserved regions من DT | `of_iommu` (عبر `of_iommu_get_resv_regions`) |
-| تطبيق reserved regions على الـ hardware | الـ IOMMU driver (عبر `iommu_ops->get_resv_regions`) |
-| mapping/unmapping فعلي في الـ page tables | الـ IOMMU driver بالكامل |
-
-الخلاصة: **الـ `of_iommu` يملك فقط الـ DT parsing وربط الـ device بالـ IOMMU driver.** كل شيء يتعلق بالـ hardware (page tables، TLB flush، fault handling) مفوَّض بالكامل لـ IOMMU driver.
-## Phase 3: التفاصيل العميقة — الـ Structs والعلاقات
-
----
-
-### الـ Config Options والـ Flags — Cheatsheet
-
-#### الـ Config Options
-
-| Option | الوصف |
-|--------|-------|
-| `CONFIG_OF_IOMMU` | يُفعِّل دعم الـ IOMMU عبر Device Tree. بدونه تُرجع الدوال stubs تُعيد `‑ENODEV` أو لا تفعل شيئاً |
-| `CONFIG_OF_ADDRESS` | مطلوب داخل `of_iommu_get_resv_regions()` لتفسير عناوين الـ DT عبر `of_address_to_resource()` |
-| `CONFIG_IOMMU_API` | يُفعِّل الـ IOMMU core بالكامل بما فيه `iommu_probe_device()` |
-| `CONFIG_FSL_PAMU` | يُفعِّل المسار القديم `domain_alloc` في `iommu_ops` (Freescale فقط) |
-
-#### الـ IOMMU Protection Flags (prot)
-
-| Flag | القيمة | المعنى |
-|------|--------|--------|
-| `IOMMU_READ` | bit 0 | الـ device يقرأ من الذاكرة |
-| `IOMMU_WRITE` | bit 1 | الـ device يكتب إلى الذاكرة |
-| `IOMMU_CACHE` | bit 2 | الـ mapping يحترم الـ cache coherency |
-| `IOMMU_NOEXEC` | bit 3 | منع تنفيذ الكود |
-| `IOMMU_MMIO` | bit 4 | منطقة MMIO |
-
-#### الـ iommu_resv_type (Enum)
-
-| القيمة | المعنى |
-|--------|--------|
-| `IOMMU_RESV_DIRECT` | خريطة 1:1 صارمة بين IOVA والعنوان الفيزيائي |
-| `IOMMU_RESV_DIRECT_RELAXABLE` | 1:1 لكن يمكن تخفيفها في حالات كـ device assignment |
-| `IOMMU_RESV_RESERVED` | محجوز — لا يُعطى للـ device ولا يُربط |
-| `IOMMU_RESV_MSI` | منطقة MSI الـ hardware (غير مترجَمة) |
-| `IOMMU_RESV_SW_MSI` | نافذة ترجمة MSI مُدارة بالـ software |
-
-#### الـ iommu_fwspec flags
-
-| Flag | المعنى |
-|------|--------|
-| `IOMMU_FWSPEC_PCI_RC_ATS` | الـ PCI Root Complex يدعم ATS (Address Translation Services) |
-
----
-
-### الـ Structs المهمة
-
-#### 1. `struct device_node` — تعريف عقدة الـ Device Tree
-
-**الغرض**: تمثيل عقدة واحدة في شجرة الـ Device Tree داخل الكرنل. كل جهاز لديه `device_node` يصف خصائصه الـ hardware.
-
-```c
-struct device_node {
-    const char *name;          /* اسم العقدة مثل "ethernet@1000" */
-    phandle phandle;           /* معرّف فريد للإشارة إليها من عقد أخرى */
-    const char *full_name;     /* المسار الكامل مثل "/soc/ethernet@1000" */
-    struct fwnode_handle fwnode; /* واجهة موحّدة للـ firmware nodes */
-
-    struct property *properties; /* قائمة الـ properties (iommus=, memory-region=...) */
-    struct property *deadprops;  /* properties محذوفة */
-    struct device_node *parent;  /* العقدة الأب في الشجرة */
-    struct device_node *child;   /* العقدة الابن الأول */
-    struct device_node *sibling; /* العقدة المجاورة */
-    unsigned long _flags;        /* OF_POPULATED, OF_DYNAMIC, ... */
-    void *data;                  /* بيانات خاصة بالـ arch */
-};
-```
-
-**الارتباطات**:
-- `of_iommu_configure()` تستقبلها كـ `master_np` لتحديد عقدة الجهاز في الـ DT
-- `of_iommu_xlate()` تصل إلى `fwnode` منها لجلب الـ `iommu_ops`
-- `of_iommu_get_resv_regions()` تسير عبر `memory-region` phandles في `dev->of_node`
-
----
-
-#### 2. `struct of_phandle_args` — وسيطات الـ Phandle
-
-**الغرض**: حاوية مؤقتة تُعبّر عن نتيجة تفسير `phandle` من الـ DT، مع وسيطاته العددية (مثل stream ID).
-
-```c
-struct of_phandle_args {
-    struct device_node *np;             /* العقدة المُشار إليها (IOMMU controller node) */
-    int args_count;                     /* عدد الوسيطات المُمرَّرة */
-    uint32_t args[MAX_PHANDLE_ARGS];    /* الوسيطات: مثلاً stream ID أو SID */
-};
-```
-
-**مثال حقيقي من الـ DT**:
-```
-/* في ملف dts */
-ethernet0: ethernet@1000 {
-    iommus = <&smmu 0x42>;   /* np → &smmu, args[0] = 0x42 (stream ID) */
-};
-```
-
-**الارتباطات**:
-- `of_iommu_configure_dev()` تُنشئها عبر `of_parse_phandle_with_args()`
-- `of_iommu_configure_dev_id()` تُنشئها عبر `of_map_id()`
-- تُمرَّر إلى `ops->of_xlate()` لتسجيل الـ stream ID في الـ IOMMU driver
-
----
-
-#### 3. `struct of_phandle_iterator` — مُكرِّر الـ Phandles
-
-**الغرض**: حالة مؤقتة لتكرار قائمة phandles في property واحدة (مثل `memory-region`).
-
-```c
-struct of_phandle_iterator {
-    const char *cells_name;     /* اسم الـ property التي تحدد حجم الوسيطات */
-    int cell_count;             /* عدد الـ cells لكل entry */
-    const struct device_node *parent;
-    const __be32 *list_end;     /* نهاية قائمة الـ phandles في الـ binary blob */
-    const __be32 *phandle_end;
-    const __be32 *cur;          /* الموضع الحالي في القراءة */
-    uint32_t cur_count;
-    phandle phandle;
-    struct device_node *node;   /* العقدة الحالية المُفسَّرة */
-};
-```
-
-**الارتباطات**: تُستخدَم في `of_iommu_get_resv_regions()` عبر الماكرو `of_for_each_phandle()` لتكرار كل `memory-region` مرتبط بالجهاز.
-
----
-
-#### 4. `struct iommu_ops` — جدول عمليات الـ IOMMU Driver
-
-**الغرض**: الواجهة الرئيسية بين الـ IOMMU core وأي driver حقيقي. يُسجِّل الـ driver نفسه بملء هذا الـ struct.
-
-```c
-struct iommu_ops {
-    /* --- قدرات عامة --- */
-    bool (*capable)(struct device *dev, enum iommu_cap);
-
-    /* --- إنشاء الـ domains --- */
-    struct iommu_domain *(*domain_alloc_identity)(struct device *dev);
-    struct iommu_domain *(*domain_alloc_paging)(struct device *dev);
-    struct iommu_domain *(*domain_alloc_sva)(struct device *dev, struct mm_struct *mm);
-    struct iommu_domain *(*domain_alloc_nested)(...);
-
-    /* --- إدارة الأجهزة --- */
-    struct iommu_device *(*probe_device)(struct device *dev);
-    void (*release_device)(struct device *dev);
-    void (*probe_finalize)(struct device *dev);
-    struct iommu_group *(*device_group)(struct device *dev);
-
-    /* --- المناطق المحجوزة (نقطة الربط مع of_iommu.h) --- */
-    void (*get_resv_regions)(struct device *dev, struct list_head *list);
-
-    /* --- Device Tree integration (نقطة الربط مع of_iommu.h) --- */
-    int (*of_xlate)(struct device *dev, const struct of_phandle_args *args);
-
-    bool (*is_attach_deferred)(struct device *dev);
-    int (*def_domain_type)(struct device *dev);
-
-    /* --- معلومات ثابتة --- */
-    const struct iommu_domain_ops *default_domain_ops;
-    struct module *owner;
-    struct iommu_domain *identity_domain;
-    struct iommu_domain *blocked_domain;
-    struct iommu_domain *default_domain;
-    u8 user_pasid_table:1;
-};
-```
-
-**نقاط الربط مع `of_iommu.h`**:
-- الـ `of_xlate` callback: يُستدعى من `of_iommu_xlate()` لتسجيل كل stream ID
-- الـ `get_resv_regions` callback: يمكن للـ driver تفويضه إلى `of_iommu_get_resv_regions()`
-
----
-
-#### 5. `struct iommu_resv_region` — منطقة ذاكرة محجوزة
-
-**الغرض**: وصف نطاق IOVA يجب حجزه أو ربطه بطريقة خاصة — لا يعطيه الـ IOMMU core لأي driver DMA.
-
-```c
-struct iommu_resv_region {
-    struct list_head list;   /* لربطها في قائمة المناطق المحجوزة للجهاز */
-    phys_addr_t start;       /* بداية النطاق الفيزيائي (أو IOVA في حالة RESV_RESERVED) */
-    size_t length;           /* الطول بالبايت */
-    int prot;                /* IOMMU_READ | IOMMU_WRITE | IOMMU_CACHE */
-    enum iommu_resv_type type; /* نوع الحجز: DIRECT, RESERVED, MSI... */
-    void (*free)(...);       /* callback لتحرير الذاكرة المرتبطة (اختياري) */
-};
-```
-
-**الارتباطات**:
-- `of_iommu_get_resv_regions()` تُنشئ هذه الكائنات وتضيفها إلى `list`
-- تُستدعى عبر `iommu_ops->get_resv_regions()` من الـ IOMMU core
-- الـ DMA core يستعلم عنها عبر `iommu_get_resv_regions()` ويتجنب التعيين عليها
-
----
-
-#### 6. `struct iommu_device` — تمثيل الـ IOMMU Core لـ Hardware Instance
-
-**الغرض**: الـ IOMMU core يُتتبَّع به كل IOMMU hardware مسجَّل في النظام.
-
-```c
-struct iommu_device {
-    struct list_head list;          /* مرتبط بقائمة iommu_device_list العالمية */
-    const struct iommu_ops *ops;    /* driver ops لهذا الـ hardware */
-    struct fwnode_handle *fwnode;   /* يربطه بعقدة الـ DT أو ACPI */
-    struct device *dev;             /* الـ sysfs device */
-    struct iommu_group *singleton_group;
-    u32 max_pasids;
-    u32 ready:1;
-};
-```
-
-**الارتباطات**:
-- `iommu_ops_from_fwnode()` تبحث عن `iommu_device` عبر `fwnode` لإرجاع الـ `iommu_ops`
-- هذا الاستعلام يحدث في `of_iommu_xlate()` بعد تحديد عقدة الـ IOMMU من الـ DT
-
----
-
-#### 7. `struct of_pci_iommu_alias_info` — بيانات مساعدة للـ PCI
-
-**الغرض**: struct محلي في `of_iommu.c` يُمرَّر كـ `void *data` إلى `pci_for_each_dma_alias()`.
-
-```c
-struct of_pci_iommu_alias_info {
-    struct device *dev;      /* الجهاز الـ PCI المُراد تهيئته */
-    struct device_node *np;  /* عقدة الـ DT الخاصة بالجهاز (master_np) */
-};
-```
-
-**الارتباطات**: يُنشأ مؤقتاً في `of_iommu_configure()` عند الكشف عن جهاز PCI، ويُمرَّر إلى `of_pci_iommu_init()` callback.
-
----
-
-### مخططات علاقات الـ Structs (ASCII)
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                     Device Tree (DTS)                   │
-│  ethernet0: { iommus = <&smmu 0x42>;                   │
-│               memory-region = <&resv0>;  }              │
-└────────────┬───────────────────┬────────────────────────┘
-             │                   │
-             ▼                   ▼
-  ┌──────────────────┐   ┌──────────────────────┐
-  │  device_node     │   │  device_node         │
-  │  (master_np)     │   │  (memory-region node)│
-  │  .name = "eth0"  │   │  .name = "resv0"     │
-  │  .fwnode ─────────────► fwnode_handle       │
-  │  .properties     │   │  .properties         │
-  │  ─────────────── │   │  (reg, iommu-addrs)  │
-  └──────┬───────────┘   └──────────────────────┘
-         │                        │
-         │  of_parse_phandle      │  of_for_each_phandle
-         ▼                        ▼
-  ┌──────────────────┐   ┌──────────────────────┐
-  │  of_phandle_args │   │ of_phandle_iterator  │
-  │  .np ──────────────► smmu device_node       │
-  │  .args[0] = 0x42 │   │ .node (current DT)   │
-  └──────┬───────────┘   └──────┬───────────────┘
-         │                      │
-         │ of_iommu_xlate()     │ iommu_alloc_resv_region()
-         ▼                      ▼
-  ┌──────────────────┐   ┌──────────────────────┐
-  │  iommu_ops       │   │ iommu_resv_region    │
-  │  .of_xlate ──────┘   │ .start = iova        │
-  │  .get_resv_regions   │ .length              │
-  │  .probe_device   │   │ .type = DIRECT/RESV  │
-  │  .owner ─────────────► struct module        │
-  └──────┬───────────┘   └──────┬───────────────┘
-         │                      │ list_add_tail
-         ▼                      ▼
-  ┌──────────────────┐   ┌──────────────────────┐
-  │  iommu_device    │   │  list_head (resv list│
-  │  .ops ───────────┘   │  in device->iommu)   │
-  │  .fwnode             └──────────────────────┘
-  │  .dev
-  └──────────────────┘
-```
-
----
-
-### مخطط دورة حياة `of_iommu_configure()`
-
-```
-  الجهاز يظهر في الـ bus (probe)
-         │
-         ▼
-  of_dma_configure() أو bus code
-         │
-         ▼
-  of_iommu_configure(dev, master_np, id)
-         │
-         ├─► [master_np == NULL?] ──► return -ENODEV
-         │
-         ├─► mutex_lock(&iommu_probe_device_lock)
-         │
-         ├─► [fwspec موجود بالفعل?] ──► unlock + return 0 (مُهيَّأ مسبقاً)
-         │
-         ├─► [PCI device?]
-         │       │
-         │       └─► pci_request_acs()
-         │           pci_for_each_dma_alias()
-         │             └─► of_pci_iommu_init()
-         │                   └─► of_iommu_configure_dev_id()
-         │                         └─► of_map_id() → of_phandle_args
-         │                               └─► of_iommu_xlate()
-         │                                     └─► iommu_fwspec_init()
-         │                                         ops->of_xlate()  ◄── Driver callback
-         │
-         ├─► [Platform device?]
-         │       │
-         │       └─► of_iommu_configure_device()
-         │               │
-         │               ├─► [id != NULL] → of_iommu_configure_dev_id()
-         │               │                   └─► of_map_id() → of_iommu_xlate()
-         │               │
-         │               └─► [id == NULL] → of_iommu_configure_dev()
-         │                                   └─► of_parse_phandle_with_args() loop
-         │                                         └─► of_iommu_xlate() per entry
-         │
-         ├─► mutex_unlock(&iommu_probe_device_lock)
-         │
-         └─► [!err && !dev_iommu_present?]
-               └─► iommu_probe_device(dev)
-                     └─► ops->probe_device()  ◄── Driver callback
-                         ops->probe_finalize()
-```
-
----
-
-### مخطط دورة حياة `of_iommu_get_resv_regions()`
-
-```
-  iommu_probe_device() أو iommu_get_resv_regions()
-         │
-         ▼
-  ops->get_resv_regions(dev, list)
-    [إذا قرر الـ driver استخدام helper الـ DT]
-         │
-         ▼
-  of_iommu_get_resv_regions(dev, list)
-         │
-         ├─► [CONFIG_OF_ADDRESS غير مُفعَّل?] ──► return فوراً
-         │
-         ├─► of_for_each_phandle(&it, err, dev->of_node, "memory-region", ...)
-         │       │
-         │       ▼  لكل memory-region node
-         │   ┌───────────────────────────────────────────┐
-         │   │ of_address_to_resource(it.node) → phys   │
-         │   │ of_get_property("iommu-addresses") → maps│
-         │   │                                           │
-         │   │  لكل entry في iommu-addresses:           │
-         │   │    be32_to_cpup() → phandle              │
-         │   │    of_find_node_by_phandle() → np        │
-         │   │                                           │
-         │   │    [np == dev->of_node?]                 │
-         │   │       │                                   │
-         │   │       ▼                                   │
-         │   │    of_translate_dma_region() → iova,len  │
-         │   │    iommu_resv_region_get_type() → type   │
-         │   │    iommu_alloc_resv_region(iova,len,prot)│
-         │   │    list_add_tail(&region->list, list)    │
-         │   └───────────────────────────────────────────┘
-         │
-         └─► return  (القائمة list مُمتلئة بالـ regions)
-
-  لاحقاً:
-  iommu_put_resv_regions(dev, list)
-    └─► kfree() أو region->free() لكل region
-```
-
----
-
-### مخطط تدفق الـ Calls الكامل
-
-```
-  bus/platform driver init
-         │
-         ▼
-  of_dma_configure(dev, dev->of_node)              [drivers/of/device.c]
-         │
-         └─► of_iommu_configure(dev, np, NULL)     [of_iommu.c - PUBLIC API]
-                 │
-                 └─► of_iommu_configure_dev(np, dev)
-                         │
-                         └─► of_parse_phandle_with_args(np, "iommus",
-                             │                           "#iommu-cells", idx)
-                             ▼
-                         of_iommu_xlate(dev, &iommu_spec)
-                             │
-                             ├─► iommu_fwspec_init(dev, fwnode)
-                             │       └─► alloc dev->iommu->fwspec
-                             │
-                             ├─► iommu_ops_from_fwnode(fwnode)
-                             │       └─► بحث في قائمة iommu_device_list
-                             │
-                             └─► ops->of_xlate(dev, &iommu_spec)
-                                     └─► [SMMU driver مثلاً]
-                                         arm_smmu_of_xlate()
-                                           └─► iommu_fwspec_add_ids(dev, sid)
-
-  ──────────────────────────────────────────
-
-  iommu_get_resv_regions(dev, list)            [iommu.c - core]
-         │
-         └─► ops->get_resv_regions(dev, list)
-                 │
-                 └─► of_iommu_get_resv_regions(dev, list)  [of_iommu.c - PUBLIC API]
-                         │
-                         └─► iommu_alloc_resv_region(iova, len, prot, type)
-                                 └─► kzalloc(sizeof(*region))
-                                     region->start = iova
-                                     region->type  = DIRECT / RESERVED
-                                     list_add_tail(&region->list, list)
-
-  ──────────────────────────────────────────
-
-  DMA subsystem (dma-iommu.c):
-  iommu_dma_get_resv_regions(dev, list)
-         └─► of_iommu_get_resv_regions(dev, list)
-```
-
----
-
-### استراتيجية الـ Locking
-
-#### الـ Mutex الرئيسي: `iommu_probe_device_lock`
-
-| الـ Lock | النوع | ما يحميه |
-|---------|------|---------|
-| `iommu_probe_device_lock` | `mutex` | سباق التهيئة بين خيوط متعددة تحاول تهيئة نفس الجهاز |
-
-**التفاصيل**:
-```
-of_iommu_configure()
-  mutex_lock(&iommu_probe_device_lock)   ← احجز قبل أي فحص لـ dev->iommu
-  if (dev_iommu_fwspec_get(dev)) {       ← تحقق من التهيئة المسبقة
-      mutex_unlock(...)
-      return 0;                          ← آمن: لا تكرار للتهيئة
-  }
-  /* تهيئة dev->iommu->fwspec هنا */
-  mutex_unlock(&iommu_probe_device_lock) ← حرر بعد إتمام fwspec
-```
-
-**لماذا بالتحديد هنا؟**
-الـ `dev->iommu` و `dev->iommu->fwspec` يمكن أن يُكتَب فيهما من مسارات متعددة:
-- من bus probe (مثلاً `platform_bus`)
-- من `iommu_probe_device()` المُستدعى من IOMMU notifier
-
-الـ mutex يضمن أن فقط خيط واحد يُنشئ الـ fwspec ويُسجِّل الـ stream IDs.
-
-#### الـ `module_get` / `module_put` في `of_iommu_xlate()`
-
-```c
-if (!ops->of_xlate || !try_module_get(ops->owner))
-    return -ENODEV;
-
-ret = ops->of_xlate(dev, iommu_spec);  /* استدعاء آمن — module لن يُفرَّغ */
-module_put(ops->owner);
-```
-
-هذا حماية من unloading الـ IOMMU driver module أثناء تنفيذ callback الـ `of_xlate`.
-
-#### الـ `of_node_put()` — إدارة المراجع
-
-```
-of_parse_phandle_with_args(..., &iommu_spec)
-    └─► iommu_spec.np مُحتجَز بـ refcount زائد
-
-of_iommu_xlate(dev, &iommu_spec)
-
-of_node_put(iommu_spec.np)   ← تحرير المرجع فور الانتهاء
-```
-
-لا يوجد lock صريح هنا — الـ Device Tree nodes محمية بـ reference counting (kref داخلي).
-
-#### ملخص ترتيب الـ Locking
-
-```
-1. iommu_probe_device_lock  (mutex — الأعلى)
-      └── يحمي: dev->iommu، dev->iommu->fwspec
-2. module refcount (try_module_get)
-      └── يحمي: iommu_ops vtable
-3. of_node refcount (of_node_get/put)
-      └── يحمي: device_node أثناء الاستخدام
-```
-
-لا يوجد خطر deadlock لأن هذه الـ locks لا تتشابك: الـ mutex يُفك قبل استدعاء `iommu_probe_device()` التي قد تحتاج locks خاصة بها.
-## Phase 4: شرح الـ Functions
-
----
-
-### ملخص سريع — Cheatsheet
-
-| الـ Function | الـ Config Guard | الـ Return | الغرض |
-|---|---|---|---|
-| `of_iommu_configure()` | `CONFIG_OF_IOMMU` | `int` (0 / errno) | ربط device بـ IOMMU عبر Device Tree |
-| `of_iommu_get_resv_regions()` | `CONFIG_OF_IOMMU` + `CONFIG_OF_ADDRESS` | `void` | قراءة reserved IOVA regions من DT وإضافتها للـ list |
-
-**الـ stubs** (عند غياب `CONFIG_OF_IOMMU`):
-
-| الـ Function | الـ Return |
-|---|---|
-| `of_iommu_configure()` stub | `-ENODEV` دائماً |
-| `of_iommu_get_resv_regions()` stub | لا شيء، no-op |
-
----
-
-### تصنيف الـ Functions
-
-```
-of_iommu.h
-│
-├── [Configuration]
-│   └── of_iommu_configure()          ← ربط device بـ IOMMU من DT
-│
-└── [Reserved Regions Query]
-    └── of_iommu_get_resv_regions()   ← استخراج IOVA reservations من DT
-```
-
----
-
-### الفئة الأولى: Configuration
-
-هذه الفئة مسؤولة عن **إعداد وربط الـ device بالـ IOMMU** المناسب بالاعتماد على معلومات الـ Device Tree. تُستدعى في مرحلة الـ probe للـ bus (مثل platform bus وPCI bus) وتقوم بملء `iommu_fwspec` الخاص بالـ device وإطلاق `iommu_probe_device()` إذا لزم.
-
----
-
-#### `of_iommu_configure()`
-
-```c
-int of_iommu_configure(struct device *dev,
-                       struct device_node *master_np,
-                       const u32 *id);
-```
-
-**ما تفعله:**
-الـ function الرئيسية المُصدَّرة في الـ header. تفحص الـ device وتقرر مسار الـ configuration: إذا كان الـ device PCI تستخدم `pci_for_each_dma_alias()` لتغطية جميع الـ aliases، وإذا كان non-PCI تستخدم `of_iommu_configure_device()` مباشرةً. تحمي العملية بـ `iommu_probe_device_lock` لضمان atomicity عند بناء الـ `fwspec`.
-
-في حالة نجاح الـ configuration وكان الـ device لم يكن مرتبطاً بـ IOMMU سابقاً (أي `dev->iommu == NULL` في بداية الاستدعاء)، تستدعي `iommu_probe_device()` لإكمال عملية الربط الكاملة.
-
-**الـ Parameters:**
-
-| الـ Parameter | النوع | الوصف |
+| Parameter | النوع | الوصف |
 |---|---|---|
-| `dev` | `struct device *` | الـ device المراد ربطه بالـ IOMMU |
-| `master_np` | `struct device_node *` | الـ DT node الخاص بالـ device (أو الـ master في حالة PCI) |
-| `id` | `const u32 *` | مؤشر لـ stream ID اختياري — إذا كان `NULL` يُقرأ من property `iommus` مباشرةً، وإلا يُستخدم مع `iommu-map` |
+| `dev` | `struct device *` | الـ device اللي بنجيب regions الخاصة به |
+| `list` | `struct list_head *` | الـ list اللي هنضيف عليها `iommu_resv_region` structs — الـ caller بيوفّرها |
 
-**الـ Return Value:**
+**Return Value:**
+`void` — بتضيف عناصر للـ list مباشرةً بدون return value. الـ caller مسؤول عن الـ cleanup (عبر `iommu_put_resv_regions()`).
 
-| القيمة | المعنى |
-|---|---|
-| `0` | نجاح — تم ربط الـ device بـ IOMMU |
-| `-ENODEV` | لا يوجد IOMMU في الـ DT لهذا الـ device، أو `master_np == NULL` |
-| `-EPROBE_DEFER` | الـ IOMMU driver لم يُحمَّل بعد — يجب إعادة المحاولة |
-| أي errno آخر | خطأ فادح في الـ configuration |
+**Key Details:**
 
-**التفاصيل المهمة:**
+- **Memory Allocation:** كل `iommu_resv_region` بيتعمله `kzalloc` داخلياً — الـ caller لازم يعمل `free` عليهم بعد كده.
+- **DT Source:** بتقرأ من `reserved-memory` nodes في الـ DT اللي بيكون فيها `iommu-addresses` property.
+- **Stub Behavior:** في الـ `!CONFIG_OF_IOMMU` version، الـ function جسم فاضي تماماً — الـ list بتفضل زي ما هي.
+- **Side Effect:** الـ list بتكبر — كل region بتتضاف كـ `list_add_tail()` على الـ list اللي الـ caller بعتها.
+- **Region Types:** الـ regions اللي بتتضاف ممكن تكون من نوع `IOMMU_RESV_DIRECT` (1:1 mapping إجباري) أو `IOMMU_RESV_RESERVED` (محجوز خالص).
 
-- **Locking:** تأخذ `iommu_probe_device_lock` (mutex) في البداية وتحرره قبل استدعاء `iommu_probe_device()`. هذا يمنع race condition عند محاولة تكوين الـ `fwspec` من threads متعددة.
-- **Idempotency:** إذا كان `dev_iommu_fwspec_get(dev)` يُعيد قيمة غير NULL (أي الـ device مُعدّ بالفعل)، تعود فوراً بـ `0` دون عمل أي شيء.
-- **Cleanup on error:** إذا فشلت الـ configuration وكان `dev->iommu` موجوداً قبل الاستدعاء، تستدعي `iommu_fwspec_free()`. أما إذا أُنشئ `dev->iommu` أثناء الاستدعاء ثم فشل، تستدعي `dev_iommu_free()` لتنظيف الموارد.
-- **PCI path:** تستدعي `pci_request_acs()` أولاً لضمان تفعيل ACS، ثم `of_pci_check_device_ats()` للتحقق من دعم ATS.
-
-**من يستدعيها:**
-الـ bus code أثناء الـ DMA configuration — تحديداً `of_dma_configure_id()` في `drivers/of/device.c`، والتي تُستدعى من `of_dma_configure()` التي يستدعيها كل bus driver أثناء الـ probe.
-
-**Pseudocode Flow:**
-
-```c
-of_iommu_configure(dev, master_np, id):
-    if master_np == NULL:
-        return -ENODEV
-
-    lock(iommu_probe_device_lock)
-    if dev_iommu_fwspec_get(dev) != NULL:
-        unlock(iommu_probe_device_lock)
-        return 0  // already configured
-
-    dev_iommu_present = (dev->iommu != NULL)
-
-    if dev_is_pci(dev):
-        pci_request_acs()
-        err = pci_for_each_dma_alias(dev, of_pci_iommu_init, {dev, master_np})
-        of_pci_check_device_ats(dev, master_np)
-    else:
-        err = of_iommu_configure_device(master_np, dev, id)
-
-    if err:
-        if dev_iommu_present:
-            iommu_fwspec_free(dev)
-        elif dev->iommu:
-            dev_iommu_free(dev)
-
-    unlock(iommu_probe_device_lock)
-
-    if !err && dev->bus && !dev_iommu_present:
-        err = iommu_probe_device(dev)  // trigger full IOMMU attach
-
-    return err
-```
-
----
-
-### الفئة الثانية: Reserved Regions Query
-
-هذه الفئة تُعنى بـ **استخراج مناطق الـ IOVA المحجوزة** (reserved regions) من الـ Device Tree وإضافتها إلى القائمة التي يديرها الـ IOMMU subsystem. تُستخدم من قِبَل الـ IOMMU drivers لتنفيذ الـ callback `get_resv_regions()` الخاص بكل driver.
-
----
-
-#### `of_iommu_get_resv_regions()`
-
-```c
-void of_iommu_get_resv_regions(struct device *dev,
-                                struct list_head *list);
-```
-
-**ما تفعله:**
-تمر على جميع الـ nodes المشار إليها بـ property `memory-region` في الـ DT node الخاص بالـ device. لكل node تحاول قراءة عنوان الـ physical memory من property `reg` (اختيارية)، ثم تقرأ property `iommu-addresses` لمعرفة الـ IOVA mapping المطلوبة لهذا الـ device تحديداً. تُحدد نوع الـ reservation (direct / reserved) وتُخصص `iommu_resv_region` وتضيفها لنهاية الـ list.
-
-الدالة تعمل فقط عند تفعيل `CONFIG_OF_ADDRESS` (محاطة بـ `#if IS_ENABLED(CONFIG_OF_ADDRESS)`).
-
-**الـ Parameters:**
-
-| الـ Parameter | النوع | الوصف |
-|---|---|---|
-| `dev` | `struct device *` | الـ device الذي نستخرج الـ reservations الخاصة به |
-| `list` | `struct list_head *` | القائمة التي ستُضاف إليها الـ `iommu_resv_region` المُخصصة |
-
-**الـ Return Value:** `void` — لا تُعيد شيئاً. الأخطاء يتم تسجيلها بـ `dev_err()` / `dev_warn()` وتُتخطى (best-effort).
-
-**التفاصيل المهمة:**
-
-- **DMA Coherency:** إذا كان الـ device coherent (من خلال `of_dma_is_coherent()`), تُضاف `IOMMU_CACHE` لـ `prot` flags الخاصة بالـ region.
-- **نوع الـ Reservation:** تستدعي `iommu_resv_region_get_type()` الداخلية:
-  - إذا كان الـ physical address مطابقاً للـ IOVA تماماً → `IOMMU_RESV_DIRECT`
-  - إذا لم يكن هناك physical region (property `reg` غير موجودة أو فارغة) → `IOMMU_RESV_RESERVED`
-  - Mapping جزئي أو غير متطابق → `IOMMU_RESV_RESERVED` مع تحذير
-- **Memory allocation:** تستخدم `iommu_alloc_resv_region()` مع `GFP_KERNEL`، مما يعني أنها **لا تُستدعى من atomic context**.
-- **`iommu-addresses` property format:** تحتوي على phandle يشير لـ device node ثم الـ IOVA range. الدالة تتحقق أن الـ phandle يطابق `dev->of_node` قبل معالجة الـ entry — أي أن نفس الـ memory region يمكن أن تكون لأكثر من device، ولكل device إدخاله الخاص.
-- **Zero-length guard:** إذا كان الـ length صفراً بعد `of_translate_dma_region()`، يُصدر تحذير ويُتخطى الـ entry.
-
-**من يستدعيها:**
-يستدعيها الـ IOMMU driver في تنفيذ الـ callback `iommu_ops::get_resv_regions()`. مثلاً: `arm_smmu_get_resv_regions()` في `drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.c` تستدعي هذه الدالة كـ helper.
+**من بيستدعيها:**
+بيتم الـ call منها عادةً من:
+- `iommu_get_resv_regions(dev, list)` — الـ generic IOMMU API
+- الـ IOMMU domain setup path لما بيتحدد إيه العناوين اللي محظورة
+- الـ `dma_configure()` path في بعض الـ platform drivers
 
 **Pseudocode Flow:**
 
 ```c
 of_iommu_get_resv_regions(dev, list):
-    // iterate over each memory-region phandle in dev->of_node
-    for each node in of_for_each_phandle(dev->of_node, "memory-region"):
-        phys = {0}
+    // 1. اجيب الـ DT node بتاع الـ device
+    np = dev->of_node
 
-        if of_property_present(node, "reg"):
-            err = of_address_to_resource(node, 0, &phys)
-            if err: log error, continue
+    // 2. امشي على كل iommu-addresses property
+    for each reserved_region in np->iommu_addresses:
+        // 3. اعمل alloc لـ region descriptor
+        region = iommu_alloc_resv_region(start, length, prot, type)
 
-        maps = of_get_property(node, "iommu-addresses", &size)
-        if !maps: continue
-
-        // walk iommu-addresses entries
-        while maps < end:
-            phandle = read_be32(maps++)
-            np = of_find_node_by_phandle(phandle)
-
-            if np == dev->of_node:
-                prot = IOMMU_READ | IOMMU_WRITE
-                if of_dma_is_coherent(dev->of_node):
-                    prot |= IOMMU_CACHE
-
-                maps = of_translate_dma_region(np, maps, &iova, &length)
-                if length == 0: warn, continue
-
-                type = iommu_resv_region_get_type(dev, &phys, iova, length)
-                region = iommu_alloc_resv_region(iova, length, prot, type, GFP_KERNEL)
-                if region:
-                    list_add_tail(&region->list, list)
+        // 4. ضيفه للـ list
+        list_add_tail(&region->list, list)
 ```
 
 ---
 
-### الـ Stubs عند غياب `CONFIG_OF_IOMMU`
+### ملاحظة على الـ Stub Pattern
 
-عند عدم تفعيل `CONFIG_OF_IOMMU`، يُعرَّف كلا الـ functions كـ `static inline` stubs في نهاية الـ header:
+الـ header بيستخدم الـ **dual-definition pattern** الشائع في الـ kernel:
 
 ```c
-/* stub when CONFIG_OF_IOMMU is not set */
-
-static inline int of_iommu_configure(struct device *dev,
-                                     struct device_node *master_np,
-                                     const u32 *id)
-{
-    return -ENODEV;  /* no IOMMU support at all */
-}
-
-static inline void of_iommu_get_resv_regions(struct device *dev,
-                                              struct list_head *list)
-{
-    /* no-op */
-}
+#ifdef CONFIG_OF_IOMMU
+// Real functions declared as extern
+extern int of_iommu_configure(...);
+extern void of_iommu_get_resv_regions(...);
+#else
+// Stubs as static inline — compiler optimizes them away completely
+static inline int of_iommu_configure(...) { return -ENODEV; }
+static inline void of_iommu_get_resv_regions(...) { }
+#endif
 ```
 
-هذا النمط يسمح لـ callers بكتابة كود خالٍ من الـ `#ifdef` — الـ `of_dma_configure()` مثلاً لا تحتاج لـ guard حول استدعائها لـ `of_iommu_configure()`.
+الـ `static inline` في الـ stubs معناها الـ compiler هيشيلهم تماماً في الـ `!CONFIG_OF_IOMMU` builds — **zero overhead**. الـ `-ENODEV` في `of_iommu_configure` بيقول للـ caller صراحةً: "مفيش IOMMU، تجاهل وكمّل."
 
 ---
 
 ### العلاقة بين الـ Functions والـ Subsystem
 
 ```
-Bus probe (e.g., platform_bus)
-        │
-        ▼
-of_dma_configure()
-        │
-        ▼
-of_iommu_configure(dev, np, id)          ← [of_iommu.h]
-        │
-        ├── [non-PCI] of_iommu_configure_device()
-        │       └── of_iommu_xlate()
-        │               ├── iommu_fwspec_init()
-        │               └── ops->of_xlate()      ← driver callback
-        │
-        └── [PCI] pci_for_each_dma_alias()
-                └── of_pci_iommu_init()
-                        └── of_iommu_configure_dev_id()
-                                └── of_iommu_xlate()
+Device Tree (DT)
+     │
+     │  iommus = <&smmu 0x100>;
+     │  iommu-addresses = <0x...>;
+     ▼
+of_iommu_configure()          ←── ربط device بالـ IOMMU driver
+     │
+     └──► iommu_probe_device()
+               │
+               └──► dev->iommu_group (set)
+                         │
+                         ▼
+                    DMA API يشتغل صح
 
-
-IOMMU driver get_resv_regions() callback
-        │
-        ▼
-of_iommu_get_resv_regions(dev, list)     ← [of_iommu.h]
-        │
-        ├── of_for_each_phandle() → memory-region nodes
-        ├── of_address_to_resource() → phys address
-        ├── iommu_resv_region_get_type() → DIRECT / RESERVED
-        └── iommu_alloc_resv_region() → iommu_resv_region
-                └── list_add_tail() → list
+of_iommu_get_resv_regions()   ←── جلب العناوين المحجوزة
+     │
+     └──► list of iommu_resv_region
+               │
+               ▼
+          IOMMU domain setup (no-map zones)
 ```
 
----
-
-### جدول الـ Types والـ Structs المستخدمة
-
-| النوع | الملف | الدور |
-|---|---|---|
-| `struct iommu_fwspec` | `include/linux/iommu.h` | يحمل الـ stream IDs والـ fwnode الخاص بالـ IOMMU لكل device |
-| `struct iommu_resv_region` | `include/linux/iommu.h` | تمثيل منطقة IOVA محجوزة (start, length, prot, type) |
-| `enum iommu_resv_type` | `include/linux/iommu.h` | `DIRECT`, `DIRECT_RELAXABLE`, `RESERVED`, `MSI`, `SW_MSI` |
-| `struct of_phandle_args` | `include/linux/of.h` | حجج الـ phandle المُحلَّلة من DT (np + args[]) |
-| `struct of_phandle_iterator` | `include/linux/of.h` | iterator لـ `of_for_each_phandle()` |
+الاتنين مع بعض بيضمنوا إن أي device embedded في DT-based system:
+1. يلاقي الـ IOMMU driver المناسب ويتربط بيه.
+2. الـ IOMMU domain بتاعه بيعرف العناوين المحجوزة ومش هيعمل فيها map بالغلط.
 ## Phase 5: دليل الـ Debugging الشامل
 
-> **النطاق:** subsystem الـ `of_iommu` — الواجهة بين الـ Device Tree والـ IOMMU في Linux kernel.
-> الملفات الأساسية: `include/linux/of_iommu.h` · `drivers/iommu/of_iommu.c`
+الـ subsystem اللي بنتكلم عنه هو **OF-IOMMU** — الكود المسئول عن ربط الـ Device Tree بالـ IOMMU framework في الـ Linux kernel. الـ entry points الأساسية هي `of_iommu_configure()` و`of_iommu_get_resv_regions()`.
 
 ---
 
 ### Software Level
 
----
+#### 1. debugfs — المداخل المهمة
 
-#### 1. debugfs — المداخل والقراءة
-
-الـ IOMMU subsystem يُصدِّر معلومات تشخيصية عبر `debugfs`. نقطة البداية:
+الـ IOMMU framework بيعمل entries في `/sys/kernel/debug/iommu/`:
 
 ```bash
-# تأكد من mount الـ debugfs
-mount -t debugfs none /sys/kernel/debug
-
-# استعراض مجلد الـ iommu
+# اعرض كل الـ domains المسجلة
 ls /sys/kernel/debug/iommu/
+
+# لو الـ driver بيدعم debugfs (مثلاً ARM SMMU)
+ls /sys/kernel/debug/iommu/arm-smmu/
+cat /sys/kernel/debug/iommu/arm-smmu/masters
+
+# اعرض الـ fwspec الخاص بجهاز معين
+ls /sys/kernel/debug/iommu/<device-name>/
 ```
 
-| المدخل | المعنى | كيفية القراءة |
-|---|---|---|
-| `/sys/kernel/debug/iommu/` | مجلد رئيسي للـ IOMMU driver | `ls` ثم `cat` لكل ملف |
-| `/sys/kernel/debug/iommu/<driver>/` | مخصص لكل driver (smmu, intel-iommu...) | يختلف بحسب الـ driver |
-| `/sys/kernel/debug/iommu/domain_<N>` | معلومات الـ domain: mappings, page tables | `cat domain_<N>` |
-| `/sys/kernel/debug/iommu/groups` | الـ iommu groups وأعضاؤها | `cat groups` |
+| المسار | المحتوى |
+|--------|---------|
+| `/sys/kernel/debug/iommu/` | قائمة الـ IOMMU devices المسجلة |
+| `/sys/kernel/debug/iommu/<dev>/mappings` | الـ IOVA mappings النشطة |
+| `/sys/kernel/debug/iommu/<dev>/domain` | معلومات الـ domain |
+
+#### 2. sysfs — المداخل المهمة
 
 ```bash
-# مثال: قراءة groups
-cat /sys/kernel/debug/iommu/groups
-
-# مثال: قراءة معلومات domain معين
-cat /sys/kernel/debug/iommu/domain_0
-```
-
-**نقطة تشخيص خاصة بـ of_iommu:** لا يوجد debugfs entry مخصص لـ `of_iommu` تحديداً — التشخيص يتم من خلال نتائج عملية `of_iommu_configure()` على الـ device نفسه.
-
-```bash
-# التحقق من أن الـ device ارتبط بـ IOMMU group بعد of_iommu_configure
-ls /sys/bus/platform/devices/<device-name>/iommu_group
-# مثال حقيقي
-ls /sys/bus/platform/devices/fd800000.gpu/iommu_group
-```
-
----
-
-#### 2. sysfs — المداخل والقراءة
-
-```bash
-# هل الـ device يملك iommu_group؟ (نجاح of_iommu_configure يعني وجوده)
-readlink /sys/bus/platform/devices/<dev>/iommu_group
-
-# اسم الـ IOMMU المرتبط
-cat /sys/bus/platform/devices/<dev>/iommu_group/name
-
-# قائمة الـ devices في نفس الـ group
-ls /sys/bus/platform/devices/<dev>/iommu_group/devices/
-
-# هل الـ device في وضع passthrough أم DMA-remapping؟
+# تحقق إن الجهاز اتربط بـ IOMMU
 cat /sys/bus/platform/devices/<dev>/iommu_group/type
 
-# المناطق المحجوزة (resv_regions) — ناتجة عن of_iommu_get_resv_regions
-cat /sys/kernel/debug/iommu/domain_*/resv_regions 2>/dev/null
+# اعرض كل الـ IOMMU groups
+ls /sys/kernel/iommu_groups/
 
-# فحص iommu-addresses من DT هل ظهرت في reserved regions
-cat /sys/kernel/debug/iommu/groups
+# اعرض الأجهزة داخل group معين
+ls /sys/kernel/iommu_groups/0/devices/
+
+# تحقق من الـ reserved regions
+cat /sys/kernel/iommu_groups/<N>/reserved_regions
 ```
-
-| المدخل | المعنى |
-|---|---|
-| `iommu_group/` symlink موجود | `of_iommu_configure()` نجح |
-| `iommu_group/` symlink غائب | فشل التهيئة أو `CONFIG_OF_IOMMU` غير مفعّل |
-| `iommu_group/type` = `DMA` | وضع الـ DMA remapping الكامل |
-| `iommu_group/type` = `identity` | وضع الـ passthrough |
-
----
 
 #### 3. ftrace — الـ Tracepoints والـ Events
 
 ```bash
-# تفعيل كل events الـ iommu
+# فعّل الـ IOMMU events كلها
 echo 1 > /sys/kernel/debug/tracing/events/iommu/enable
 
-# أو تفعيل events بعينها
+# او فعّل events محددة
+echo 1 > /sys/kernel/debug/tracing/events/iommu/attach_device_to_domain/enable
+echo 1 > /sys/kernel/debug/tracing/events/iommu/detach_device_from_domain/enable
 echo 1 > /sys/kernel/debug/tracing/events/iommu/map/enable
 echo 1 > /sys/kernel/debug/tracing/events/iommu/unmap/enable
 echo 1 > /sys/kernel/debug/tracing/events/iommu/io_page_fault/enable
-echo 1 > /sys/kernel/debug/tracing/events/iommu/attach_device_to_domain/enable
-echo 1 > /sys/kernel/debug/tracing/events/iommu/detach_device_from_domain/enable
 
-# تشغيل الـ tracing
+# ابدأ الـ trace
 echo 1 > /sys/kernel/debug/tracing/tracing_on
 
-# قراءة النتائج
+# اقرأ النتيجة
 cat /sys/kernel/debug/tracing/trace
 
-# تصفية بـ device معين (مثلاً)
-echo 'name == "fd800000.gpu"' > /sys/kernel/debug/tracing/events/iommu/attach_device_to_domain/filter
+# تتبع دالة of_iommu_configure تحديداً
+echo 'of_iommu_configure' > /sys/kernel/debug/tracing/set_ftrace_filter
+echo function > /sys/kernel/debug/tracing/current_tracer
+echo 1 > /sys/kernel/debug/tracing/tracing_on
 ```
 
-**الـ events الأهم لتشخيص `of_iommu`:**
+مثال على output مفيد:
 
-| Event | متى يُطلق | ما يكشفه |
-|---|---|---|
-| `attach_device_to_domain` | بعد نجاح `of_iommu_configure` | تأكيد ارتباط الـ device |
-| `io_page_fault` | عند خطأ في الـ IOVA | عنوان الخطأ + الـ device |
-| `map` / `unmap` | عند إنشاء/إزالة mapping | IOVA + PA + size |
+```
+          <idle>-0   [001] ....  123.456: iommu_attach_device_to_domain: device=10000000.ethernet
+          <idle>-0   [001] ....  123.457: iommu_map: iova=0x00010000 size=0x1000 prot=3
+```
 
----
-
-#### 4. printk / dynamic debug
+#### 4. printk / Dynamic Debug
 
 ```bash
-# تفعيل dynamic debug لـ of_iommu.c بالكامل
+# فعّل كل الـ debug messages في of_iommu
 echo 'file drivers/iommu/of_iommu.c +p' > /sys/kernel/debug/dynamic_debug/control
 
-# تفعيل لكل ملفات الـ iommu
+# فعّل debug messages في كامل الـ iommu subsystem
 echo 'file drivers/iommu/* +p' > /sys/kernel/debug/dynamic_debug/control
 
-# تفعيل مع timestamps و module name
-echo 'file drivers/iommu/of_iommu.c +pmfl' > /sys/kernel/debug/dynamic_debug/control
-# p = printk, m = module name, f = function name, l = line number
+# تحقق من اللي اتفعّل
+cat /sys/kernel/debug/dynamic_debug/control | grep iommu
 
-# مشاهدة النتائج
-dmesg -w | grep -i iommu
-
-# تفعيل loglevel لكامل الـ iommu subsystem
-echo 8 > /proc/sys/kernel/printk
+# على مستوى الـ kernel boot، أضف في command line:
+# dyndbg="file drivers/iommu/of_iommu.c +p"
 ```
 
-الرسالة الأساسية في `of_iommu.c` التي تظهر عند الفشل:
-
+الـ `dev_dbg()` في `of_iommu_configure()` بتطبع:
 ```
-<device>: Adding to IOMMU failed: <errno>
+of_iommu_configure: Adding to IOMMU failed: -19
 ```
-
-هذه تظهر فقط في `dev_dbg()` — تحتاج dynamic debug لرؤيتها.
-
----
+**الـ -19 = -ENODEV** — يعني مفيش IOMMU driver مسجل.
 
 #### 5. Kernel Config Options للـ Debugging
 
-| الخيار | الوظيفة |
-|---|---|
-| `CONFIG_OF_IOMMU` | تفعيل الـ subsystem نفسه — يجب أن يكون `y` |
-| `CONFIG_IOMMU_DEBUG` | تفعيل مسارات debug إضافية في الـ IOMMU core |
-| `CONFIG_IOMMU_DEBUGFS` | تفعيل مداخل الـ debugfs للـ IOMMU |
-| `CONFIG_IOMMU_DEFAULT_DMA_STRICT` | فرض strict DMA — يكشف أخطاء الـ mapping |
-| `CONFIG_IOMMU_DMA` | دعم الـ DMA API فوق الـ IOMMU |
+| الـ Config | الغرض |
+|-----------|-------|
+| `CONFIG_OF_IOMMU` | يفعّل الـ OF-IOMMU subsystem أصلاً |
+| `CONFIG_IOMMU_DEBUG` | رسائل debug إضافية في الـ IOMMU core |
+| `CONFIG_IOMMU_DEBUGFS` | يفعّل الـ debugfs entries للـ IOMMU |
+| `CONFIG_ARM_SMMU` / `CONFIG_ARM_SMMU_V3` | الـ driver للـ ARM SMMU |
+| `CONFIG_IOMMU_DMA` | الـ DMA-IOMMU integration |
 | `CONFIG_OF_ADDRESS` | مطلوب لـ `of_iommu_get_resv_regions()` |
-| `CONFIG_DYNAMIC_DEBUG` | تفعيل `dev_dbg()` في runtime |
-| `CONFIG_DEBUG_SHIRQ` | لكشف مشاكل الـ interrupt sharing مع الـ IOMMU |
+| `CONFIG_DEBUG_SHIRQ` | debug للـ shared interrupts |
+| `CONFIG_PROVE_LOCKING` | يكتشف locking bugs في الـ mutex |
+| `CONFIG_DYNAMIC_DEBUG` | يفعّل `dev_dbg()` و`pr_debug()` |
 
 ```bash
-# التحقق من الـ config الحالية
-zcat /proc/config.gz | grep -E 'IOMMU|OF_IOMMU|OF_ADDRESS'
-# أو
-grep -E 'IOMMU|OF_IOMMU' /boot/config-$(uname -r)
+# تحقق من الـ config الحالي
+zcat /proc/config.gz | grep -E 'IOMMU|OF_IOMMU'
 ```
 
----
-
-#### 6. أدوات خاصة بالـ Subsystem
+#### 6. devlink وأدوات خاصة بالـ Subsystem
 
 ```bash
-# iommufd - الواجهة الجديدة
-ls /dev/iommu  # يظهر إذا كان CONFIG_IOMMUFD مفعّلاً
+# اعرض الـ IOMMU info عبر dmesg أثناء boot
+dmesg | grep -i iommu
+dmesg | grep -i 'of_iommu\|iommu-map\|iommus'
 
-# فحص iommu-map في DT باستخدام dtc
-dtc -I fs /sys/firmware/devicetree/base | grep -A5 "iommu-map"
+# استخدم iommufd (للـ kernels الأحدث)
+ls /dev/iommu
 
-# فحص iommus property
-dtc -I fs /sys/firmware/devicetree/base | grep -A5 "iommus"
+# تحقق من الـ fwnode handles
+dmesg | grep 'fwnode\|of_xlate\|iommu_fwspec'
 
-# أداة lsiommu (إذا متوفرة في distro)
-lsiommu -v 2>/dev/null || echo "not available"
-
-# استخدام iommu_group عبر sysfs لفحص الـ mappings
-for g in /sys/kernel/iommu_groups/*/; do
-    echo "=== Group $g ==="
-    ls $g/devices/
-done
+# لرؤية الـ PCI aliases
+lspci -vv | grep -i 'iommu\|ats'
 ```
 
----
+#### 7. جدول رسائل الـ Error الشائعة
 
-#### 7. جدول أخطاء شائعة
-
-| رسالة الخطأ | المعنى | الحل |
-|---|---|---|
-| `Adding to IOMMU failed: -19` (`ENODEV`) | لم يُعثر على IOMMU في DT أو الـ driver غير محمّل | تحقق من `iommus =` في DT وتحميل الـ IOMMU driver |
-| `Adding to IOMMU failed: -517` (`EPROBE_DEFER`) | الـ IOMMU driver لم يُحمَّل بعد | انتظر أو أعد ترتيب الـ initcalls |
-| `failed to parse memory region <node>: <err>` | `iommu-addresses` في DT تشير لـ node بـ `reg` خاطئ | صحح الـ `reg` في DT لمنطقة الـ reserved-memory |
-| `Cannot reserve IOVA region of 0 size` | الـ `iommu-addresses` بـ length = 0 | تحقق من صحة الـ address-cells وترجمة DMA |
-| `treating non-direct mapping ... as reservation` | IOVA لا تطابق PA — يُعامَل كـ reservation | تحقق من قصد الـ DT: هل يُراد direct mapping؟ |
-| `iommu_fwspec_init failed` | فشل تهيئة الـ fwspec للـ device | تحقق من الـ memory allocation وحالة الـ device |
-| `of_xlate failed: -22` (`EINVAL`) | الـ IOMMU driver رفض الـ phandle args | تحقق من `#iommu-cells` وعدد الـ args في DT |
-| `ats-supported property found but...` | ATS مفعّل لكن الـ hardware لا يدعمه | أزل `ats-supported` من DT |
-
----
+| رسالة في الـ log | المعنى | الحل |
+|-----------------|--------|------|
+| `Adding to IOMMU failed: -19` | مفيش IOMMU driver مسجل (`-ENODEV`) | تأكد من `CONFIG_ARM_SMMU` أو الـ driver المناسب |
+| `Adding to IOMMU failed: -517` | الـ driver لسه ما اتحملش (`-EPROBE_DEFER`) | طبيعي في الـ boot — انتظر أو تحقق من ترتيب الـ initcalls |
+| `failed to parse memory region` | الـ `reg` property في الـ DT بايظ | راجع الـ DT binding للـ reserved-memory |
+| `treating non-direct mapping as reservation` | الـ IOVA مش مطابق للـ physical | راجع `iommu-addresses` في الـ DT |
+| `Cannot reserve IOVA region of 0 size` | الـ `iommu-addresses` بيحدد size = 0 | تحقق من الـ DT node للـ memory-region |
+| `iommu_fwspec_init failed` | فشل الـ allocation أو mismatch في الـ fwnode | تحقق من الـ memory وإن الـ IOMMU node موجود |
+| `of_xlate returned error` | الـ IOMMU driver رفض الـ stream ID | تحقق من صحة `iommus = <&smmu SID>` في الـ DT |
 
 #### 8. نقاط استراتيجية لـ dump_stack() و WARN_ON()
 
-في `drivers/iommu/of_iommu.c` — النقاط المثلى للتشخيص:
+الأماكن المناسبة في `drivers/iommu/of_iommu.c`:
 
 ```c
-/* نقطة 1: التحقق من نجاح xlate */
-static int of_iommu_xlate(struct device *dev,
-                          struct of_phandle_args *iommu_spec)
-{
-    const struct iommu_ops *ops;
-    int ret;
-
-    if (!of_device_is_available(iommu_spec->np)) {
-        dev_warn(dev, "IOMMU node %pOF not available\n", iommu_spec->np);
-        dump_stack(); /* هنا لمعرفة من استدعى xlate */
-        return -ENODEV;
-    }
-    /* ... */
-    WARN_ON(!ops->of_xlate); /* تحذير إذا الـ driver لا يدعم xlate */
+/* في of_iommu_xlate() — لو مفيش of_xlate callback */
+if (!ops->of_xlate) {
+    WARN_ON(!ops->of_xlate); /* الـ driver ناقص implementation */
+    return -ENODEV;
 }
 
-/* نقطة 2: بعد of_iommu_configure لفحص الـ fwspec */
-int of_iommu_configure(struct device *dev, ...)
-{
-    /* ... */
-    WARN_ON(err && err != -ENODEV && err != -EPROBE_DEFER);
-    /* أي خطأ غير متوقع يستحق stack trace */
+/* في of_iommu_configure() — لو الـ fwspec اتبنى بدون bus */
+if (!err && dev->bus && !dev_iommu_present) {
+    /* هنا تقدر تحط dump_stack() لو iommu_probe_device فشل */
 }
 
-/* نقطة 3: في of_iommu_get_resv_regions لفحص الـ regions */
-if (length == 0) {
-    WARN_ONCE(1, "%s: zero-length IOVA region in DT\n",
-              dev_name(dev));
+/* في of_iommu_get_resv_regions() — لو الـ region فشل */
+region = iommu_alloc_resv_region(...);
+if (!region) {
+    WARN_ON_ONCE(!region); /* OOM situation */
 }
 ```
 
@@ -1368,939 +1111,787 @@ if (length == 0) {
 
 ### Hardware Level
 
----
-
-#### 1. التحقق من توافق حالة الـ Hardware مع الـ Kernel
-
-الـ `of_iommu` يعتمد على DT لوصف الارتباط بين الـ device والـ IOMMU. التحقق:
+#### 1. التحقق إن الـ Hardware State مطابق للـ Kernel State
 
 ```bash
-# 1. تأكد أن الـ IOMMU موصوف في DT
-dtc -I fs /sys/firmware/devicetree/base -O dts 2>/dev/null | \
-    grep -B2 -A10 "iommu-cells"
+# تحقق من وجود الـ IOMMU في الـ Device Tree المحمّل
+dtc -I fs /sys/firmware/devicetree/base | grep -A5 'iommu'
 
-# 2. تأكد أن الـ device يملك iommus property
-dtc -I fs /sys/firmware/devicetree/base -O dts 2>/dev/null | \
-    grep -B5 -A5 "iommus = "
+# قارن الـ stream IDs في الـ DT مع اللي في الـ driver
+dmesg | grep 'stream\|sid\|SID'
 
-# 3. تأكد أن الـ SMMU/IOMMU مفعّل في الـ hardware
-# مثال لـ ARM SMMU — تحقق من registers
-devmem2 0xfd800000 w  # عنوان SMMU base من DT
-
-# 4. مقارنة الـ iommu_group في kernel مع توصيف الـ hardware
-cat /sys/kernel/iommu_groups/0/devices  # ماذا يرى الـ kernel
-# يجب أن يطابق ما في DT
+# تحقق من الـ SMMU registers — هل الـ device attached؟
+dmesg | grep 'smmu.*attach\|context bank'
 ```
 
----
-
-#### 2. Register Dump — devmem2 / /dev/mem
+#### 2. Register Dump
 
 ```bash
-# تثبيت devmem2
-apt-get install devmem2  # Debian/Ubuntu
-# أو
-yum install devmem2      # RHEL/Fedora
+# افترض إن الـ SMMU base address = 0x09000000 (مثال ARM SMMU)
+# باستخدام devmem2
+devmem2 0x09000000 w    # CR0 register — هل الـ SMMU enabled؟
+devmem2 0x09000008 w    # STATUSR
 
-# مثال: ARM SMMU-v3 — قراءة SMMU_IDR0 (offset 0x0)
-SMMU_BASE=0xfd800000  # من DT: reg = <0x0 0xfd800000 0x0 0x20000>
-devmem2 $SMMU_BASE w   # قراءة IDR0
+# قراءة نطاق من الـ registers
+for offset in 0 4 8 c 10 14; do
+    echo -n "offset 0x$offset: "
+    devmem2 $((0x09000000 + 0x$offset)) w 2>/dev/null
+done
 
-# قراءة SMMU_CR0 (offset 0x20) — هل الـ SMMU مفعّل؟
-devmem2 $((SMMU_BASE + 0x20)) w
-
-# استخدام /dev/mem مباشرة (يحتاج CONFIG_STRICT_DEVMEM=n)
-dd if=/dev/mem bs=4 count=1 skip=$((SMMU_BASE / 4)) 2>/dev/null | xxd
-
-# استخدام io utility
-io -4 -r $SMMU_BASE  # إذا متوفر
+# عبر /dev/mem
+dd if=/dev/mem bs=4 count=16 skip=$((0x09000000/4)) 2>/dev/null | xxd
 ```
-
-**Registers مهمة في ARM SMMU-v3:**
-
-| Register | Offset | ما يكشفه |
-|---|---|---|
-| `SMMU_IDR0` | 0x000 | قدرات الـ hardware |
-| `SMMU_CR0` | 0x020 | هل الـ SMMU enabled |
-| `SMMU_CR0ACK` | 0x024 | تأكيد الـ enable |
-| `SMMU_GBPA` | 0x044 | Global Bypass Attribute |
-| `SMMU_GERROR` | 0x060 | Global errors |
-
----
 
 #### 3. Logic Analyzer / Oscilloscope
 
-عند تشخيص مشاكل الـ IOMMU على مستوى الـ bus:
+لو بتشك في مشكلة hardware-level في الـ IOMMU interconnect:
 
-```
-الحافلة: AXI / ACE-Lite (ARM) أو PCIe TLP
-الإشارات المهمة للرصد:
-  - AWADDR / ARADDR  → عنوان الـ DMA request
-  - AWPROT / ARPROT  → صلاحيات الـ access
-  - BRESP / RRESP    → استجابة الـ SMMU (SLVERR = fault)
+- **راقب الـ AXI/ACE bus**: تأكد إن الـ transaction IDs (Stream IDs) بتوصل صح للـ SMMU
+- **ATS (Address Translation Service) للـ PCIe**: راقب الـ ATS Request/Completion على الـ PCIe bus
+- **TLB Invalidation**: راقب الـ SMMU CMD_SYNC و TLBI commands على الـ interconnect
+- **نقاط القياس**: قبل وبعد الـ SMMU في الـ memory interconnect
 
-نصائح:
-  1. ضع trigger على BRESP = 2'b10 (SLVERR) لالتقاط الـ fault
-  2. راقب عنوان الـ IOVA في AWADDR — قارنه مع الـ kernel mappings
-  3. تحقق من أن الـ AxUSER bits تحمل StreamID الصحيح
-     (يطابق ما يُعطى لـ of_iommu_configure عبر الـ id parameter)
-```
+#### 4. مشاكل Hardware شائعة وأنماطها في الـ Kernel Log
 
-```
-ASCII: مسار الـ DMA Request عبر SMMU
-┌──────────┐   IOVA    ┌──────────┐   PA     ┌──────────┐
-│  Device  │ ────────► │  SMMU   │ ────────► │  Memory  │
-│ (master) │           │ (xlate) │           │          │
-└──────────┘           └────┬─────┘           └──────────┘
-                            │ fault?
-                            ▼
-                      ┌──────────┐
-                      │  CPU     │
-                      │ (irq)    │
-                      └──────────┘
-```
-
----
-
-#### 4. مشاكل الـ Hardware الشائعة وأنماط الـ Kernel Log
-
-| المشكلة | نمط الـ Kernel Log | التشخيص |
-|---|---|---|
-| StreamID خاطئ | `iommu fault: unhandled context fault` | تحقق من `id` parameter في `of_iommu_configure` |
-| الـ SMMU غير مفعّل في الـ hardware | لا يظهر أي SMMU device في `dmesg` | تحقق من `SMMU_CR0` register |
-| الـ SMMU لم يُبرمَج بالـ STE | `arm-smmu-v3: event=0x10` (Translation fault) | تحقق من `iommu-map` في DT |
-| reserved-memory غير مضبوطة | `treating non-direct mapping as reservation` | صحح `iommu-addresses` في DT |
-| مشكلة TLB shootdown | `arm-smmu: TLB sync timeout` | مشكلة hardware في الـ SMMU TLB |
-| ATS غير مدعوم | PCIe error في الـ log | أزل `ats-supported` من DT |
-
----
-
-#### 5. Device Tree Debugging — التحقق من التوافق
+| المشكلة | Pattern في الـ Log |
+|---------|-------------------|
+| الـ SMMU مش مفعّل في الـ hardware | `iommu: Failed to probe smmu` |
+| Stream ID خاطئ (mismatch بين DT والـ HW) | `arm-smmu: Unhandled context fault` + `FSR=0x...` |
+| الـ ATS مش مدعوم في الـ hardware | `ats-supported` في الـ DT بس الـ PCIe EP رافض |
+| الـ reserved memory متداخل | `iommu: mapping already present` أو page fault |
+| Power management issue | الـ SMMU بيتقفل بعد suspend وما بيرجعش |
 
 ```bash
-# 1. تفريغ الـ DT الفعلي المُحمَّل في الـ kernel
-dtc -I fs /sys/firmware/devicetree/base -O dts -o /tmp/live.dts 2>/dev/null
-
-# 2. البحث عن كل الـ devices التي تملك iommus property
-grep -B10 "iommus = " /tmp/live.dts | grep -E "node-name|iommus"
-
-# 3. التحقق من iommu-map للـ PCI
-grep -A5 "iommu-map" /tmp/live.dts
-
-# 4. التحقق من iommu-map-mask
-grep "iommu-map-mask" /tmp/live.dts
-
-# 5. التحقق من #iommu-cells في الـ IOMMU node
-grep -A3 "iommu-controller" /tmp/live.dts | grep "iommu-cells"
-
-# 6. تحقق من reserved-memory وiommu-addresses
-grep -B5 -A10 "iommu-addresses" /tmp/live.dts
+# اقرأ الـ context fault info للـ ARM SMMU
+dmesg | grep -E 'arm-smmu|context fault|FSR|FAR|FSYNR'
 ```
 
-**مثال DT صحيح:**
+#### 5. Device Tree Debugging
+
+```bash
+# اعرض الـ DT المحمّل كاملاً وابحث عن iommu bindings
+dtc -I fs /sys/firmware/devicetree/base -O dts 2>/dev/null | grep -B5 -A10 'iommus'
+
+# تحقق من وجود iommu-map (للـ PCI)
+dtc -I fs /sys/firmware/devicetree/base -O dts 2>/dev/null | grep -B2 -A5 'iommu-map'
+
+# تحقق من الـ #iommu-cells في الـ SMMU node
+dtc -I fs /sys/firmware/devicetree/base -O dts 2>/dev/null | grep -B10 '#iommu-cells'
+
+# تحقق من الـ reserved-memory nodes
+dtc -I fs /sys/firmware/devicetree/base -O dts 2>/dev/null | grep -A20 'reserved-memory'
+
+# تحقق من الـ iommu-addresses في الـ memory-region nodes
+dtc -I fs /sys/firmware/devicetree/base -O dts 2>/dev/null | grep -B2 -A8 'iommu-addresses'
+```
+
+**مثال DT صح لجهاز مربوط بـ SMMU:**
 
 ```dts
-/* الـ IOMMU node */
-smmu: iommu@fd800000 {
+/* الـ SMMU node */
+smmu: iommu@9000000 {
     compatible = "arm,smmu-v3";
-    reg = <0x0 0xfd800000 0x0 0x20000>;
-    #iommu-cells = <1>;   /* مطلوب لـ of_iommu_xlate */
+    reg = <0x9000000 0x800000>;
+    #iommu-cells = <1>;   /* مطلوب لـ of_iommu_configure_dev */
 };
 
-/* الـ device المرتبط */
-gpu@fc000000 {
-    compatible = "vendor,gpu";
-    reg = <0x0 0xfc000000 0x0 0x10000>;
-    iommus = <&smmu 0x200>;  /* StreamID = 0x200 */
-    memory-region = <&gpu_reserved>;
+/* الجهاز اللي بيستخدم الـ SMMU */
+ethernet@10000000 {
+    compatible = "vendor,eth";
+    reg = <0x10000000 0x1000>;
+    iommus = <&smmu 0x100>;  /* Stream ID = 0x100 */
+    memory-region = <&eth_reserved>;
 };
 
-/* منطقة محجوزة */
+/* الـ reserved memory */
 reserved-memory {
-    gpu_reserved: gpu-reserved@80000000 {
-        reg = <0x0 0x80000000 0x0 0x1000000>;
-        iommu-addresses = <&gpu 0x0 0x80000000 0x0 0x1000000>;
+    eth_reserved: eth-buffer@80000000 {
+        reg = <0x80000000 0x1000000>;
+        iommu-addresses = <&ethernet 0x0 0x80000000 0x0 0x1000000>;
     };
 };
-```
-
-```bash
-# تحقق من تطابق #iommu-cells مع عدد args
-# إذا #iommu-cells = <1> فيجب أن يكون: iommus = <&smmu ONE_ARG>
-python3 -c "
-import struct, sys
-# قراءة iommu-cells من sysfs
-with open('/sys/firmware/devicetree/base/iommu@fd800000/#iommu-cells','rb') as f:
-    val = struct.unpack('>I', f.read(4))[0]
-    print(f'#iommu-cells = {val}')
-"
 ```
 
 ---
 
 ### Practical Commands
 
----
-
-#### الأوامر الجاهزة للنسخ
-
-**فحص شامل سريع:**
+#### مجموعة أوامر جاهزة للنسخ
 
 ```bash
 #!/bin/bash
-# of_iommu_debug.sh — فحص شامل لـ of_iommu subsystem
+# === OF-IOMMU Debug Script ===
 
-echo "=== IOMMU Groups ==="
+DEVICE=${1:-"10000000.ethernet"}  # غيّر للـ device name
+
+echo "=== [1] dmesg IOMMU Messages ==="
+dmesg | grep -iE 'iommu|smmu|of_iommu' | tail -50
+
+echo ""
+echo "=== [2] IOMMU Groups ==="
+ls /sys/kernel/iommu_groups/
 for g in /sys/kernel/iommu_groups/*/; do
     echo "Group $(basename $g):"
-    ls $g/devices/ 2>/dev/null | sed 's/^/  /'
+    ls $g/devices/
 done
 
 echo ""
-echo "=== Devices with IOMMU ==="
-for dev in /sys/bus/platform/devices/*/; do
-    if [ -L "$dev/iommu_group" ]; then
-        group=$(basename $(readlink "$dev/iommu_group"))
-        echo "  $(basename $dev) → $group"
-    fi
+echo "=== [3] Device IOMMU Group ==="
+readlink /sys/bus/platform/devices/$DEVICE/iommu_group 2>/dev/null || \
+    echo "Device not in any IOMMU group!"
+
+echo ""
+echo "=== [4] Reserved Regions ==="
+for g in /sys/kernel/iommu_groups/*/; do
+    cat $g/reserved_regions 2>/dev/null
 done
 
 echo ""
-echo "=== IOMMU in dmesg ==="
-dmesg | grep -iE 'iommu|smmu|of_iommu' | tail -30
-
-echo ""
-echo "=== DT iommus properties ==="
+echo "=== [5] Device Tree IOMMU Bindings ==="
 dtc -I fs /sys/firmware/devicetree/base -O dts 2>/dev/null | \
-    grep -E "iommus|iommu-map|iommu-cells|iommu-addresses" | \
-    sort -u
+    grep -B5 -A5 'iommus\|iommu-map\|iommu-addresses' 2>/dev/null | head -100
+
+echo ""
+echo "=== [6] Enable IOMMU ftrace Events ==="
+echo 1 > /sys/kernel/debug/tracing/events/iommu/enable
+echo 1 > /sys/kernel/debug/tracing/tracing_on
+echo "Tracing enabled. Run: cat /sys/kernel/debug/tracing/trace_pipe"
 ```
 
-**تفعيل الـ Tracing الكامل:**
+#### تفسير output مهم
 
 ```bash
-#!/bin/bash
-# iommu_trace.sh — تفعيل كامل الـ iommu tracing
+# لو شفت في dmesg:
+# [    2.345678] platform 10000000.ethernet: Adding to IOMMU failed: -19
+# المعنى: CONFIG_ARM_SMMU مش مفعّل أو الـ SMMU driver ما اتحملش
 
-cd /sys/kernel/debug/tracing
+# لو شفت:
+# [    2.345678] platform 10000000.ethernet: Adding to IOMMU failed: -517
+# المعنى: طبيعي — الـ SMMU driver لسه ما اتحملش، الـ kernel هيحاول تاني
 
-# تنظيف
-echo > trace
-
-# تفعيل events
-echo 1 > events/iommu/enable
-
-# تفعيل dynamic debug
-echo 'file drivers/iommu/of_iommu.c +pmfl' > /sys/kernel/debug/dynamic_debug/control
-echo 'file drivers/iommu/*.c +pmfl' > /sys/kernel/debug/dynamic_debug/control
-
-# تشغيل
-echo 1 > tracing_on
-echo "Tracing started. Press Enter to stop and view..."
-read
-echo 0 > tracing_on
-
-cat trace | grep -E "iommu|smmu" | head -100
+# لو شفت:
+# [    2.345678] arm-smmu-v3 9000000.iommu: Unhandled context fault
+# المعنى: جهاز بيحاول يوصل لعنوان مش mapped — راجع الـ DMA mappings
 ```
-
-**قراءة reserved regions:**
 
 ```bash
-# فحص الـ resv_regions المُسجَّلة لكل device
-for dev in /sys/bus/platform/devices/*/; do
-    name=$(basename $dev)
-    if [ -L "$dev/iommu_group" ]; then
-        echo "=== $name ==="
-        cat $dev/iommu_group/reserved_regions 2>/dev/null || \
-            echo "  (no reserved_regions sysfs entry)"
-    fi
-done
+# تفعيل dynamic debug وتتبع الـ of_iommu_configure
+echo 'file drivers/iommu/of_iommu.c +pflmt' > /sys/kernel/debug/dynamic_debug/control
+
+# الـ +pflmt معناها:
+#   p = print
+#   f = function name
+#   l = line number
+#   m = module name
+#   t = thread ID
+
+# راقب النتيجة
+dmesg -w | grep of_iommu
 ```
 
----
+```bash
+# تحقق من الـ IOMMU fwspec لجهاز معين (عبر kernel oops أو debugfs)
+# لو عندك kernel بـ CONFIG_IOMMU_DEBUGFS:
+cat /sys/kernel/debug/iommu/devices 2>/dev/null
 
-#### مثال على Output وكيفية تفسيره
-
-**مثال: دmesg عند نجاح of_iommu_configure:**
-
+# أو استخدم crash/gdb مع vmlinux:
+# p ((struct iommu_fwspec *)dev->iommu->fwspec)->num_ids
+# p ((struct iommu_fwspec *)dev->iommu->fwspec)->ids[0]
 ```
-[    2.345678] arm-smmu-v3 fd800000.iommu: probing hardware configuration...
-[    2.345900] arm-smmu-v3 fd800000.iommu: SMMU initialised
-[    3.102345] gpu fc000000.gpu: Adding to iommu group 0
-```
-
-التفسير: الـ `of_iommu_configure()` نجحت — الـ GPU ارتبط بـ IOMMU group 0.
-
-**مثال: دmesg عند فشل EPROBE_DEFER:**
-
-```
-[    3.100000] gpu fc000000.gpu: Adding to IOMMU failed: -517
-[    5.200000] arm-smmu-v3 fd800000.iommu: probing hardware configuration...
-[    5.201000] gpu fc000000.gpu: Adding to iommu group 0
-```
-
-التفسير: الـ GPU جرّب قبل الـ SMMU — الـ kernel أعاد المحاولة تلقائياً بعد تحميل الـ SMMU.
-
-**مثال: دmesg عند خطأ في DT (IOVA size = 0):**
-
-```
-[    3.100000] gpu fc000000.gpu: Cannot reserve IOVA region of 0 size
-```
-
-التفسير: `iommu-addresses` في DT تحتوي length = 0 — راجع الـ address-cells وصحة الـ DT encoding.
-
-**مثال: ftrace output لـ io_page_fault:**
-
-```
-    kworker/0:1-45    [000] ....  3.100000: io_page_fault: \
-        iommu=fd800000.iommu type=1 device=fc000000.gpu \
-        iova=0xdeadbeef flags=0x0
-```
-
-التفسير: الـ GPU حاول الوصول لعنوان IOVA `0xdeadbeef` غير المُعيَّن — احتمال bug في الـ driver أو mapping غير مكتمل.
 ## Phase 6: سيناريوهات من الحياة العملية
 
 ---
 
-### السيناريو الأول: GPU لا يرسم — بوابة صناعية على RK3562
+### السيناريو 1: Industrial Gateway على RK3562 — الـ IOMMU مش بيتفعّل
 
 #### العنوان
-**الـ Mali GPU يفشل في تهيئة الـ DMA** على بوابة صناعية مبنية على RK3562
+الـ DMA isolation مش شغّال على gateway صناعي بسبب غياب `iommus` property في الـ DT
 
 #### السياق
-شركة تصنع بوابات صناعية (Industrial Gateway) تعمل بنظام Linux 6.6 على RK3562. الجهاز يضم Mali-G52 GPU مدمجاً. أثناء bring-up جديد، يتعطل driver الـ Mali عند التحميل ولا تظهر أي شاشة.
+شركة بتبني **industrial gateway** على أساس **RK3562** بيشغّل Linux 6.x. المنتج بيستخدم Ethernet controller و USB host controller عشان ينقل بيانات من sensors. الـ security team طلبت إن كل peripheral يشتغل في **IOMMU domain** منعزل عشان لو في exploit في driver، ما يقدرش يوصل لباقي الـ memory.
 
 #### المشكلة
-عند تحميل `mali_kbase.ko` يطبع kernel:
+الـ engineer لاحظ إن الـ USB controller شغّال بس بدون IOMMU protection. الـ dmesg مفيهوش أي رسالة تقول إن IOMMU اتكوّن للـ USB device.
 
+```bash
+dmesg | grep -i iommu
+# النتيجة: مفيش أي إشارة لـ USB في الـ IOMMU log
 ```
-mali: probe of ff400000.gpu failed with error -19
-```
-
-الـ `-19` هو `ENODEV` — وهو بالضبط ما تُعيده الدالة `of_iommu_configure` في حالة `CONFIG_OF_IOMMU` غير معرّف.
 
 #### التحليل
-الدالة في `of_iommu.h` عند غياب `CONFIG_OF_IOMMU`:
+الـ kernel بيمشي على المسار ده:
+
+```
+probe(usb_hcd)
+  → iommu_probe_device()
+    → of_iommu_configure(dev, dev->of_node, NULL)   ← نقطة الدخول في of_iommu.h
+```
+
+الـ `of_iommu_configure()` بتدوّر على `iommus` property في الـ device node:
 
 ```c
-static inline int of_iommu_configure(struct device *dev,
-                                     struct device_node *master_np,
-                                     const u32 *id)
+/* of_iommu.c — simplified */
+int of_iommu_configure(struct device *dev, struct device_node *master_np,
+                       const u32 *id)
 {
-    return -ENODEV;  /* لا يوجد IOMMU مهيّأ من DT */
+    /* بتدور على iommus = <&iommu_node id> في الـ DT */
+    err = of_iommu_configure_device(master_np, dev, &info);
+    /* لو مفيش property → ترجع -ENODEV وما بتعملش حاجة */
 }
 ```
 
-سلسلة الاستدعاء:
-
-```
-mali_kbase_probe()
-  └─> of_dma_configure()          [drivers/of/device.c]
-        └─> of_iommu_configure()  [include/linux/of_iommu.h]
-              └─> returns -ENODEV (stub لأن CONFIG_OF_IOMMU=n)
-```
-
-الـ `of_dma_configure()` تعتبر `ENODEV` خطأ فادحاً وتُفشل الـ probe.
-
-#### الحل
-**أولاً:** تفعيل `CONFIG_OF_IOMMU=y` و `CONFIG_IOMMU_SUPPORT=y` في kernel config:
-
-```bash
-# في .config
-CONFIG_IOMMU_SUPPORT=y
-CONFIG_OF_IOMMU=y
-CONFIG_ROCKCHIP_IOMMU=y
-```
-
-**ثانياً:** التحقق من DT — يجب أن يحتوي node الـ GPU على `iommus` phandle:
+لما فتح الـ DTS لقى:
 
 ```dts
-/* arch/arm64/boot/dts/rockchip/rk3562.dtsi */
-gpu: gpu@ff400000 {
-    compatible = "arm,mali-bifrost";
-    reg = <0x0 0xff400000 0x0 0x4000>;
-    iommus = <&gpu_mmu>;          /* هذا السطر ضروري */
-    ...
+/* قبل التعديل — USB node بدون iommus */
+usbhost: usb@fe800000 {
+    compatible = "rockchip,rk3562-xhci";
+    reg = <0x0 0xfe800000 0x0 0x100000>;
+    /* iommus property غايبة! */
 };
+```
 
-gpu_mmu: iommu@ff408000 {
-    compatible = "rockchip,iommu";
-    reg = <0x0 0xff408000 0x0 0x100>;
-    interrupts = <GIC_SPI 159 IRQ_TYPE_LEVEL_HIGH>;
+لأن `CONFIG_OF_IOMMU` موجود في الـ kernel config، الـ real function اتكلمت، بس رجعت `-ENODEV` لأن مفيش `iommus` في الـ DT node. لو `CONFIG_OF_IOMMU` كانت غايبة، كانت الـ stub inline في الـ header هي اللي اتكلمت وكمان رجعت `-ENODEV` — نفس النتيجة.
+
+#### الحل
+إضافة `iommus` property في الـ DTS:
+
+```dts
+/* بعد التعديل */
+iommu: iommu@fe010000 {
+    compatible = "rockchip,rk3568-iommu"; /* RK3562 compatible */
+    reg = <0x0 0xfe010000 0x0 0x1000>;
     #iommu-cells = <0>;
 };
-```
 
-**ثالثاً:** إعادة البناء والتحقق:
-
-```bash
-make ARCH=arm64 menuconfig   # تفعيل CONFIG_OF_IOMMU
-make ARCH=arm64 dtbs          # إعادة بناء DTB
-cat /sys/kernel/debug/iommu/devices  # التحقق بعد البوت
-```
-
-#### الدرس المستفاد
-الـ `of_iommu.h` يوفر stub يُعيد `ENODEV` عند غياب `CONFIG_OF_IOMMU`. هذا السلوك الصامت يُضلل المهندس ليعتقد أن المشكلة في driver الـ GPU، بينما الجذر هو غياب CONFIG في kernel.
-
----
-
-### السيناريو الثاني: USB Host يُسبب kernel panic — لوحة مبنية على i.MX8MP
-
-#### العنوان
-**الـ `of_iommu_get_resv_regions` تُعيد منطقة غير صحيحة** وتُسبب تعارضاً في DMA على i.MX8MP
-
-#### السياق
-منتج Android TV Box يعمل على NXP i.MX8M Plus. الـ USB3 Host يعمل مع محرك أقراص USB. بعد تحديث kernel من 5.15 إلى 6.1، يظهر kernel panic عشوائي عند نقل ملفات كبيرة.
-
-#### المشكلة
-```
-BUG: IOMMU: DMA address collision in reserved region
-[  42.318] iommu fault: addr=0x80000000 not in allowed window
-```
-
-#### التحليل
-الدالة في `of_iommu.h`:
-
-```c
-extern void of_iommu_get_resv_regions(struct device *dev,
-                                      struct list_head *list);
-```
-
-هذه الدالة (المُعرَّفة في `drivers/of/of_iommu.c`) تقرأ الـ DT وتبني قائمة من `iommu_resv_region` تصف نطاقات العناوين المحجوزة التي لا يجب للـ IOMMU أن يماپها للـ DMA.
-
-سلسلة الاستدعاء عند تسجيل الـ device:
-
-```
-usb_add_hcd()
-  └─> device_add()
-        └─> iommu_probe_device()
-              └─> iommu_get_resv_regions(dev, &list)
-                    └─> of_iommu_get_resv_regions(dev, list)
-                          └─> يقرأ "reserved-memory" من DT
-                                └─> يُضيف iommu_resv_region للقائمة
-```
-
-المشكلة: في kernel 6.1 تغيّر تفسير `no-map` في DT — منطقة كانت مُستثناة أصبحت مُدرجة كـ `IOMMU_RESV_DIRECT` فتعارضت مع buffer الـ USB DMA.
-
-#### الحل
-**فحص المناطق المحجوزة الفعلية:**
-
-```bash
-# على الجهاز المُشغَّل
-cat /sys/kernel/debug/iommu/reserved_regions
-# أو
-dmesg | grep -i "resv\|reserved\|iommu"
-```
-
-**تصحيح DT لتحديد المنطقة بدقة:**
-
-```dts
-/* arch/arm64/boot/dts/freescale/imx8mp.dtsi */
-reserved-memory {
-    #address-cells = <2>;
-    #size-cells = <2>;
-    ranges;
-
-    /* منطقة firmware — محجوزة ولا يُمسها IOMMU */
-    fw_reserved: firmware@80000000 {
-        reg = <0 0x80000000 0 0x01000000>;
-        no-map;
-    };
-};
-
-&usb3_0 {
-    iommus = <&iommu1 0x900>;
-    /* لا تضع USB DMA buffer داخل نطاق fw_reserved */
-    dma-ranges = <0x40000000 0x40000000 0xbf000000>;
+usbhost: usb@fe800000 {
+    compatible = "rockchip,rk3562-xhci";
+    reg = <0x0 0xfe800000 0x0 0x100000>;
+    iommus = <&iommu>;   /* ← ده اللي بيخلي of_iommu_configure تلاقي حاجة */
 };
 ```
 
-**كود التحقق في driver لفهم القائمة المُبنية:**
-
-```c
-/* debug مؤقت في driver */
-struct iommu_resv_region *region;
-LIST_HEAD(resv_list);
-
-of_iommu_get_resv_regions(dev, &resv_list);
-
-list_for_each_entry(region, &resv_list, list) {
-    dev_info(dev, "resv: start=0x%llx len=0x%zx type=%d\n",
-             (u64)region->start, region->length, region->type);
-}
-
-iommu_put_resv_regions(dev, &resv_list);
+```bash
+# تحقق بعد التعديل
+dmesg | grep -i iommu
+# [    2.345] rockchip-iommu fe010000.iommu: bound usb@fe800000 (ops rockchip_iommu_ops)
 ```
 
 #### الدرس المستفاد
-**الـ `of_iommu_get_resv_regions`** ليست بسيطة — تُترجم `reserved-memory` nodes من DT إلى قيود IOMMU. أي تغيير في تفسير الـ DT بين إصدارات kernel يُغيّر ما تُضيفه هذه الدالة وقد يُفسد DMA بالكامل.
+الـ `of_iommu_configure()` في `of_iommu.h` هي **entry point** بس — هي مش بتفعّل IOMMU لوحدها، بتعتمد **100%** على وجود `iommus` property في الـ DT. غيابها = سكوت تام بدون error واضح للـ user.
 
 ---
 
-### السيناريو الثالث: حساس IoT لا يُرسل بيانات — STM32MP1 بدون IOMMU
+### السيناريو 2: Android TV Box على Allwinner H616 — الـ Mali GPU بييجي panic عند الـ boot
 
 #### العنوان
-**فهم سلوك الـ stub** على منصة STM32MP1 التي لا تحتوي IOMMU
+`of_iommu_get_resv_regions()` بتسبب kernel panic لأن الـ IOMMU driver مش loaded قبل الـ GPU
 
 #### السياق
-جهاز IoT sensor صغير يعمل على STM32MP157 (Cortex-A7 + Cortex-M4). Driver الـ SPI يستخدم DMA لنقل بيانات الحساسات. المطوّر يرى في log:
-
-```
-spi-stm32 4000b000.spi: failed to configure iommu: -19
-```
-
-ويعتقد أن هناك خطأ حقيقي.
+منتج **Android TV box** بيستخدم **Allwinner H616** مع Mali-G31 GPU. الـ engineer بيعمل bring-up لـ Android 13. الـ GPU driver محتاج IOMMU عشان يعمل memory isolation للـ graphics buffers.
 
 #### المشكلة
-المطوّر يجهل الفرق بين "لا يوجد IOMMU" و"فشل IOMMU". الرسالة مُضللة.
+الـ kernel بيعمل panic أثناء الـ boot:
+
+```
+[    3.112] Unable to handle kernel NULL pointer dereference at virtual address 0000000000000018
+[    3.113] Call trace:
+[    3.113]  of_iommu_get_resv_regions+0x44/0xb0
+[    3.114]  iommu_get_resv_regions+0x2c/0x60
+[    3.115]  arm_smmu_probe+0x3a8/0x890
+```
 
 #### التحليل
-على STM32MP1 لا يوجد IOMMU hardware. لذلك `CONFIG_OF_IOMMU=n` والـ stub يُستخدم:
+الـ `of_iommu_get_resv_regions()` المُعرّفة في `of_iommu.h` (والـ implementation في `of_iommu.c`) بتمشي على الـ DT عشان تجيب **reserved memory regions** اللي الـ IOMMU محتاجها:
 
 ```c
-/* المسار المُفعَّل على STM32MP1 — لأن CONFIG_OF_IOMMU غير معرّف */
-static inline int of_iommu_configure(struct device *dev,
-                                     struct device_node *master_np,
-                                     const u32 *id)
+/* of_iommu.c */
+void of_iommu_get_resv_regions(struct device *dev, struct list_head *list)
 {
-    return -ENODEV;  /* طبيعي تماماً — لا يوجد IOMMU */
+    struct device_node *np = dev->of_node;
+    /* بتدوّر على reserved-memory في الـ DT وبتضيفها للـ list */
+    /* لو الـ ops pointer null → NULL deref */
 }
 ```
 
-الـ `of_dma_configure()` في `drivers/of/device.c` تتعامل مع `ENODEV` بشكل خاص:
+الـ panic بييجي لأن الـ IOMMU ops structure اتفعّل قبل ما الـ IOMMU driver نفسه يخلّص الـ init. الـ `of_iommu.h` بتوفّر الـ declaration، لكن الـ implementation بتـ assume إن الـ iommu_ops مش NULL.
 
-```c
-/* من drivers/of/device.c */
-ret = of_iommu_configure(dev, np, id);
-if (ret == -ENODEV) {
-    /*
-     * -ENODEV means no IOMMU configured — not an error.
-     * Continue with direct DMA (physical == virtual addresses).
-     */
-    ret = 0;
-}
-```
-
-إذن الـ `-ENODEV` لا يُوقف الـ probe — هو مسار طبيعي على منصات بدون IOMMU.
-
-الرسالة الخاطئة صادرة من كود في driver الـ SPI نفسه الذي يُسجّلها بمستوى خطأ بدلاً من debug.
-
-#### الحل
-**التحقق السريع أن الـ SPI يعمل رغم الرسالة:**
-
-```bash
-# على الجهاز
-ls /sys/bus/spi/devices/          # هل يظهر spi device؟
-cat /sys/bus/spi/devices/spi0.0/modalias
-# تشغيل اختبار بسيط
-spidev_test -D /dev/spidev0.0 -s 1000000 -p "Hello"
-```
-
-**إسكات الرسالة غير المفيدة في driver SPI بتغيير مستوى الـ log:**
-
-```c
-/* في drivers/spi/spi-stm32.c */
-ret = of_iommu_configure(&spi->dev, np, NULL);
-if (ret && ret != -ENODEV) {
-    /* خطأ حقيقي */
-    dev_err(&spi->dev, "failed to configure iommu: %d\n", ret);
-    return ret;
-} else if (ret == -ENODEV) {
-    /* طبيعي — المنصة بدون IOMMU */
-    dev_dbg(&spi->dev, "no iommu, using direct DMA\n");
-}
-```
-
-**للتمييز بين الحالتين في DT:**
+الترتيب الخاطئ في الـ DT:
 
 ```dts
-/* STM32MP1 — لا توجد iommus property = لا IOMMU = -ENODEV طبيعي */
-spi: spi@4000b000 {
-    compatible = "st,stm32h7-spi";
-    reg = <0x4000b000 0x400>;
-    dmas = <&dmamux1 35 0x400 0x01>,
-           <&dmamux1 36 0x400 0x01>;
-    /* بدون سطر iommus — of_iommu_configure ستُعيد ENODEV */
+/* الـ GPU جاي قبل الـ IOMMU في الـ DT — ده بيأثر على probe order */
+gpu@1800000 {
+    compatible = "allwinner,sun50i-h616-mali";
+    iommus = <&mmu_aw 2>;   /* بيرفر على IOMMU اللي ما اتـ probe دليه */
 };
-```
 
-#### الدرس المستفاد
-الـ stub في `of_iommu.h` يُعيد `ENODEV` كـ "لا يوجد IOMMU" لا كـ "فشل". المهندس يجب أن يميّز هذه الحالة في أي driver يستخدم `of_iommu_configure` بشكل مباشر وألا يُسجّلها كخطأ.
-
----
-
-### السيناريو الرابع: Display Engine يُفسد الذاكرة — Allwinner H616 في صندوق TV
-
-#### العنوان
-**الـ `of_iommu_configure` تُخفق في ربط DE2 بالـ IOMMU** وتُسبب تلوث ذاكرة على Allwinner H616
-
-#### السياق
-صندوق Android TV يعمل على Allwinner H616 (Orange Pi Zero 2). الـ Display Engine 2 (DE2) يرسم الواجهة عبر HDMI. بعد تشغيل فيديو 4K لعدة دقائق، تتجمد الشاشة وتظهر artifacts.
-
-#### المشكلة
-```
-iommu: DMA map for sun50i-de2 overlaps reserved region
-iommu: Failed to map PA=0x5c000000 in domain
-```
-
-#### التحليل
-سلسلة التهيئة عند boot:
-
-```
-sun50i_de2_probe()
-  └─> of_dma_configure(dev, np, true)   [drivers/of/device.c]
-        └─> of_iommu_configure(dev, np, NULL)
-              └─> يقرأ "iommus" من DT لـ DE2 node
-              └─> يربط الجهاز بـ sun50i_iommu driver
-              └─> يُعيد 0 عند النجاح
-```
-
-```c
-/* العملية الكاملة عند CONFIG_OF_IOMMU=y */
-extern int of_iommu_configure(struct device *dev,
-                               struct device_node *master_np,
-                               const u32 *id);
-/*
- * تقرأ "iommus" phandle من master_np
- * تستدعي iommu_ops->of_xlate لتحويل phandle إلى IOMMU SID
- * تربط dev بـ iommu_group المناسب
- */
-```
-
-المشكلة الفعلية: DT يُعرّف `iommus` لـ DE2 لكن `reserved-memory` للـ firmware تتداخل مع نطاق DMA الذي يستخدمه DE2. `of_iommu_get_resv_regions` لم تُعرّف هذه المنطقة كـ `IOMMU_RESV_DIRECT` فحاولت DE2 الكتابة فيها.
-
-**فحص MIS-map:**
-
-```bash
-# قراءة regions المحجوزة
-cat /proc/iomem | grep -i reserved
-# فحص iommu groups
-ls /sys/kernel/iommu_groups/
-cat /sys/kernel/iommu_groups/*/devices
-# تتبع allocations
-cat /sys/kernel/debug/dma-api/dump
+mmu_aw: iommu@30f0000 {
+    compatible = "allwinner,sun50i-h616-iommu";
+};
 ```
 
 #### الحل
-**تصحيح DT لـ H616 — تعريف المنطقة المحجوزة صراحةً:**
+إما ترتيب الـ DT عشان الـ IOMMU يتـ probe أول (الـ kernel بيأخد الـ nodes بالترتيب كأساس):
 
 ```dts
-/* arch/arm64/boot/dts/allwinner/sun50i-h616.dtsi */
-reserved-memory {
-    #address-cells = <2>;
-    #size-cells = <2>;
-    ranges;
-
-    /* منطقة محجوزة للـ secure firmware — يجب أن يعرفها IOMMU */
-    secmon_reserved: secmon@40000000 {
-        reg = <0x0 0x40000000 0x0 0x01000000>;
-        no-map;
-    };
-};
-
-display_engine: display-engine@1000000 {
-    compatible = "allwinner,sun50i-h616-display-engine";
-    iommus = <&iommu 0>;
-    /* تحديد نطاق DMA يتجنب منطقة firmware */
-    dma-ranges = <0x0 0x42000000 0x0 0x3e000000>;
-};
-```
-
-**إضافة `IOMMU_RESV_DIRECT` يدوياً عبر DT:**
-
-```dts
-iommu: iommu@30f0000 {
+/* الـ IOMMU الأول */
+mmu_aw: iommu@30f0000 {
     compatible = "allwinner,sun50i-h616-iommu";
     reg = <0x030f0000 0x10000>;
     #iommu-cells = <1>;
-    /* هذا يجعل of_iommu_get_resv_regions تُضيف المنطقة للقائمة */
+};
+
+gpu@1800000 {
+    compatible = "allwinner,sun50i-h616-mali";
+    iommus = <&mmu_aw 2>;
 };
 ```
 
+أو استخدام `deferred probe` عن طريق التأكد إن الـ driver بيرجع `EPROBE_DEFER` لو الـ IOMMU ما اتـ probe:
+
+```bash
+# تحقق من probe order
+cat /sys/kernel/debug/devices_deferred
+```
+
 #### الدرس المستفاد
-**الـ `of_iommu_configure` و `of_iommu_get_resv_regions` يعملان معاً**: الأولى تربط الجهاز بالـ IOMMU، والثانية تُحدد ما هو محمي. إغفال أي منهما يُفضي إلى تلوث الذاكرة الذي يصعب تشخيصه.
+الـ `of_iommu_get_resv_regions()` في الـ header بتتكلم من سياق الـ device probe. لو الـ IOMMU provider ما اتـ probe لسه، الـ ops تبقى NULL. ترتيب الـ nodes في الـ DTS بيأثر على الـ probe order، والـ driver لازم يتعامل مع `EPROBE_DEFER`.
 
 ---
 
-### السيناريو الخامس: ECU سيارة — AM62x يرفض تحميل driver الـ CAN
+### السيناريو 3: IoT Sensor Hub على STM32MP1 — الـ `CONFIG_OF_IOMMU` مش معموله enable
 
 #### العنوان
-**`CONFIG_OF_IOMMU` غير مُفعَّل في BSP مخصص** يمنع driver الـ CAN من الارتباط بـ IOMMU على AM62x
+الـ stub function في `of_iommu.h` بترجع `-ENODEV` وبتـ block الـ SPI driver من الشغل
 
 #### السياق
-وحدة تحكم إلكترونية (ECU) في سيارة تعمل على Texas Instruments AM62x (Cortex-A53). النظام يشغّل Linux PREEMPT_RT للتحكم في ناقل CAN. المورّد قدّم BSP مخصصاً بـ kernel مُقيَّد. عند تحميل `can-j1939.ko`، الـ DMA transfers تفشل بشكل متقطع.
+**IoT sensor hub** بيستخدم **STM32MP157** بيشغّل buildroot Linux. الـ product بيقرأ من 4 SPI sensors. الـ engineer عمل custom kernel config خفيف جداً عشان يقلل الـ boot time.
 
 #### المشكلة
-```
-mcan: DMA transfer timeout on can0
-mcan: iommu not configured, falling back to coherent allocation
-```
-
-النظام يعمل لكن latency الـ CAN تتجاوز المتطلبات الزمنية الصارمة بسبب الـ fallback إلى `dma_alloc_coherent` بدلاً من الـ streaming DMA عبر IOMMU.
-
-#### التحليل
-BSP المورّد يضبط:
+الـ SPI controller مش بيـ probe:
 
 ```bash
-# في .config المُقدَّم من المورّد
-CONFIG_OF_IOMMU=n      # مُعطَّل لتبسيط الـ build
-CONFIG_IOMMU_SUPPORT=n
+dmesg | grep spi
+# [    1.234] spi-stm32 44009000.spi: error -19 (ENODEV) configuring IOMMU
+# [    1.235] spi-stm32 44009000.spi: probe failed
 ```
 
-لذلك يُستخدم الـ stub:
+Error code `-19` هو `-ENODEV`.
+
+#### التحليل
+لما `CONFIG_OF_IOMMU` مش موجود في الـ `.config`، الـ header بيستخدم الـ **stub inline function**:
 
 ```c
-/* المسار الفعلي بسبب CONFIG_OF_IOMMU=n */
+/* of_iommu.h — الـ stub اللي بتتكلم لما CONFIG_OF_IOMMU=n */
 static inline int of_iommu_configure(struct device *dev,
                                      struct device_node *master_np,
                                      const u32 *id)
 {
-    return -ENODEV;  /* لا IOMMU — DMA مباشر بدون protection */
-}
-
-static inline void of_iommu_get_resv_regions(struct device *dev,
-                                              struct list_head *list)
-{
-    /* لا شيء — القائمة تبقى فارغة */
+    return -ENODEV;   /* دايماً بترجع error */
 }
 ```
 
-الـ MCAN driver يُلاحظ غياب IOMMU وينتقل لاستخدام `consistent memory` الأبطأ، ما يُسبب تجاوز نافذة الـ 1ms المطلوبة في J1939.
+الـ `iommu_probe_device()` في الـ IOMMU core بتكلم `of_iommu_configure()` وبتتعامل مع الـ return value. بعض الـ kernel versions بتعتبر `-ENODEV` يعني "مفيش IOMMU مطلوب" وبتكمّل، بس في الـ STM32MP1 الـ SPI driver نفسه كان بيعمل explicit check:
 
-**قياس الـ latency:**
-
-```bash
-# على الجهاز المُشغَّل
-cyclictest -p 90 -t1 -n -i 1000 -l 10000
-# فحص iommu status
-dmesg | grep iommu
-cat /sys/class/iommu/*/enabled 2>/dev/null || echo "no iommu sysfs"
+```c
+/* في stm32_spi_probe() */
+ret = iommu_probe_device(dev);
+if (ret && ret != -ENODEV) {
+    dev_err(dev, "error %d configuring IOMMU\n", ret);
+    return ret;
+}
+/* المشكلة: الـ condition الغلطانة — كان المفروض يكون (ret < 0 && ret != -ENODEV) */
 ```
 
 #### الحل
-**الخطوة 1:** إعادة تفعيل IOMMU في kernel config:
+الـ fix بييجي على مستويين:
+
+**1. الـ kernel config** — إما تفعّل `CONFIG_OF_IOMMU=y` لو الـ SoC بيدعمه:
 
 ```bash
-# إضافة إلى kernel .config
-CONFIG_IOMMU_SUPPORT=y
+# في menuconfig
 CONFIG_OF_IOMMU=y
-CONFIG_TI_K3_IOMMU=y        # IOMMU driver لـ AM62x
-CONFIG_IOMMU_DMA=y
+CONFIG_ARM_SMMU=y   # أو الـ driver المناسب لـ STM32MP1
 ```
 
-**الخطوة 2:** التحقق من DT لـ MCAN node:
+**2. أو صلّح الـ driver check** عشان يتعامل صح مع `-ENODEV`:
 
-```dts
-/* arch/arm64/boot/dts/ti/k3-am625-sk.dts */
-&main_mcan0 {
-    status = "okay";
-    pinctrl-names = "default";
-    pinctrl-0 = <&main_mcan0_pins_default>;
-    phys = <&transceiver0>;
-    /* ربط MCAN بـ IOMMU للسماح بـ streaming DMA */
-    iommus = <&main_iommu0 0x0c40>;
-};
-```
-
-**الخطوة 3:** التحقق بعد التطبيق:
-
-```bash
-# التحقق أن of_iommu_configure نجحت
-dmesg | grep -E "mcan|iommu" | head -20
-# يجب أن يظهر:
-# iommu: Adding device 2701000.can to group 5
-
-# قياس latency بعد التصحيح
-./can_timing_test --iface can0 --period 1ms --count 1000
-```
-
-**الخطوة 4:** إذا كان تفعيل IOMMU كاملاً غير ممكن (قيود BSP)، استخدام `iommu=pt` للـ passthrough كحل وسط:
-
-```bash
-# في bootargs — IOMMU passthrough يُبقي الـ API يعمل بدون translation overhead
-BOOT_ARGS="console=ttyS2,115200 iommu=pt"
+```c
+ret = iommu_probe_device(dev);
+if (ret == -ENODEV)
+    ret = 0;  /* مفيش IOMMU = مش error */
+if (ret) {
+    dev_err(dev, "IOMMU error %d\n", ret);
+    return ret;
+}
 ```
 
 #### الدرس المستفاد
-على أنظمة real-time كـ ECU، الانتقال الصامت من IOMMU streaming DMA إلى coherent memory (بسبب `of_iommu_configure` تُعيد `ENODEV`) يُكسر المتطلبات الزمنية. **الـ `CONFIG_OF_IOMMU`** يجب أن يكون جزءاً من checklist الـ real-time BSP، وليس مجرد feature اختياري.
+الـ stub في `of_iommu.h` موجودة عشان الـ code يـ compile بدون IOMMU support، بس الـ `-ENODEV` اللي بترجعه **مش دايماً معناها مش محتاج** — بعض الـ drivers بتـ misinterpret الـ return code. الـ engineer لازم يفرّق بين "مفيش IOMMU" و"حصل error".
+
+---
+
+### السيناريو 4: Automotive ECU على i.MX8QM — الـ reserved regions مش بتتـ map صح
+
+#### العنوان
+الـ `of_iommu_get_resv_regions()` مش بتجيب الـ firmware reserved memory على i.MX8QM
+
+#### السياق
+**automotive ECU** بيستخدم **NXP i.MX8QM** بيشغّل Linux مع AUTOSAR بجانبه على cores تانية. الـ SCU (System Control Unit) بتحجز regions في الـ memory عشان الـ firmware. الـ Linux IOMMU لازم يعرف بيها عشان ما يـ mapش فوقيها.
+
+#### المشكلة
+الـ camera ISP driver بيـ crash لأنه بيحاول يـ map address فيه firmware data:
+
+```
+[    5.678] arm-smmu-v3 51400000.iommu: fault on device: 1 on address 0x88000000
+[    5.679] iommu fault: page fault
+```
+
+#### التحليل
+الـ `of_iommu_get_resv_regions()` بتـ read الـ reserved regions من الـ DT:
+
+```c
+/* of_iommu.c */
+void of_iommu_get_resv_regions(struct device *dev, struct list_head *list)
+{
+    /* بتدوّر على nodes من نوع:
+       - memory-region
+       - no-map
+       - iommu-addresses
+    */
+}
+```
+
+الـ DT على i.MX8QM كان ناقصه `iommu-addresses` للـ SCU reserved region:
+
+```dts
+/* قبل التعديل */
+reserved-memory {
+    #address-cells = <2>;
+    #size-cells = <2>;
+
+    scu_reserved: scu@88000000 {
+        reg = <0x0 0x88000000 0x0 0x200000>;
+        no-map;
+        /* مفيش iommu-addresses — of_iommu_get_resv_regions مش بتشوفها */
+    };
+};
+
+isp: isp@58000000 {
+    compatible = "nxp,imx8qm-isi";
+    /* مفيش ربط بين الـ ISP وأي reserved region */
+};
+```
+
+الـ `of_iommu_get_resv_regions()` اتكلمت من سياق الـ ISP device probe، بس ما لقتش `iommu-addresses` في الـ ISP node ولا في الـ reserved memory nodes، فما أضافتش أي region للـ list.
+
+#### الحل
+
+```dts
+reserved-memory {
+    #address-cells = <2>;
+    #size-cells = <2>;
+
+    scu_reserved: scu@88000000 {
+        reg = <0x0 0x88000000 0x0 0x200000>;
+        no-map;
+    };
+};
+
+isp: isp@58000000 {
+    compatible = "nxp,imx8qm-isi";
+    iommus = <&smmu 0x4>;
+    /* إضافة iommu-addresses عشان of_iommu_get_resv_regions تلاقيها */
+    iommu-addresses = <&scu_reserved 0x0 0x88000000 0x0 0x200000>;
+};
+```
+
+```bash
+# تحقق إن الـ regions اتـ register
+cat /sys/kernel/debug/iommu/devices/isp@58000000/reserved_regions
+```
+
+#### الدرس المستفاد
+الـ `of_iommu_get_resv_regions()` بتشتغل على المعلومات اللي في الـ DT **بس**. لو الـ firmware أو الـ bootloader حجز memory بس ما ذكرهاش في الـ DT كـ `iommu-addresses`، الـ kernel مش هيعرف بيها والـ IOMMU هيسمح بالـ map فيها — وده بيأدي لـ corruption أو fault.
+
+---
+
+### السيناريو 5: Custom Board Bring-Up على AM62x — الـ IOMMU configure بيفشل صامت
+
+#### العنوان
+الـ `of_iommu_configure()` بترجع success بس الـ device مش داخل أي IOMMU domain فعلي
+
+#### السياق
+فريق بيعمل bring-up لـ custom board مبنية على **TI AM62x** (AM6254). الـ board بتستخدم الـ onboard **CPSW Ethernet** controller. الـ TI SDK بيستخدم IOMMU (TISCI-based) عشان يعمل isolation للـ networking subsystem.
+
+#### المشكلة
+الـ Ethernet يشتغل عادي، بس الـ security audit لقى إن الـ CPSW مش واقع تحت أي IOMMU domain رغم إن الـ kernel config فيه `CONFIG_OF_IOMMU=y` و `CONFIG_TI_IOMMU=y`:
+
+```bash
+cat /sys/kernel/debug/iommu/devices/*/domain
+# مفيش الـ CPSW في القائمة
+```
+
+#### التحليل
+الـ `of_iommu_configure()` اتكلمت بنجاح (رجعت 0)، بس الـ IOMMU ما اتـ attachش فعلاً. السبب: في الـ AM62x DTS اللي ورثوه من الـ TI reference design، الـ `iommus` property كانت موجودة بس بـ `status = "disabled"` على الـ IOMMU node نفسه:
+
+```dts
+/* am62x.dtsi — الـ base file من TI */
+main_navss_iommu: iommu@30f00000 {
+    compatible = "ti,am654-iommu";
+    reg = <0x00 0x30f00000 0x00 0x100>;
+    status = "disabled";   /* ← معمول disable في الـ base! */
+    #iommu-cells = <4>;
+};
+
+cpsw: ethernet@8000000 {
+    compatible = "ti,am642-cpsw-nuss";
+    iommus = <&main_navss_iommu 0 1 1 1>;
+};
+```
+
+لما الـ `of_iommu_configure()` بتشتغل، بتكلم:
+
+```c
+int of_iommu_configure(struct device *dev, struct device_node *master_np,
+                       const u32 *id)
+{
+    /* بتـ lookup الـ IOMMU provider */
+    iommu_np = of_parse_phandle(master_np, "iommus", 0);
+    /* لو الـ node موجود بس status=disabled → الـ provider مش registered */
+    /* الـ function بترجع -EPROBE_DEFER أو -ENODEV بدون error واضح */
+}
+```
+
+بما إن الـ IOMMU node نفسه `disabled`، الـ driver ما اتـ probe أصلاً، والـ ops ما اتـ register، والـ `of_iommu_configure()` رجعت بهدوء.
+
+#### الحل
+في الـ board-specific DTS overlay:
+
+```dts
+/* am62x-custom-board.dts */
+#include "am62x.dtsi"
+
+/* تفعيل الـ IOMMU */
+&main_navss_iommu {
+    status = "okay";   /* ← ده بس اللي كان ناقص */
+};
+```
+
+```bash
+# بعد التعديل
+dmesg | grep iommu
+# [    1.890] ti,am654-iommu 30f00000.iommu: registered
+
+cat /sys/kernel/debug/iommu/devices/ethernet@8000000/domain
+# 30f00000.iommu:domain-0
+```
+
+#### الدرس المستفاد
+الـ `of_iommu_configure()` بتـ depend على إن الـ IOMMU provider node يكون `status = "okay"` وإن الـ driver بتاعه اتـ probe بنجاح. الـ header بيكشف الـ API فقط — الـ silent failure بييجي من الـ DT configuration مش من الـ code. في الـ board bring-up، دايماً افحص `status` في الـ IOMMU node الـ base قبل ما تفترض إن الـ IOMMU شغال.
 ## Phase 7: مصادر ومراجع
+
+---
 
 ### مقالات LWN.net
 
-الـ LWN.net هو المرجع الأول لمتابعة تطور kernel Linux، وفيما يلي أهم المقالات المتعلقة بـ `of_iommu` والـ IOMMU بشكل عام:
+**LWN.net** هو المرجع الأول لمتابعة تطور kernel subsystems. الروابط دي اتأكدت من نتائج البحث الفعلية:
 
-| المقال | الوصف |
-|--------|-------|
-| [ARM: DMA-mapping & IOMMU integration](https://lwn.net/Articles/444700/) | التكامل الأولي بين DMA mapping وطبقة IOMMU على ARM — مهم لفهم أصول `of_iommu` |
-| [Exynos SYSMMU: DT and DMA-mapping subsystem](https://lwn.net/Articles/607626/) | سلسلة patches تُظهر كيف يُستخدم device tree لربط IOMMU بالأجهزة على Exynos SoC |
-| [Add NVIDIA Tegra124 IOMMU support](https://lwn.net/Articles/603810/) | مثال عملي على generic DT bindings للـ IOMMU في Tegra — يُوضح كيف تعمل `iommus` property |
-| [Apple M1 DART IOMMU driver](https://lwn.net/Articles/849969/) | driver حديث يعتمد على `of_iommu` و DT bindings لـ IOMMU مخصص |
-| [Introduce /dev/iommu for userspace I/O address space management](https://lwn.net/Articles/869818/) | مقترح IOMMUFD — يُعيد تصميم واجهة IOMMU للمستخدم، خلفية مهمة |
-| [Linux RISC-V IOMMU Support](https://lwn.net/Articles/972035/) | أحدث تطبيق لـ IOMMU مع DT bindings على معمارية RISC-V |
-| [KS2012: ARM: DMA mapping](https://lwn.net/Articles/513939/) | ملخص نقاش kernel summit حول دمج IOMMU مع DMA mapping على ARM |
-| [A new DMA-mapping API](https://lwn.net/Articles/1020437/) | اقتراح API جديد يُحسّن مسار IOMMU في DMA mapping |
-| [mm: iommu: An API to unify IOMMU, CPU and device memory management](https://lwn.net/Articles/395142/) | مقال مبكر يناقش توحيد إدارة الذاكرة عبر IOMMU |
-
----
-
-### التوثيق الرسمي في kernel (`Documentation/`)
-
-```
-Documentation/core-api/dma-api.rst          # واجهة DMA mapping الكاملة
-Documentation/core-api/dma-api-howto.rst    # دليل عملي لاستخدام DMA API
-Documentation/driver-api/iommu.rst          # توثيق IOMMU subsystem
-Documentation/driver-api/iommufd.rst        # IOMMUFD — الواجهة الحديثة
-Documentation/devicetree/bindings/iommu/    # DT bindings لمختلف IOMMU controllers
-Documentation/arch/x86/iommu.rst            # دعم IOMMU على x86 (Intel VT-d / AMD-Vi)
-```
-
-الـ bindings المباشرة ذات الصلة:
-
-```
-Documentation/devicetree/bindings/iommu/iommu.txt
-Documentation/devicetree/bindings/iommu/arm,smmu.yaml
-Documentation/devicetree/bindings/iommu/arm,smmu-v3.yaml
-```
+| المقال | الأهمية |
+|--------|---------|
+| [mm: iommu: An API to unify IOMMU, CPU and device memory management](https://lwn.net/Articles/395142/) | الأساس النظري لـ IOMMU API في الـ kernel |
+| [Add NVIDIA Tegra124 IOMMU support](https://lwn.net/Articles/603810/) | مثال عملي لـ `of_iommu_configure` مع device tree bindings |
+| [Exynos SYSMMU (IOMMU) integration with DT and DMA-mapping subsystem](https://lwn.net/Articles/607626/) | تكامل IOMMU مع device tree و DMA-mapping — مثال مباشر لـ `of_iommu` |
+| [Apple M1 DART IOMMU driver](https://lwn.net/Articles/849968/) | driver حديث بيستخدم device tree لتكوين IOMMU |
+| [Linux RISC-V IOMMU Support](https://lwn.net/Articles/972035/) | تطبيق IOMMU على معمارية جديدة بـ device tree bindings |
+| [IOMMU user API enhancement](https://lwn.net/Articles/824306/) | تطور الـ API للـ userspace |
+| [Introduce /dev/iommu for userspace I/O address space management](https://lwn.net/Articles/869818/) | مستقبل إدارة IOMMU من userspace |
+| [vfio/mdev: IOMMU aware mediated device](https://lwn.net/Articles/780522/) | استخدام IOMMU في سياق الـ virtualization |
 
 ---
 
-### ملفات المصدر الأساسية في kernel
+### توثيق الـ Kernel الرسمي
 
-الملفات التي يجب قراءتها لفهم `of_iommu` بشكل كامل:
+الملفات دي موجودة في source tree مباشرةً:
 
 ```
-include/linux/of_iommu.h       # الملف الرئيسي — الواجهة العامة
-drivers/iommu/of_iommu.c       # التنفيذ الكامل لـ of_iommu_configure()
-drivers/iommu/iommu.c          # IOMMU core — iommu_probe_device() وما يليها
-include/linux/iommu.h          # تعريفات iommu_ops و iommu_fwspec و iommu_group
-include/linux/of.h             # Device Tree core API
+Documentation/devicetree/bindings/iommu/iommu.txt   ← DT bindings للـ iommus property
+Documentation/driver-api/iommu.rst                  ← IOMMU subsystem API
+Documentation/admin-guide/kernel-parameters.txt     ← iommu= parameters
+Documentation/userspace-api/iommufd.rst             ← IOMMUFD user API
 ```
+
+**الـ** kernel documentation على الويب:
+- [IOMMU DT Bindings](https://www.kernel.org/doc/Documentation/devicetree/bindings/iommu/iommu.txt) — بيشرح الـ `iommus` property اللي `of_iommu_configure` بتقراها
+- [x86 IOMMU Support](https://docs.kernel.org/arch/x86/iommu.html) — مرجع للمقارنة مع platform-agnostic approach
+- [IOMMUFD Documentation](https://static.lwn.net/kerneldoc/userspace-api/iommufd.html) — الاتجاه الحديث
 
 ---
 
-### Commits بارزة في تاريخ `of_iommu`
+### Source Files المهمة في الـ Kernel
 
-يمكن البحث عن هذه الـ commits في [git.kernel.org](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git) أو عبر `git log --all --grep`:
+الملفات دي مترابطة مباشرةً بـ `of_iommu.h`:
 
-| التغيير | الدلالة |
-|---------|---------|
-| **تقديم `of_iommu_configure()`** | الدالة الأساسية التي تربط DT node بـ IOMMU driver |
-| **إضافة `of_iommu_get_resv_regions()`** | دعم المناطق المحجوزة (reserved regions) من DT |
-| **v6.8: "Do not return struct iommu_ops from of_iommu_configure()"** | إعادة هيكلة — الـ probe يعتمد على `iommu_fwspec` لا على ops مباشرة ([مصدر](https://lore.kernel.org/lkml/ZZ6JNzDHy8-i0-VU@8bytes.org/)) |
-| **v6.8: "Use -ENODEV consistently in of_iommu_configure()"** | توحيد قيم الخطأ في مسارات الـ probe |
+```
+include/linux/of_iommu.h          ← الملف الأساسي (موضوع الدراسة)
+drivers/iommu/of_iommu.c          ← التنفيذ الكامل لـ of_iommu_configure و of_iommu_get_resv_regions
+drivers/iommu/iommu.c             ← IOMMU core subsystem
+include/linux/iommu.h             ← iommu_ops struct و core API
+drivers/iommu/Kconfig             ← CONFIG_OF_IOMMU و dependencies
+```
 
-للبحث عن commits مباشرة:
+**على GitHub:**
+- [drivers/iommu/of_iommu.c](https://github.com/torvalds/linux/blob/master/drivers/iommu/of_iommu.c)
+- [drivers/iommu/iommu.c](https://github.com/torvalds/linux/blob/master/drivers/iommu/iommu.c)
+- [drivers/iommu/Kconfig](https://github.com/torvalds/linux/blob/master/drivers/iommu/Kconfig)
 
+---
+
+### Kernel Commits المهمة
+
+**الـ** commits دي شكّلت الـ `of_iommu` subsystem:
+
+| الـ Commit | الوصف |
+|-----------|-------|
+| [`8b0b0a0`](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/log/drivers/iommu/of_iommu.c) | تاريخ ملف `of_iommu.c` كامل عبر `git log` |
+| [IOMMU of_iommu initial integration](https://lkml.org/) | البحث في LKML عن `of_iommu_configure` يطلع الـ patch series الأصلية |
+
+للحصول على الـ commits الفعلية:
 ```bash
-git log --oneline -- drivers/iommu/of_iommu.c
-git log --oneline -- include/linux/of_iommu.h
+git log --oneline drivers/iommu/of_iommu.c
+git log --oneline include/linux/of_iommu.h
 ```
 
 ---
 
-### نقاشات mailing list
+### Mailing List — نقاشات LKML
 
-- **[git pull] IOMMU Updates for Linux v6.8** — [lore.kernel.org](https://lore.kernel.org/lkml/ZZ6JNzDHy8-i0-VU@8bytes.org/) — يشمل إعادة هيكلة `of_iommu_configure()`
-- **[git pull] IOMMU Updates for Linux v5.14** — [lore.kernel.org](https://lore.kernel.org/lkml/YN7IDbKZFQnYFCNq@8bytes.org/) — تغييرات core في طريقة probe الأجهزة
-- **[PATCH 00/29] Exynos SYSMMU DT integration** — [lore.kernel.org](https://lore.kernel.org/all/?t=20240110130946) — نقاش مُفصَّل عن DT bindings
-- للبحث عن نقاشات أحدث: [lore.kernel.org/iommu](https://lore.kernel.org/iommu/)
+- **[LKML Archive](https://lkml.org/)** — ابحث عن `of_iommu_configure` أو `CONFIG_OF_IOMMU`
+- **[Patchwork — IOMMU](https://patchwork.kernel.org/project/linux-iommu/list/)** — patches الـ iommu subsystem الرسمية
+- **Lore Kernel** — `https://lore.kernel.org/linux-iommu/` — أرشيف كامل لـ mailing list الـ iommu
+
+نقاشات مهمة ابحث عنها:
+- `[PATCH] iommu/of: Add of_iommu_get_resv_regions`
+- `[PATCH] of/iommu: Add OF_IOMMU Kconfig option`
+- `[PATCH] iommu: Add of_iommu_configure() for platform devices`
 
 ---
 
-### kernelnewbies.org — تغييرات IOMMU عبر إصدارات kernel
+### Kernelnewbies.org — تطور IOMMU عبر الإصدارات
+
+**الـ** kernelnewbies بيوثق التغييرات في كل إصدار kernel:
 
 | الإصدار | التغيير المتعلق بـ IOMMU |
 |---------|--------------------------|
-| [Linux 5.3](https://kernelnewbies.org/Linux_5.3) | إضافة virtio-iommu driver |
-| [Linux 5.13](https://kernelnewbies.org/Linux_5.13) | stall support في SMMUv3 + I/O Page Fault handler |
-| [Linux 5.16](https://kernelnewbies.org/Linux_5.16) | تحسينات IOMMUFD وdirty tracking |
-| [Linux 6.3](https://kernelnewbies.org/Linux_6.3) | تحديثات IOMMU core |
-| [Linux 6.7](https://kernelnewbies.org/Linux_6.7) | IOMMUFD Dirty Tracking للـ VM migration |
-| [Linux 6.8](https://kernelnewbies.org/Linux_6.8) | إعادة هيكلة `of_iommu_configure()` وإزالة bus_ops |
-| [Linux 6.11](https://kernelnewbies.org/Linux_6.11) | IO page fault delivery إلى userspace عبر IOMMUFD |
-| [Linux 6.13](https://kernelnewbies.org/Linux_6.13) | vIOMMU infrastructure + SMMUv3 nested translation |
+| [Linux 5.3](https://kernelnewbies.org/Linux_5.3) | إضافة `virtio-iommu` driver — para-virtualized IOMMU |
+| [Linux 5.16](https://kernelnewbies.org/Linux_5.16) | تحسينات IOMMU subsystem |
+| [Linux 6.2](https://kernelnewbies.org/Linux_6.2) | إضافة `iommufd` — user API جديد لإدارة IO page tables |
+| [Linux 6.3](https://kernelnewbies.org/Linux_6.3) | تطوير IOMMU nested translation |
+| [Linux 6.7](https://kernelnewbies.org/Linux_6.7) | دعم dirty tracking عبر IOPTEs للـ VM migration |
+| [Linux 6.11](https://kernelnewbies.org/Linux_6.11) | IO page fault delivery لـ userspace عبر IOMMUFD |
 
 ---
 
-### elinux.org — موارد embedded
+### eLinux.org — IOMMU في الـ Embedded Linux
 
-- [R-Car IO-Virtualization](https://elinux.org/R-Car/IO-Virtualization) — مثال عملي على استخدام IOMMU مع VFIO في أنظمة embedded (Renesas R-Car SoCs)
-- [Device Drivers Presentations](https://elinux.org/Device_Drivers_Presentations) — عروض تشمل DMA و IOMMU integration في embedded Linux
-- [Linux Kernel Resources](https://elinux.org/Linux_Kernel_Resources) — فهرس شامل لمصادر kernel development
+**الـ** [Device Drivers Presentations](https://elinux.org/Device_Drivers_Presentations) على eLinux.org بتشمل:
+- عرض Laurent Pinchart (Renesas) عن DMA API و IOMMU integration
+- [Linux Kernel Resources](https://elinux.org/Linux_Kernel_Resources) — مصادر عامة للـ kernel subsystems
+
+للـ embedded platforms المهتمة بـ `of_iommu`:
+- [BeagleBoard DSP Clarification](https://elinux.org/BeagleBoard/DSP_Clarification) — IOMMU في سياق OMAP/DSP
 
 ---
 
-### كتب موصى بها
+### كتب مرجعية
 
-#### Linux Device Drivers (LDD3)
-- **الفصل 15: Memory Mapping and DMA** — [PDF مجاني](https://static.lwn.net/images/pdf/LDD3/ch15.pdf)
-- يغطي: DMA mapping، scatter-gather، bus addresses مقابل virtual addresses
-- الأساس النظري لفهم لماذا يُحتاج إلى IOMMU من منظور driver developer
+#### Linux Device Drivers 3rd Edition (LDD3)
+- **الفصل 15: Memory Mapping and DMA** — بيشرح DMA addressing و IOMMU role
+- متاح مجاناً: [https://lwn.net/Kernel/LDD3/](https://lwn.net/Kernel/LDD3/)
+- أهم sections: `dma_map_single`, `dma_set_mask`, DMA coherency
 
-#### Linux Kernel Development — Robert Love (الطبعة الثالثة)
-- **الفصل 15: The Process Address Space** — فهم memory management
-- **الفصل 19: Portability** — يذكر اختلافات DMA بين المعماريات
-- مرجع ممتاز للـ kernel internals بشكل عام
+#### Linux Kernel Development — Robert Love (3rd Edition)
+- **الفصل 19: Portability** — device abstraction و platform independence
+- **الفصل 12: Memory Management** — virtual/physical address mapping
+- الكتاب بيرسم الصورة الكاملة للـ kernel architecture اللي `of_iommu` جزء منها
 
-#### Embedded Linux Primer — Christopher Hallinan
-- الفصول المتعلقة بـ device tree و platform buses
-- يشرح كيف تُربط الأجهزة ببعضها في SoCs المضمنة — سياق مباشر لفهم `of_iommu`
+#### Embedded Linux Primer — Christopher Hallinan (2nd Edition)
+- **الفصل 7: Bootloaders** — Device Tree و `iommus` property
+- **الفصل 14: Device Drivers** — platform drivers و DT integration
+- مهم لفهم كيف `of_iommu_configure` بتُستدعى أثناء الـ boot
 
 #### Professional Linux Kernel Architecture — Wolfgang Mauerer
-- يغطي memory subsystem بعمق أكبر من LDD3
+- **الفصل 18: Page Tables** — address translation concepts مرتبطة بـ IOMMU
+- بيشرح الفرق بين CPU MMU و IOMMU
 
 ---
 
-### وثائق kernel الرسمية على الإنترنت
+### مصادر إضافية
 
-- [IOMMU Subsystem — docs.kernel.org](https://docs.kernel.org/driver-api/iommu.html)
-- [IOMMUFD — docs.kernel.org](https://docs.kernel.org/userspace-api/iommufd.html)
-- [DMA API — docs.kernel.org](https://docs.kernel.org/core-api/dma-api.html)
-- [x86 IOMMU Support — docs.kernel.org](https://docs.kernel.org/arch/x86/iommu.html)
-- [An Introduction to IOMMU Infrastructure — Lenovo Press](https://lenovopress.lenovo.com/lp1467-an-introduction-to-iommu-infrastructure-in-the-linux-kernel)
+#### Lenovo Press — Technical Paper
+- [An Introduction to IOMMU Infrastructure in the Linux Kernel](https://lenovopress.lenovo.com/lp1467-an-introduction-to-iommu-infrastructure-in-the-linux-kernel) — شرح شامل للـ IOMMU infrastructure مع أمثلة عملية
+- [PDF version](https://lenovopress.lenovo.com/lp1467.pdf)
+
+#### Kernel Documentation Online
+- [x86 Intel IOMMU](https://www.kernel.org/doc/html/v5.8/x86/intel-iommu.html) — مرجع implementation reference
 
 ---
 
-### مصطلحات البحث
+### Search Terms للبحث عن معلومات أكثر
 
-للعثور على معلومات إضافية استخدم هذه المصطلحات:
+استخدم الـ search terms دي للحصول على نتائج دقيقة:
 
 ```
-of_iommu_configure
-iommu_fwspec linux kernel
-iommu_ops probe_device
-linux device tree iommu-map property
-iommus phandle device tree binding
+# للبحث في LKML
+site:lore.kernel.org of_iommu_configure
+site:lkml.org "of_iommu_get_resv_regions"
+
+# للبحث عن DT bindings
+"iommus" "iommu-map" device tree binding linux
+
+# للبحث عن implementations
+of_iommu_configure platform_device ARM SMMU
 CONFIG_OF_IOMMU linux kernel
-ARM SMMU device tree binding
-iommu_group linux kernel internals
-of_iommu_get_resv_regions
-linux iommu reserved regions
-iommu bus_ops removal v6.8
+
+# للبحث عن commits
+git.kernel.org of_iommu.c history
+github torvalds linux of_iommu
+
+# للبحث عن articles
+lwn.net "iommu_ops" device tree ARM SMMU
+lwn.net of_iommu platform bus IOMMU configure
 ```
 
 ---
 
-### ملخص سريع للمسار التعليمي
+### خريطة الـ Subsystems المرتبطة
 
 ```
-LDD3 ch15 (DMA basics)
-        ↓
-lwn.net/Articles/444700 (ARM DMA+IOMMU integration)
-        ↓
-Documentation/driver-api/iommu.rst
-        ↓
-drivers/iommu/of_iommu.c  ←  include/linux/of_iommu.h
-        ↓
-Documentation/devicetree/bindings/iommu/
-        ↓
-lwn.net/Articles/869818 (IOMMUFD — المستقبل)
+of_iommu.h
+    │
+    ├── OF (Open Firmware / Device Tree)
+    │       Documentation/devicetree/bindings/iommu/
+    │
+    ├── IOMMU Core
+    │       Documentation/driver-api/iommu.rst
+    │       include/linux/iommu.h
+    │
+    ├── DMA Mapping
+    │       Documentation/core-api/dma-api.rst
+    │       include/linux/dma-mapping.h
+    │
+    └── Platform Bus
+            Documentation/driver-api/driver-model/platform.rst
 ```
+
+كل subsystem من دول عنده مصادره الخاصة — الـ `of_iommu` هو نقطة التقاطع بينهم.
 ## Phase 8: Writing simple module
 
 ### الفكرة
 
-**`of_iommu_configure()`** هي الدالة الأنسب للـ hook — تُستدعى في كل مرة يحاول فيها الكرنل ربط جهاز (device) بـ IOMMU عبر Device Tree، وهذا يعني أنها تُغطي كل أجهزة النظام التي تحتاج عزل DMA. سنستخدم **kprobe** لاعتراضها وطباعة اسم الجهاز واسم device_node.
+الـ header الـ `of_iommu.h` بيعرف فانكشنين exported هما `of_iommu_configure` و `of_iommu_get_resv_regions`. الأنسب للـ hook هو **`of_iommu_configure`** لأنه بيتكلم كل ما device بتحاول تتربط بـ IOMMU عبر Device Tree — ده نقطة حيوية لمراقبة أي device بيدخل تحت حماية IOMMU.
+
+هنستخدم **kprobe** لأن `of_iommu_configure` فانكشن عادية exported وملهاش notifier خاص بيها.
 
 ---
 
@@ -2308,126 +1899,76 @@ lwn.net/Articles/869818 (IOMMUFD — المستقبل)
 
 ```c
 // SPDX-License-Identifier: GPL-2.0
+#include <linux/module.h>       /* MODULE_LICENSE, module_init/exit */
+#include <linux/kprobes.h>      /* kprobe, register_kprobe, pre_handler */
+#include <linux/device.h>       /* struct device, dev_name() */
+#include <linux/of.h>           /* struct device_node, of_node_full_name() */
+#include <linux/printk.h>       /* pr_info */
+
 /*
- * kprobe on of_iommu_configure()
- * Prints device name and DT node name each time a device is
- * being bound to an IOMMU via the Open Firmware / Device Tree path.
+ * pre_handler: called just before of_iommu_configure() executes.
+ * Arguments mirror of_iommu_configure(dev, master_np, id):
+ *   regs->di  (x86-64 rdi) = dev
+ *   regs->si  (x86-64 rsi) = master_np
+ *   regs->dx  (x86-64 rdx) = id
+ *
+ * We cast them out of pt_regs using the standard kprobe ABI helpers.
  */
-
-/* --- includes --- */
-#include <linux/kernel.h>   /* pr_info, pr_err */
-#include <linux/module.h>   /* MODULE_* macros, module_init/exit */
-#include <linux/kprobes.h>  /* struct kprobe, register_kprobe */
-#include <linux/device.h>   /* struct device, dev_name() */
-#include <linux/of.h>       /* struct device_node */
-
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Arabic Kernel Learner");
-MODULE_DESCRIPTION("kprobe demo: trace of_iommu_configure() calls");
-
-/* -----------------------------------------------------------
- * kprobe pre-handler
- * Called just BEFORE of_iommu_configure() executes.
- *
- * Signature of the hooked function:
- *   int of_iommu_configure(struct device *dev,
- *                          struct device_node *master_np,
- *                          const u32 *id);
- *
- * On x86-64 the arguments arrive in:
- *   regs->di  -> dev        (1st arg)
- *   regs->si  -> master_np  (2nd arg)
- *   regs->dx  -> id         (3rd arg)
- *
- * On ARM64:
- *   regs->regs[0] -> dev
- *   regs->regs[1] -> master_np
- *   regs->regs[2] -> id
- * We use regs_get_kernel_argument() which is arch-independent.
- * ----------------------------------------------------------- */
-static int handler_pre(struct kprobe *p, struct pt_regs *regs)
+static int of_iommu_configure_pre(struct kprobe *p, struct pt_regs *regs)
 {
-    /* Retrieve raw pointer values from CPU registers */
-    struct device      *dev       = (struct device *)
-                                    regs_get_kernel_argument(regs, 0);
-    struct device_node *master_np = (struct device_node *)
-                                    regs_get_kernel_argument(regs, 1);
-    const u32          *id        = (const u32 *)
-                                    regs_get_kernel_argument(regs, 2);
+    /*
+     * نجيب البوينترات من الـ registers حسب calling convention x86-64:
+     * rdi → أول argument (dev), rsi → تاني (master_np), rdx → تالت (id)
+     */
+    struct device      *dev       = (struct device *)regs->di;
+    struct device_node *master_np = (struct device_node *)regs->si;
+    const u32          *id        = (const u32 *)regs->dx;
 
-    /* Guard against NULL — can happen during early probe paths */
-    if (!dev || !master_np)
-        return 0;
+    /* نتأكد إن البوينترات مش NULL قبل ما نقرأ منهم */
+    const char *dev_name_str = dev       ? dev_name(dev)                 : "(null)";
+    const char *np_name      = master_np ? of_node_full_name(master_np)  : "(null)";
 
-    pr_info("of_iommu_configure: dev=\"%s\"  dt_node=\"%s\"  stream_id=%s(%u)\n",
-            dev_name(dev),          /* human-readable device name    */
-            master_np->full_name,   /* full DT path, e.g. /soc/eth0  */
-            id ? "" : "(none) ",    /* stream-id present?            */
-            id ? *id : 0);
+    if (id)
+        pr_info("of_iommu_configure: dev=%s node=%s id=0x%x\n",
+                dev_name_str, np_name, *id);
+    else
+        pr_info("of_iommu_configure: dev=%s node=%s id=(null)\n",
+                dev_name_str, np_name);
 
-    return 0; /* returning 0 lets the real function execute normally */
+    return 0; /* 0 = استمر في تنفيذ الفانكشن الأصلية */
 }
 
-/* -----------------------------------------------------------
- * kprobe descriptor
- * symbol_name tells the kernel which function to hook;
- * pre_handler is called before the first instruction runs.
- * ----------------------------------------------------------- */
+/* تعريف الـ kprobe وربطه بالفانكشن المستهدفة بالاسم */
 static struct kprobe kp = {
     .symbol_name = "of_iommu_configure",
-    .pre_handler = handler_pre,
+    .pre_handler = of_iommu_configure_pre,
 };
 
-/* --- module init --- */
 static int __init of_iommu_probe_init(void)
 {
     int ret;
 
     ret = register_kprobe(&kp);
     if (ret < 0) {
-        pr_err("of_iommu_kprobe: register_kprobe failed: %d\n", ret);
+        pr_err("of_iommu_probe: register_kprobe failed: %d\n", ret);
         return ret;
     }
-
-    pr_info("of_iommu_kprobe: hooked of_iommu_configure at %p\n",
-            kp.addr);
+    pr_info("of_iommu_probe: hooked of_iommu_configure at %p\n", kp.addr);
     return 0;
 }
 
-/* --- module exit --- */
 static void __exit of_iommu_probe_exit(void)
 {
     unregister_kprobe(&kp);
-    pr_info("of_iommu_kprobe: unhooked of_iommu_configure\n");
+    pr_info("of_iommu_probe: kprobe removed\n");
 }
 
 module_init(of_iommu_probe_init);
 module_exit(of_iommu_probe_exit);
-```
 
----
-
-### Makefile
-
-```makefile
-obj-m += of_iommu_kprobe.o
-
-all:
-	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules
-
-clean:
-	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean
-```
-
-```bash
-make
-sudo insmod of_iommu_kprobe.ko
-# لمشاهدة المخرجات:
-sudo dmesg | grep of_iommu_kprobe
-# أو أثناء probe جهاز جديد:
-sudo bash -c 'echo "0000:01:00.0" > /sys/bus/pci/drivers/xhci_hcd/unbind'
-sudo bash -c 'echo "0000:01:00.0" > /sys/bus/pci/drivers/xhci_hcd/bind'
-sudo rmmod of_iommu_kprobe
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Kernel Student");
+MODULE_DESCRIPTION("kprobe on of_iommu_configure to trace IOMMU DT binding");
 ```
 
 ---
@@ -2437,28 +1978,73 @@ sudo rmmod of_iommu_kprobe
 #### الـ includes
 
 | Header | السبب |
-|---|---|
-| `linux/kprobes.h` | يعرّف `struct kprobe` وكل API الـ kprobe |
-| `linux/device.h` | يعرّف `struct device` و`dev_name()` |
-| `linux/of.h` | يعرّف `struct device_node` وحقل `full_name` |
-| `linux/module.h` | ضروري لكل وحدة kernel (`MODULE_*`, `module_init`) |
+|--------|-------|
+| `linux/kprobes.h` | يوفر `struct kprobe`، `register_kprobe`، `unregister_kprobe`، وتعريف `pre_handler` |
+| `linux/device.h` | عشان نستخدم `struct device` و `dev_name()` لطباعة اسم الـ device |
+| `linux/of.h` | عشان `struct device_node` و `of_node_full_name()` اللي بترجع المسار الكامل في الـ Device Tree |
+| `linux/printk.h` | الـ `pr_info` / `pr_err` للـ logging |
 
-#### الـ `handler_pre` — لماذا `pre` وليس `post`؟
+---
 
-نختار **pre_handler** لأننا نريد قراءة الـ arguments قبل أن تُعدّل الدالة أي منها؛ بعد الانتهاء قد يُعاد استخدام السجلات لأغراض أخرى. **`regs_get_kernel_argument()`** دالة مجردة تتعامل مع فروقات الـ ABI بين x86-64 وARM64 تلقائياً.
+#### الـ `pre_handler`
 
-#### **`dev_name(dev)`** و **`master_np->full_name`**
+الـ `pre_handler` بيتشغل **قبل** ما الـ CPU ينفذ أول instruction في `of_iommu_configure`. الـ kernel بيمرر `struct pt_regs *regs` اللي فيه حالة الـ registers لحظة الـ call — فبنقدر نجيب الـ arguments منه مباشرة حسب ABI.
 
-**`dev_name`** يُعيد النص المسجّل في sysfs للجهاز (مثل `"0000:01:00.0"` لجهاز PCI)، بينما **`full_name`** يُعيد المسار الكامل داخل Device Tree مثل `"/soc@0/iommu@15000000"` — وهذان معاً يُعطياننا صورة واضحة لأي جهاز يجري ربطه بأي IOMMU.
+بنطبع اسم الـ device، مسار الـ node في الـ Device Tree، والـ stream ID لو موجود — ده بيديك صورة واضحة لكل device بيتربط بـ IOMMU أثناء الـ boot أو الـ hotplug.
 
-#### حارس الـ `NULL`
+---
 
-**`of_iommu_configure()`** نفسها تتحقق من `master_np == NULL` وتُعيد `-ENODEV`، لذا يجب أن يتحقق handler الخاص بنا كذلك لتجنب kernel panic عند قراءة `full_name` من مؤشر null.
+#### الـ `kp.symbol_name`
 
-#### **`module_exit`** — لماذا `unregister_kprobe`؟
+بدل ما نحسب عنوان الفانكشن يدويًا، بنديه اسمها كـ string وبيحوله لعنوان تلقائيًا من الـ kallsyms — أسهل وأكثر portability بين kernel versions.
 
-إن لم نُلغ تسجيل الـ kprobe عند تفريغ الوحدة، يبقى مؤشر `handler_pre` مُسجَّلاً في جدول الكرنل بينما الكود الذي يُشير إليه قد أُزيل من الذاكرة — النتيجة **kernel panic** عند الاستدعاء التالي. **`unregister_kprobe()`** تُزيل الـ breakpoint وتضمن عدم وجود استدعاءات جارية قبل العودة.
+---
 
-#### لماذا `of_iommu_configure` تحديداً؟
+#### الـ `module_init` / `module_exit`
 
-هي الـ **entry point** الوحيدة الـ exported في هذا الـ header، وتُستدعى من `drivers/base/dd.c` أثناء كل عملية probe لجهاز يملك `iommus` property في Device Tree — أي أن hooking هذه الدالة يُعطي رؤية شاملة لكل أجهزة النظام التي تحتاج IOMMU بدون أي تعديل في كود الكرنل.
+- **`register_kprobe`** في الـ init بيزرع breakpoint في كود الـ kernel عند بداية الفانكشن المستهدفة.
+- **`unregister_kprobe`** في الـ exit ضروري جدًا: لو ما ازلتش الـ breakpoint قبل ما الـ module يتـ unload، الـ kernel هيحاول ينفذ الـ handler في ذاكرة مش موجودة تاني وهيحصل kernel panic.
+
+---
+
+### Makefile لبناء الـ module
+
+```makefile
+obj-m += of_iommu_probe.o
+
+KDIR ?= /lib/modules/$(shell uname -r)/build
+
+all:
+	make -C $(KDIR) M=$(PWD) modules
+
+clean:
+	make -C $(KDIR) M=$(PWD) clean
+```
+
+---
+
+### تشغيل وملاحظة الـ output
+
+```bash
+# بناء الـ module
+make
+
+# تحميله
+sudo insmod of_iommu_probe.ko
+
+# متابعة الـ log (أفضل وقت هو أثناء hotplug لـ device)
+sudo dmesg -w | grep of_iommu
+
+# إزالته
+sudo rmmod of_iommu_probe
+```
+
+مثال على output متوقع أثناء إضافة device:
+
+```
+of_iommu_probe: hooked of_iommu_configure at ffffffffc0a12340
+of_iommu_configure: dev=0000:01:00.0 node=/smmu@fd800000 id=0x1a
+of_iommu_probe: kprobe removed
+```
+
+ده بيوضح إن الـ device `0000:01:00.0` (PCIe device) اتربط بالـ SMMU اللي موجود في عنوان `0xfd800000` في الـ Device Tree بـ stream ID قيمته `0x1a`.
