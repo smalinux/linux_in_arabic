@@ -813,6 +813,21 @@ F:	include/uapi/linux/mmc/
 - [ ] [sd.h](include/linux/mmc/sd.h.md)
 - [ ] [sdio.h](include/linux/mmc/sdio.h.md) -- [sdio_ids.h](include/linux/mmc/sdio_ids.h.md) -- [sdio_func.h](include/linux/mmc/sdio_func.h.md) -- [sd_uhs2.h](include/linux/mmc/sd_uhs2.h.md) -- [slot-gpio.h](include/linux/mmc/slot-gpio.h.md)
 
+## `MULTIPLEXER SUBSYSTEM`
+
+```
+M:	Peter Rosin <peda@axentia.se>
+S:	Odd Fixes
+F:	Documentation/ABI/testing/sysfs-class-mux*
+F:	Documentation/devicetree/bindings/mux/
+F:	drivers/mux/
+F:	include/dt-bindings/mux/
+F:	include/linux/mux/
+```
+- [ ] this related to pinctrl subsystem?
+- [ ] [consumer.h](include/linux/mux/consumer.h.md)
+- [ ] [driver.h](include/linux/mux/driver.h.md)
+
 ## `SPI NOR SUBSYSTEM`
 
 ```
