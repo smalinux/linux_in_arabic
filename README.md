@@ -76,7 +76,6 @@ T:	git git://git.kernel.org/pub/scm/linux/kernel/git/brgl/linux.git
 F:	Documentation/admin-guide/gpio/
 	SMA: https://docs.kernel.org/admin-guide/gpio/
 F:	Documentation/devicetree/bindings/gpio/
-	SMA: Not exist
 F:	Documentation/driver-api/gpio/
 	SMA: https://docs.kernel.org/driver-api/gpio/
 F:	drivers/gpio/
